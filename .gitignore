@@ -1,0 +1,129 @@
+# =========================
+
+# Node.js / Express / Backend
+
+# =========================
+
+**/node_modules/
+**/generated/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Environment variables
+
+.env
+.env.*
+!.env.example
+
+# Logs
+
+logs/
+*.log
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# =========================
+
+# React / Frontend
+
+# =========================
+
+build/
+dist/
+.cache/
+.next/
+out/
+coverage/
+
+# Vite / CRA specific
+
+vite.svg
+
+# =========================
+
+# MongoDB
+
+# =========================
+
+data/
+*.db
+
+# =========================
+
+# Prisma
+
+# =========================
+
+prisma/dev.db
+prisma/dev.db-journal
+prisma/*.db
+prisma/*.db-journal
+
+# Prisma generated files
+
+node_modules/.prisma
+.prisma/client
+
+# =========================
+
+# Uploads / Static files
+
+# =========================
+
+uploads/
+public/uploads/
+
+# =========================
+
+# IDE / Editor files
+
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+
+# Testing
+
+# =========================
+
+coverage/
+jest.config.js
+
+# =========================
+
+# Misc
+
+# =========================
+
+*.tgz
+*.bak
+*.tmp
+
+# =========================
+
+# Optional: Docker
+
+# =========================
+
+docker-compose.override.yml
+
+# =========================
+
+# Optional: Mac / Linux temp
+
+# =========================
+
+*.pid
+*.seed

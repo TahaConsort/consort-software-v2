@@ -1,0 +1,9 @@
+@docs/CRM_MASTER.md  check this my SOT (source of truth file) now first listen my full workflow of my software 
+
+First is an admin sector like CEO, HR, CFO, Project director can manage employees and manage employees details they able to add emplye with there role and department and the able to edit there ddetails and delete the employee from the database record ok 
+
+Second there is dashboard  for every employee like BDO/ASM only sees there shipments and add qeuries and manage the leads and also visit plans (where the visits to meet convince clients)
+
+Third there is dashboard for customer to see there placed or confirmed or approved shipments track the shipment with the 14 stagesi provide above in intro 
+
+Fourth same employee dashboard but changing role changes the views now opertion ops customs operations see the active or confirm and placed shipments according to the 14 steps of shipment auto task assigned to related field employee these task and the steps are depend on user picked services from us if it get local transport service there is not role for customs manager or complaince manager and the steps  reduced and only standard local shipments steps ok and task also auto assigned and the employee which are assigned is required to submit or confirm the task to manage status of shipment and if user or buyer chooses more services like port or sea frieght and also more other according to user selected services shipment will manages and tasks are assigned ok 

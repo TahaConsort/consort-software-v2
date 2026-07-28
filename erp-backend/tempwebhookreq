@@ -1,0 +1,3 @@
+curl -X POST http://localhost:5000/api/webhooks/bank/lc \
+  -H "x-webhook-secret: $LC_WEBHOOK_SECRET" -H "Content-Type: application/json" \
+  -d '{"lcNumber":"LC12345","bankName":"HBL","applicantName":"Acme Importers","originPort":"AEJEA","destinationPort":"PKKHI","amount":50000,"currency":"USD"}'

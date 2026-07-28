@@ -1,0 +1,1415 @@
+// =====================================================================
+// Consort CRM — Prisma schema
+// Source of truth: docs/DATABASE.md (subordinate to DECISIONS.md /
+// BUSINESS_RULES.md). Every model/column serves a cited rule or ADR.
+//
+// NOTE: constraints Prisma cannot express (partial unique indexes for
+// INV-05/07/08, services non-empty CHECKs, one-target CHECKs, the
+// ADR-038 hold-pair CHECK, lower(email) unique) are applied in a raw
+// SQL migration — see docs/DATABASE.md §5.
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ================= ENUMS =================
+
+// Management tier (ceo..gm) holds identical permissions (ADR-044)
+enum UserRole {
+  ceo
+  project_director
+  director
+  cfo
+  gm
+  hr
+  asm
+  bdo
+  ops_manager
+  ops_exec
+  compliance_manager
+  compliance_exec
+  transport_manager
+  transport_exec
+  accounts
+  customer
+}
+
+enum DepartmentCode {
+  management
+  sales
+  operations
+  compliance
+  finance
+  hr
+  transport
+}
+
+// ADR-042 — immutable after creation (INV-13)
+enum LeadSource {
+  bdo
+  bank_lc
+  direct
+}
+
+enum LeadStatus {
+  new
+  contacted
+  qualified
+  converted
+  lost
+}
+
+enum OutreachType {
+  call
+  email
+  meeting
+  whatsapp
+  linkedin
+  site_visit
+}
+
+enum OutreachOutcome {
+  positive
+  neutral
+  negative
+  no_response
+}
+
+// ADR-043, WORKFLOW §2a
+enum VisitPlanStatus {
+  planned
+  completed
+  cancelled
+  no_show
+}
+
+enum QueryStatus {
+  open
+  quoted
+  revision_requested
+  approved
+  shipment_created
+  rejected
+  cancelled
+  expired
+}
+
+enum RaisedVia {
+  bdo
+  portal
+}
+
+// Revisions are new rows, not a status (ADR-019)
+enum QuotationStatus {
+  draft
+  sent
+  approved
+  rejected
+  expired
+}
+
+enum ApprovalChannel {
+  customer_portal
+  asm
+  management
+}
+
+// ADR-041 — the Phase-1 catalog, closed
+enum ServiceCode {
+  local_transport
+  customs_clearance
+  sea_freight
+  port_handling
+  lc_finance
+  destination_services // destination agent: DO + gate pass, destination pickup, delivery, empty return
+}
+
+// The three packages the business actually sells. Sits ABOVE ServiceCode: picking a
+// package presets `services[]` (utils/servicePackage.js), so everything already keyed
+// on ServiceCode — charge types, rate cards, P&L — is untouched. Needed as its own
+// dimension because `local_transport` and `loading_point_to_port` share the
+// `local_transport` service code yet require different step paths.
+enum ServicePackage {
+  local_transport // #1 inland trucking only — no port, no CRO, no customs, no trade-doc pack
+  loading_point_to_port // #2 factory/loading point → port gate
+  international // #3 full export path: CRO, customs, terminal, ocean freight, BL, telex
+}
+
+// Who obtains the Container Release Order. The sub-option on package #2; forced to
+// `consort` on #3 and `not_applicable` on #1 (CHECK in prisma/sql/constraints.sql).
+enum CroHandling {
+  not_applicable // package #1 — no container, no CRO
+  customer // customer supplies the CRO; we record their copy
+  consort // we apply to the shipping line and obtain the CRO
+}
+
+// ADR-003 canonical codes, in canonical order. Expanded catalog (freight-forwarding OTC upgrade);
+// `container_allocated` and `destination_inspection` are RETIRED from the seeded catalog but kept
+// here so historical rows remain valid.
+enum OtdStepCode {
+  order_lock // canonical 1  — derives order_confirmed
+  order_confirmed // canonical 2  — derives order_confirmed
+  lc_generated // canonical 3
+  container_allocated // RETIRED — superseded by vessel_booked
+  cro_released // canonical 5
+  cargo_pickup // canonical 7
+  customs_entry // canonical 9
+  inspected_sealed // canonical 10
+  port_handover // canonical 11
+  bol_issued // canonical 12
+  bol_submitted // canonical 13
+  telex_released // canonical 14
+  destination_inspection // RETIRED — superseded by destination_pickup / destination_do
+  delivered // canonical 17
+  vessel_booked // canonical 4
+  empty_container_pickup // canonical 6
+  inland_transit // canonical 8
+  destination_do // canonical 15
+  destination_pickup // canonical 16
+  empty_return // canonical 18 — derives status `delivered`
+  // Service-package catalog (canonical numbers re-spaced to multiples of 10; see seed.js).
+  // The pure-local trucking leg — no container, no port, no trade docs.
+  transporter_assigned // canonical 22 — package local_transport
+  vehicle_dispatched // canonical 24 — package local_transport
+  goods_loaded // canonical 26 — package local_transport
+  in_transit // canonical 28 — package local_transport
+  local_delivered // canonical 172 — package local_transport terminal; derives status `delivered`
+  cro_received_from_customer // canonical 50 — the croHandledBy=customer variant of cro_released
+  port_job_completed // canonical 175 — package loading_point_to_port terminal; derives `delivered`
+  // canonical 95 — ONE customs step carrying filing, duty, examination and seal as
+  // sub-actions (ADR-048). Supersedes customs_entry + inspected_sealed, which stay in
+  // this enum (and as `active: false` template rows) so historical shipments still resolve.
+  customs_clearance
+}
+
+// A step's sub-action is either ticked by its owner or satisfied by evidence.
+// `document` actions are DERIVED, never written — satisfaction is the presence of a
+// live document of that type on the shipment, exactly like RULE-SH-06 (ADR-048).
+enum StepActionKind {
+  manual
+  document
+
+  @@map("step_action_kind")
+}
+
+// reopen returns a step to pending (RULE-SH-05)
+enum OtdStepStatus {
+  pending
+  done
+}
+
+// Progressive values; DERIVED, never written by an endpoint (ADR-014, INV-02).
+// `container_allocated` / `destination_inspection` retained for historical rows (retired from the seed).
+enum ShipmentStatus {
+  booking
+  order_confirmed
+  lc_generated
+  container_allocated
+  vessel_booked
+  cro_released
+  transporter_assigned
+  vehicle_dispatched
+  goods_loaded
+  in_transit
+  empty_container_pickup
+  cargo_pickup
+  inland_transit
+  customs_entry
+  inspected_sealed
+  port_handover
+  bol_issued
+  bol_submitted
+  telex_released
+  destination_inspection
+  destination_do
+  destination_pickup
+  delivered
+  settled
+  closed
+}
+
+// Orthogonal to progress (RULE-SH-08)
+enum ExceptionState {
+  none
+  on_hold
+  cancelled
+}
+
+enum ExceptionType {
+  customs_hold
+  payment_hold
+  documentation_hold
+  weather_hold
+  customer_request
+  other
+}
+
+enum OtcMilestoneType {
+  invoice_issued
+  payment_received
+  credit_line_released
+  bol_surrendered
+  settlement_complete
+}
+
+enum OtcMilestoneStatus {
+  pending
+  done
+}
+
+enum InvoiceStatus {
+  draft
+  issued
+  part_paid
+  paid
+  void
+}
+
+enum PaymentMethod {
+  bank_transfer
+  cheque
+  cash
+  lc_settlement
+  other
+}
+
+enum TaskStatus {
+  queued
+  open
+  in_progress
+  done
+  cancelled
+  on_hold
+}
+
+enum TaskOrigin {
+  otd_step
+  query_precheck
+  ad_hoc
+  system
+}
+
+enum DocumentOwnerType {
+  shipment
+  quotation
+  query
+  lead
+  customer
+  task
+  chat_message
+}
+
+enum ScanStatus {
+  pending
+  clean
+  infected
+}
+
+enum ChannelType {
+  shipment
+  department
+  general
+  direct
+}
+
+// whatsapp is a Phase-1.5 stub
+enum NotificationChannel {
+  in_app
+  email
+  whatsapp
+}
+
+enum DeliveryStatus {
+  queued
+  sent
+  failed
+}
+
+enum LoginOutcome {
+  success
+  invalid_credentials
+  locked
+  inactive
+}
+
+// ── Intake channels & public storefront (CRM_MASTER §5.20/§5.21) ──
+
+// Public Inquiry lifecycle (WORKFLOW §2b) — the *direct* channel intake
+enum InquiryStatus {
+  new
+  reviewing
+  converted
+  spam
+  closed
+}
+
+// Bank LC Referral lifecycle (WORKFLOW §2c) — the *bank_lc* channel intake
+enum BankLcStatus {
+  received
+  reviewing
+  converted
+  rejected
+}
+
+// Load board posting lifecycle (CRM_MASTER §5.20)
+enum LoadBoardStatus {
+  open
+  booked
+  expired
+}
+
+enum TransportMode {
+  sea
+  road
+  air
+  rail
+}
+
+// ── Vendors & job-charge ledger (freight-forwarding OTC upgrade) ──
+
+enum VendorType {
+  transporter
+  shipping_line
+  container_yard
+  customs_agent
+  destination_agent
+  port_terminal
+  other
+}
+
+enum ChargeDirection {
+  receivable // money IN — customer side
+  payable // money OUT — vendor side
+}
+
+enum ChargeStatus {
+  estimated // seeded from the quotation cost sheet
+  confirmed // actual amount committed
+  invoiced // on an issued invoice
+  settled // that invoice fully paid
+  cancelled // will not occur
+}
+
+// ================= IDENTITY & ORGANISATION =================
+
+model Department {
+  id         String         @id @default(uuid())
+  code       DepartmentCode @unique
+  name       String
+  headUserId String?        @map("head_user_id") // departments.head_user_id (CRM_MASTER §4)
+  head       User?          @relation("DepartmentHead", fields: [headUserId], references: [id])
+  employees  Employee[]
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@map("departments")
+}
+
+model Employee {
+  id           String     @id @default(uuid())
+  firstName    String     @map("first_name")
+  lastName     String     @map("last_name")
+  email        String     @unique // work email, may differ from login
+  phone        String?
+  cnic         String?    @unique // national ID
+  designation  String?
+  departmentId String     @map("department_id") // INV-01 — exactly one department
+  department   Department @relation(fields: [departmentId], references: [id])
+  managerId    String?    @map("manager_id") // cycle-checked in service (RULE-EMP-03)
+  manager      Employee?  @relation("Reporting", fields: [managerId], references: [id])
+  reports      Employee[] @relation("Reporting")
+  joiningDate  DateTime?  @map("joining_date") @db.Date
+  exitDate     DateTime?  @map("exit_date") @db.Date // set on deactivation (ADR-045)
+  isActive     Boolean    @default(true) @map("is_active")
+  user         User? // login is optional (CRM_MASTER §5.2)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([departmentId])
+  @@index([managerId])
+  @@map("employees")
+}
+
+model User {
+  id                 String       @id @default(uuid())
+  email              String       @unique // + raw unique index on lower(email) — DATABASE.md §5
+  passwordHash       String?      @map("password_hash") // null until activation completes
+  role               UserRole // PRIMARY role — display + customer detection; always present in `roles`
+  roles              UserRole[]   @default([]) // an employee may hold several internal roles; permissions are the union
+  employeeId         String?      @unique @map("employee_id") // internal users
+  employee           Employee?    @relation(fields: [employeeId], references: [id])
+  customerId         String?      @map("customer_id") // portal users (role = customer)
+  customer           Customer?    @relation(fields: [customerId], references: [id])
+  tokenVersion       Int          @default(0) @map("token_version") // global invalidation (ADR-009)
+  isActive           Boolean      @default(true) @map("is_active")
+  failedLoginCount   Int          @default(0) @map("failed_login_count")
+  lockedUntil        DateTime?    @map("locked_until") // account lockout (ADR-033)
+  lastLoginAt        DateTime?    @map("last_login_at")
+  departmentsHeaded  Department[] @relation("DepartmentHead") // back-relation for departments.head_user_id
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  @@index([customerId])
+  @@map("users")
+}
+
+model RefreshToken {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  tokenHash    String    @unique @map("token_hash") // hashed at rest (ADR-009)
+  familyId     String    @map("family_id") // reuse detection revokes the family (EDGE-A-02)
+  deviceLabel  String?   @map("device_label")
+  ip           String?
+  userAgent    String?   @map("user_agent")
+  expiresAt    DateTime  @map("expires_at")
+  revokedAt    DateTime? @map("revoked_at")
+  replacedById String?   @map("replaced_by_id")
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model ActivationToken {
+  id        String    @id @default(uuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash") // hashed single-use (RULE-EMP-01)
+  purpose   String // 'activation' | 'password_reset'
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@map("activation_tokens")
+}
+
+model LoginActivity {
+  id             String       @id @default(uuid())
+  userId         String?      @map("user_id") // null when the email did not resolve
+  emailAttempted String       @map("email_attempted")
+  outcome        LoginOutcome
+  ip             String?
+  userAgent      String?      @map("user_agent")
+  createdAt      DateTime     @default(now())
+
+  @@index([userId, createdAt])
+  @@map("login_activities")
+}
+
+// ================= COMPANY, CONTACT, CUSTOMER =================
+
+model Company {
+  id             String    @id @default(uuid())
+  name           String
+  normalizedName String    @map("normalized_name") // lower/trimmed — duplicate detection (EDGE-LD-01)
+  country        String?
+  city           String?
+  address        String?
+  website        String?
+  industry       String?
+  contacts       Contact[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([normalizedName])
+  @@map("companies")
+}
+
+model Contact {
+  id        String   @id @default(uuid())
+  companyId String   @map("company_id")
+  company   Company  @relation(fields: [companyId], references: [id])
+  name      String
+  email     String?
+  phone     String?
+  position  String?
+  isPrimary Boolean  @default(false) @map("is_primary") // partial unique index — INV-05, DATABASE.md §5
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId])
+  @@map("contacts")
+}
+
+model Customer {
+  id                  String     @id @default(uuid())
+  referenceNo         String     @unique @map("reference_no") // CST-YYYY-NNNNN (INV-12)
+  companyId           String     @unique @map("company_id") // 1:1 (INV-06)
+  source              LeadSource // carried from the lead (ADR-042)
+  assignedBdoId       String?    @map("assigned_bdo_id") // users.id
+  creditLimit         Decimal?   @map("credit_limit") @db.Decimal(14, 2)
+  creditTermsDays     Int?       @map("credit_terms_days")
+  convertedFromLeadId String?    @unique @map("converted_from_lead_id")
+  isActive            Boolean    @default(true) @map("is_active")
+  users               User[] // portal users (back-relation for users.customer_id)
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+
+  @@index([assignedBdoId])
+  @@map("customers")
+}
+
+// ================= LEADS, OUTREACH, VISIT PLANS =================
+
+model Lead {
+  id                    String              @id @default(uuid())
+  referenceNo           String              @unique @map("reference_no") // LED-YYYY-NNNNN
+  companyId             String              @map("company_id") // created once, at lead time (RULE-LD-01)
+  contactId             String              @map("contact_id")
+  source                LeadSource // immutable (INV-13)
+  status                LeadStatus          @default(new)
+  ownerId               String              @map("owner_id") // owning BDO — users.id
+  lostReason            String?             @map("lost_reason") // mandatory when lost (RULE-LD-06)
+  convertedAt           DateTime?           @map("converted_at")
+  convertedToCustomerId String?             @unique @map("converted_to_customer_id")
+  createdById           String              @map("created_by_id")
+  statusHistory         LeadStatusHistory[]
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([ownerId, status])
+  @@index([companyId])
+  @@map("leads")
+}
+
+model LeadStatusHistory {
+  id         String      @id @default(uuid())
+  leadId     String      @map("lead_id")
+  lead       Lead        @relation(fields: [leadId], references: [id])
+  fromStatus LeadStatus? @map("from_status")
+  toStatus   LeadStatus  @map("to_status")
+  actorId    String      @map("actor_id")
+  notes      String?
+  createdAt  DateTime    @default(now())
+
+  @@index([leadId, createdAt])
+  @@map("lead_status_history")
+}
+
+model Outreach {
+  id          String          @id @default(uuid())
+  leadId      String?         @map("lead_id") // exactly one target set — CHECK, DATABASE.md §5
+  customerId  String?         @map("customer_id")
+  type        OutreachType
+  outcome     OutreachOutcome
+  notes       String?
+  durationMin Int?            @map("duration_min")
+  followUpAt  DateTime?       @map("follow_up_at") // follow-ups-due dashboard
+  visitPlanId String?         @unique @map("visit_plan_id") // set when created by a completed visit (RULE-VP-02)
+  actorId     String          @map("actor_id")
+  occurredAt  DateTime        @map("occurred_at")
+  createdAt   DateTime        @default(now())
+
+  @@index([leadId])
+  @@index([customerId])
+  @@index([actorId, followUpAt])
+  @@map("outreach")
+}
+
+model VisitPlan {
+  id                String          @id @default(uuid()) // ADR-043
+  leadId            String?         @map("lead_id") // exactly one target set — CHECK, DATABASE.md §5
+  customerId        String?         @map("customer_id")
+  assignedToId      String          @map("assigned_to_id") // BDO/ASM — users.id
+  purpose           String
+  plannedAt         DateTime        @map("planned_at")
+  location          String
+  status            VisitPlanStatus @default(planned)
+  outcome           String? // required on completed (RULE-VP-02)
+  outcomeNotes      String?         @map("outcome_notes")
+  cancelReason      String?         @map("cancel_reason")
+  rescheduledFromId String?         @map("rescheduled_from_id") // prior plan on reschedule
+  createdById       String          @map("created_by_id")
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([assignedToId, status, plannedAt]) // upcoming-visits calendar
+  @@index([leadId])
+  @@index([customerId])
+  @@map("visit_plans")
+}
+
+// ================= QUERY → QUOTATION =================
+
+model Query {
+  id                String        @id @default(uuid())
+  referenceNo       String        @unique @map("reference_no") // QRY-YYYY-NNNNN
+  customerId        String        @map("customer_id")
+  raisedById        String        @map("raised_by_id") // BDO or portal user
+  raisedVia         RaisedVia     @map("raised_via")
+  status            QueryStatus   @default(open)
+  services          ServiceCode[] // RULE-QRY-05 — non-empty CHECK, DATABASE.md §5
+  servicePackage    ServicePackage? @map("service_package") // what the customer picked; presets `services`
+  croHandledBy      CroHandling     @default(not_applicable) @map("cro_handled_by") // package #2 sub-option
+  originPort        String?       @map("origin_port") // validated against ports; null for local_transport
+  destinationPort   String?       @map("destination_port")
+  // Free-text door addresses for local_transport, where a UN/LOCODE port is the wrong shape.
+  pickupAddress     String?       @map("pickup_address")
+  deliveryAddress   String?       @map("delivery_address")
+  containerTypeCode String?       @map("container_type_code")
+  incoterm          String?
+  cargoDescription  String?       @map("cargo_description")
+  weightKg          Decimal?      @map("weight_kg") @db.Decimal(12, 2)
+  isHazardous       Boolean       @default(false) @map("is_hazardous") // triggers pre-check (RULE-QRY-02)
+  isReefer          Boolean       @default(false) @map("is_reefer")
+  cancelReason      String?       @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
+  quotations        Quotation[]
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@index([customerId, status])
+  @@index([status, createdAt]) // staleness sweep (RULE-QRY-04)
+  @@map("queries")
+}
+
+model Quotation {
+  id                String                @id @default(uuid())
+  referenceNo       String                @unique @map("reference_no") // QT-YYYY-NNNNN
+  queryId           String                @map("query_id")
+  query             Query                 @relation(fields: [queryId], references: [id])
+  version           Int                   @default(1) // revision = new row (ADR-019)
+  parentQuotationId String?               @map("parent_quotation_id")
+  status            QuotationStatus       @default(draft) // partial uniques INV-07/08, DATABASE.md §5
+  services          ServiceCode[] // snapshot from the query
+  servicePackage    ServicePackage?       @map("service_package") // snapshot from the query
+  croHandledBy      CroHandling           @default(not_applicable) @map("cro_handled_by") // snapshot from the query
+  currency          String                @default("USD") @db.Char(3)
+  fxRate            Decimal?              @map("fx_rate") @db.Decimal(12, 6)
+  totalAmount       Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
+  validityDate      DateTime?             @map("validity_date") // auto-expiry (RULE-QT-06)
+  createdById       String                @map("created_by_id") // ops_exec / ops_manager
+  sentById          String?               @map("sent_by_id") // ops_manager only (RULE-QT-01)
+  sentAt            DateTime?             @map("sent_at")
+  decidedById       String?               @map("decided_by_id") // never the owning BDO (RULE-QT-03)
+  decidedAt         DateTime?             @map("decided_at")
+  approvalChannel   ApprovalChannel?      @map("approval_channel")
+  rejectionReason   String?               @map("rejection_reason") // required on reject (RULE-QT-04)
+  rowVersion        Int                   @default(1) @map("row_version") // If-Match (RULE-QT-08)
+  chargeLines       QuotationChargeLine[]
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([queryId, status])
+  @@index([status, validityDate]) // nightly expiry job
+  @@map("quotations")
+}
+
+model QuotationChargeLine {
+  id           String       @id @default(uuid())
+  quotationId  String       @map("quotation_id")
+  quotation    Quotation    @relation(fields: [quotationId], references: [id])
+  service      ServiceCode? // which service this charge belongs to
+  chargeCode   String?      @map("charge_code") // ChargeType.code — drives charge seeding + step mapping
+  description  String
+  quantity     Decimal      @default(1) @db.Decimal(12, 2)
+  unitPrice    Decimal      @map("unit_price") @db.Decimal(14, 2)
+  amount       Decimal      @db.Decimal(14, 2) // computed server-side (sell side)
+  costAmount   Decimal?     @map("cost_amount") @db.Decimal(14, 2) // buy side — internal only
+  costVendorId String?      @map("cost_vendor_id") // planned vendor hint (internal only)
+  sortOrder    Int          @default(0) @map("sort_order")
+
+  @@index([quotationId])
+  @@map("quotation_charge_lines")
+}
+
+// ================= SHIPMENT, OTD, OTC, EXCEPTIONS =================
+
+// DB form of WORKFLOW §4a.1 — seeded, read by the composition logic at approval time
+model OtdStepTemplate {
+  id               String         @id @default(uuid())
+  canonicalNo      Int            @unique @map("canonical_no")
+  stepCode         OtdStepCode    @unique @map("step_code")
+  title            String
+  ownerDepartment  DepartmentCode @map("owner_department") // ADR-003/039 ownership
+  always           Boolean        @default(false) // steps 1–2 and 14 (RULE-SVC-01)
+  services         ServiceCode[] // included when selection intersects (ADR-040)
+  // Gates are evaluated package → CRO mode → service, each EMPTY-MEANS-DON'T-GATE.
+  // `always: true` plus a non-empty `packages` therefore reads "always, on these packages".
+  // A shipment with servicePackage = null (composed before packages existed) skips the
+  // package gate entirely, which is what makes legacy paths reproduce byte-for-byte.
+  packages         ServicePackage[] // empty = applies to any package
+  croModes         CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
+  requiredDocTypes String[]       @map("required_doc_types") // RULE-SH-06
+  dueOffsetHours   Int            @default(48) @map("due_offset_hours") // seeds the step's TaskTemplate SLA
+  derivedStatus    ShipmentStatus @map("derived_status") // what completing this step derives
+  // Superseded steps are kept, not deleted: composition skips them, but
+  // missingRequiredDocs/recomputeStatus still resolve them BY STEP CODE for shipments
+  // composed while they were live (ADR-048).
+  active           Boolean        @default(true)
+  actions          OtdStepActionTemplate[]
+
+  @@map("otd_step_templates")
+}
+
+/**
+ * The sub-action catalog (ADR-048) — the checklist that hangs under one main step.
+ *
+ * Gated exactly like the step catalog (package → CRO mode → service, each
+ * empty-means-don't-gate), so one `order_confirmed` step can carry the seven-document
+ * international pack and the shorter loading-point-to-port pack without becoming two
+ * steps. This table is the SINGLE source of the step→sub-action mapping (ADR-001).
+ */
+model OtdStepActionTemplate {
+  id         String           @id @default(uuid())
+  stepCode   OtdStepCode      @map("step_code")
+  step       OtdStepTemplate  @relation(fields: [stepCode], references: [stepCode], onDelete: Cascade)
+  actionCode String           @map("action_code") // unique within the step
+  title      String
+  kind       StepActionKind   @default(manual)
+  docType    String?          @map("doc_type") // required when kind = document
+  sortOrder  Int              @map("sort_order")
+  required   Boolean          @default(true) // false = advisory; does not gate completion
+  packages   ServicePackage[] // empty = applies to any package
+  croModes   CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
+  services   ServiceCode[] // empty = applies whatever the services
+
+  @@unique([stepCode, actionCode])
+  @@index([stepCode])
+  @@map("otd_step_action_templates")
+}
+
+/**
+ * A sub-action instance on one shipment's step. Rows exist ONLY for the sub-actions
+ * the composition selected, mirroring INV-04 for steps.
+ *
+ * `status` is meaningful for `manual` actions only. A `document` action's satisfaction
+ * is derived from the shipment's documents at read time and folded into the RULE-SH-06
+ * gate — it is never written here, so it can never drift from the files on record.
+ */
+model OtdStepAction {
+  id            String         @id @default(uuid())
+  otdStepId     String         @map("otd_step_id")
+  otdStep       OtdStep        @relation(fields: [otdStepId], references: [id], onDelete: Cascade)
+  actionCode    String         @map("action_code")
+  title         String
+  kind          StepActionKind @default(manual)
+  docType       String?        @map("doc_type")
+  sortOrder     Int            @map("sort_order")
+  required      Boolean        @default(true)
+  status        OtdStepStatus  @default(pending) // `manual` only — see note above
+  completedById String?        @map("completed_by_id")
+  completedAt   DateTime?      @map("completed_at")
+  notes         String?
+
+  @@unique([otdStepId, actionCode])
+  @@index([otdStepId])
+  @@map("otd_step_actions")
+}
+
+model Shipment {
+  id               String                  @id @default(uuid())
+  referenceNo      String                  @unique @map("reference_no") // SHIP-YYYY-NNNNN
+  quotationId      String                  @unique @map("quotation_id") // INV-03 — exactly one approved quote
+  queryId          String                  @unique @map("query_id")
+  customerId       String                  @map("customer_id")
+  services         ServiceCode[] // FROZEN at approval (INV-14) — non-empty CHECK, DATABASE.md §5
+  servicePackage   ServicePackage?         @map("service_package") // FROZEN at approval; null = pre-package shipment
+  croHandledBy     CroHandling             @default(not_applicable) @map("cro_handled_by") // FROZEN at approval
+  status           ShipmentStatus          @default(booking) // DERIVED (ADR-014, INV-02)
+  exceptionState   ExceptionState          @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
+  totalHoldMinutes Int                     @default(0) @map("total_hold_minutes")
+  etd              DateTime?
+  eta              DateTime? // ETA-breach sweep
+  originPort       String?                 @map("origin_port")
+  destinationPort  String?                 @map("destination_port")
+  // Free-text door addresses — the vocabulary for local_transport, where a UN/LOCODE
+  // port is the wrong shape. Snapshotted from the Query so transport knows where to drive.
+  pickupAddress    String?                 @map("pickup_address")
+  deliveryAddress  String?                 @map("delivery_address")
+  incoterm         String?
+  cancelReason     String?                 @map("cancel_reason") // RULE-SH-11
+  closedById       String?                 @map("closed_by_id") // ops_manager / Management (RULE-SH-12)
+  closedAt         DateTime?               @map("closed_at")
+  rowVersion       Int                     @default(1) @map("row_version")
+  // ── Phase 2/3 — present now, null until then (CRM_MASTER §2/§10) ──
+  vehicleId        String?                 @map("vehicle_id") // TMS
+  gpsDeviceId      String?                 @map("gps_device_id") // telematics
+  loadBoardRef     String?                 @map("load_board_ref") // load board
+  lcNumber         String?                 @map("lc_number") // bank/LC handshake
+  bankRef          String?                 @map("bank_ref")
+  escrowRef        String?                 @map("escrow_ref")
+  otdSteps         OtdStep[]
+  otcMilestones    OtcMilestone[]
+  exceptions       ShipmentException[]
+  statusHistory    ShipmentStatusHistory[]
+  invoices         Invoice[]
+  charges          ShipmentCharge[]
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@index([customerId, status])
+  @@index([status, exceptionState])
+  @@index([eta])
+  @@map("shipments")
+}
+
+model OtdStep {
+  id              String         @id @default(uuid())
+  shipmentId      String         @map("shipment_id")
+  shipment        Shipment       @relation(fields: [shipmentId], references: [id])
+  canonicalNo     Int            @map("canonical_no") // 1..14 — reporting key (RULE-SVC-05)
+  displayNo       Int            @map("display_no") // 1..N of the composed path
+  stepCode        OtdStepCode    @map("step_code")
+  ownerDepartment DepartmentCode @map("owner_department") // completion guard (RULE-SH-04)
+  status          OtdStepStatus  @default(pending)
+  completedById   String?        @map("completed_by_id")
+  completedAt     DateTime?      @map("completed_at")
+  forced          Boolean        @default(false) // out-of-order override (RULE-SH-03)
+  forceReason     String?        @map("force_reason")
+  reopenCount     Int            @default(0) @map("reopen_count") // RULE-SH-05
+  notes           String?        // free-text handover notes for the step owner
+  formData        Json?          @map("form_data") // structured per-step capture (route/party/etc.)
+  charges         ShipmentCharge[]
+  actions         OtdStepAction[] // the step's sub-action checklist (ADR-048)
+
+  @@unique([shipmentId, canonicalNo]) // rows exist ONLY for the composed path (INV-04)
+  @@unique([shipmentId, stepCode])
+  @@index([shipmentId, status])
+  @@map("otd_steps")
+}
+
+model ShipmentStatusHistory {
+  id         String          @id @default(uuid())
+  shipmentId String          @map("shipment_id")
+  shipment   Shipment        @relation(fields: [shipmentId], references: [id])
+  fromStatus ShipmentStatus? @map("from_status")
+  toStatus   ShipmentStatus  @map("to_status")
+  actorId    String?         @map("actor_id") // null for system recompute
+  createdAt  DateTime        @default(now())
+
+  @@index([shipmentId, createdAt])
+  @@map("shipment_status_history")
+}
+
+model ShipmentException {
+  id              String        @id @default(uuid())
+  shipmentId      String        @map("shipment_id")
+  shipment        Shipment      @relation(fields: [shipmentId], references: [id])
+  type            ExceptionType
+  reason          String
+  raisedById      String        @map("raised_by_id")
+  raisedAt        DateTime      @default(now()) @map("raised_at")
+  resolvedById    String?       @map("resolved_by_id")
+  resolvedAt      DateTime?     @map("resolved_at")
+  resolutionNotes String?       @map("resolution_notes")
+  holdMinutes     Int?          @map("hold_minutes") // elapsed, computed on resume (RULE-SH-10)
+
+  @@index([shipmentId])
+  @@map("shipment_exceptions")
+}
+
+model OtcMilestone {
+  id            String             @id @default(uuid())
+  shipmentId    String             @map("shipment_id")
+  shipment      Shipment           @relation(fields: [shipmentId], references: [id])
+  milestoneNo   Int                @map("milestone_no") // 1..5, seeded at approval (RULE-QT-07)
+  type          OtcMilestoneType
+  status        OtcMilestoneStatus @default(pending)
+  amount        Decimal?           @db.Decimal(14, 2) // display mirror only (ADR-006)
+  completedById String?            @map("completed_by_id") // null when auto (RULE-FI-02/03)
+  completedAt   DateTime?          @map("completed_at")
+
+  @@unique([shipmentId, milestoneNo])
+  @@map("otc_milestones")
+}
+
+// ================= FINANCE =================
+
+enum InvoiceKind {
+  receivable // money IN — the customer owes us (auto-drafted from the quotation)
+  payable // money OUT — we owe a vendor/carrier (recorded against a step)
+}
+
+model Invoice {
+  id          String        @id @default(uuid())
+  referenceNo String        @unique @map("reference_no") // INV-YYYY-NNNNN
+  shipmentId  String        @map("shipment_id")
+  shipment    Shipment      @relation(fields: [shipmentId], references: [id])
+  kind        InvoiceKind   @default(receivable) // receivable ledger drives OTC/settlement; payable is separate
+  quotationId String?       @map("quotation_id") // set for the auto-drafted receivable (RULE-FI-01); null for manual invoices
+  otdStepId   String?       @map("otd_step_id") // the step this invoice was raised from (optional)
+  vendorId    String?       @map("vendor_id") // payables — the vendor being billed; null for the customer receivable
+  vendor      Vendor?       @relation(fields: [vendorId], references: [id])
+  counterparty String?      @map("counterparty") // legacy/display fallback vendor name (payables)
+  status      InvoiceStatus @default(draft)
+  currency    String        @db.Char(3)
+  fxRate      Decimal?      @map("fx_rate") @db.Decimal(12, 6) // captured at commit (ADR-006)
+  totalAmount Decimal       @map("total_amount") @db.Decimal(14, 2)
+  issuedById  String?       @map("issued_by_id") // accounts
+  issuedAt    DateTime?     @map("issued_at")
+  dueDate     DateTime?     @map("due_date") // overdue sweep
+  voidedById  String?       @map("voided_by_id") // only while unpaid (RULE-FI-05)
+  voidedAt    DateTime?     @map("voided_at")
+  voidReason  String?       @map("void_reason")
+  lines       InvoiceLine[]
+  payments    Payment[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([shipmentId])
+  @@index([status, dueDate])
+  @@index([vendorId])
+  @@map("invoices")
+}
+
+model InvoiceLine {
+  id          String  @id @default(uuid())
+  invoiceId   String  @map("invoice_id")
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  description String
+  quantity    Decimal @default(1) @db.Decimal(12, 2)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
+  amount      Decimal @db.Decimal(14, 2)
+  sortOrder   Int     @default(0) @map("sort_order")
+  charge      ShipmentCharge? // set when this line was generated from a ShipmentCharge
+
+  @@index([invoiceId])
+  @@map("invoice_lines")
+}
+
+model Payment {
+  id              String        @id @default(uuid())
+  invoiceId       String        @map("invoice_id")
+  invoice         Invoice       @relation(fields: [invoiceId], references: [id])
+  amount          Decimal       @db.Decimal(14, 2)
+  method          PaymentMethod
+  referenceNumber String?       @map("reference_number") // bank ref / cheque no
+  fxRate          Decimal?      @map("fx_rate") @db.Decimal(12, 6)
+  receivedAt      DateTime      @map("received_at")
+  recordedById    String        @map("recorded_by_id")
+  createdAt       DateTime      @default(now())
+
+  @@index([invoiceId])
+  @@map("payments")
+}
+
+// ================= VENDORS & JOB-CHARGE LEDGER =================
+
+model Vendor {
+  id               String           @id @default(uuid())
+  referenceNo      String           @unique @map("reference_no") // VEN-YYYY-NNNNN
+  name             String
+  normalizedName   String           @map("normalized_name") // duplicate detection
+  type             VendorType
+  contactName      String?          @map("contact_name")
+  email            String?
+  phone            String?
+  address          String?
+  country          String?
+  city             String?
+  taxId            String?          @map("tax_id") // NTN / STRN
+  paymentTermsDays Int?             @map("payment_terms_days")
+  currency         String?          @db.Char(3)
+  notes            String?
+  isActive         Boolean          @default(true) @map("is_active")
+  invoices         Invoice[]
+  charges          ShipmentCharge[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([normalizedName])
+  @@index([type, isActive])
+  @@map("vendors")
+}
+
+// Seeded, admin-extensible charge catalog (a table, not an enum)
+model ChargeType {
+  code             String           @id // 'ocean_freight', 'lolo', ...
+  label            String
+  defaultDirection ChargeDirection? @map("default_direction")
+  defaultStepCode  OtdStepCode?     @map("default_step_code") // where this money usually lands
+  service          ServiceCode? // which sold service it belongs to
+  isActive         Boolean          @default(true) @map("is_active")
+  charges          ShipmentCharge[]
+
+  @@map("charge_types")
+}
+
+// The job-charge ledger — one row per expected/actual money movement on a shipment
+model ShipmentCharge {
+  id                    String          @id @default(uuid())
+  shipmentId            String          @map("shipment_id")
+  shipment              Shipment        @relation(fields: [shipmentId], references: [id])
+  otdStepId             String?         @map("otd_step_id") // per-step money; null = job-level
+  otdStep               OtdStep?        @relation(fields: [otdStepId], references: [id])
+  chargeCode            String          @map("charge_code")
+  chargeType            ChargeType      @relation(fields: [chargeCode], references: [code])
+  direction             ChargeDirection
+  vendorId              String?         @map("vendor_id") // payables; null for receivables (customer implied)
+  vendor                Vendor?         @relation(fields: [vendorId], references: [id])
+  description           String?
+  currency              String          @default("USD") @db.Char(3)
+  fxRate                Decimal?        @map("fx_rate") @db.Decimal(12, 6)
+  estimatedAmount       Decimal         @map("estimated_amount") @db.Decimal(14, 2)
+  actualAmount          Decimal?        @map("actual_amount") @db.Decimal(14, 2)
+  status                ChargeStatus    @default(estimated)
+  invoiceLineId         String?         @unique @map("invoice_line_id")
+  invoiceLine           InvoiceLine?    @relation(fields: [invoiceLineId], references: [id])
+  quotationChargeLineId String?         @map("quotation_charge_line_id")
+  confirmedById         String?         @map("confirmed_by_id")
+  confirmedAt           DateTime?       @map("confirmed_at")
+  cancelReason          String?         @map("cancel_reason")
+  createdById           String?         @map("created_by_id")
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+
+  @@index([shipmentId, direction, status])
+  @@index([otdStepId])
+  @@index([vendorId, status])
+  @@map("shipment_charges")
+}
+
+// ================= ACTION ENGINE & TASKS =================
+
+model TaskTemplate {
+  id               String         @id @default(uuid())
+  eventCode        String         @map("event_code") // from the closed catalog (ADR-020)
+  stepCode         OtdStepCode?   @map("step_code") // fires only if on the composed path (RULE-AE-07)
+  title            String
+  description      String?
+  department       DepartmentCode
+  dueOffsetHours   Int            @map("due_offset_hours")
+  requiredDocTypes String[]       @map("required_doc_types")
+  isActive         Boolean        @default(true) @map("is_active")
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([eventCode, isActive])
+  @@map("task_templates")
+}
+
+model Task {
+  id               String      @id @default(uuid())
+  idempotencyKey   String      @unique @map("idempotency_key") // replay-safe upsert (RULE-AE-04)
+  origin           TaskOrigin
+  templateId       String?     @map("template_id")
+  shipmentId       String?     @map("shipment_id")
+  queryId          String?     @map("query_id") // compliance pre-check (RULE-QRY-02)
+  otdStepId        String?     @map("otd_step_id") // submitting completes the step (RULE-TK-02)
+  title            String
+  description      String?
+  departmentId     String      @map("department_id") // RULE-TK-01
+  assigneeId       String?     @map("assignee_id") // null = department queue (RULE-AE-03)
+  status           TaskStatus  @default(open)
+  statusBeforeHold TaskStatus? @map("status_before_hold") // ADR-038 — held iff sla_paused_at set
+  slaPausedAt      DateTime?   @map("sla_paused_at")
+  dueDate          DateTime?   @map("due_date") // shifted by hold_minutes on resume (RULE-SH-10)
+  completedById    String?     @map("completed_by_id")
+  completedAt      DateTime?   @map("completed_at")
+  cancelReason     String?     @map("cancel_reason")
+  rowVersion       Int         @default(1) @map("row_version")
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  @@index([assigneeId, status])
+  @@index([departmentId, status]) // department queue
+  @@index([shipmentId])
+  @@index([status, dueDate]) // overdue sweep
+  @@map("tasks")
+}
+
+model OutboxEvent {
+  id            String    @id @default(uuid())
+  eventType     String    @map("event_type") // closed catalog (ADR-020)
+  payload       Json
+  correlationId String    @map("correlation_id")
+  dispatchedAt  DateTime? @map("dispatched_at")
+  attempts      Int       @default(0)
+  lastError     String?   @map("last_error")
+  createdAt     DateTime  @default(now())
+
+  @@index([dispatchedAt, createdAt]) // relay poll (ADR-021)
+  @@map("outbox_events")
+}
+
+// ================= DOCUMENTS =================
+
+model Document {
+  id            String            @id @default(uuid())
+  ownerType     DocumentOwnerType @map("owner_type") // polymorphic (RULE-DOC-03)
+  ownerId       String            @map("owner_id")
+  otdStepId     String?           @map("otd_step_id") // groups a doc/proof under a specific shipment step
+  fileName      String            @map("file_name")
+  mimeType      String            @map("mime_type")
+  sizeBytes     Int               @map("size_bytes")
+  checksum      String // dedup (RULE-DOC-02)
+  storageKey    String            @unique @map("storage_key")
+  docType       String?           @map("doc_type") // 'gd' | 'bol' | 'pod' | … (RULE-SH-06)
+  isPublished   Boolean           @default(false) @map("is_published") // INV-10 — internal by default
+  publishedById String?           @map("published_by_id")
+  publishedAt   DateTime?         @map("published_at")
+  scanStatus    ScanStatus        @default(pending) @map("scan_status")
+  uploadedById  String            @map("uploaded_by_id")
+  deletedAt     DateTime?         @map("deleted_at") // soft delete (RULE-DOC-04)
+  createdAt     DateTime          @default(now())
+
+  @@index([ownerType, ownerId])
+  @@index([checksum])
+  @@map("documents")
+}
+
+// ================= CHAT =================
+
+model ChatChannel {
+  id           String              @id @default(uuid())
+  type         ChannelType
+  name         String?
+  shipmentId   String?             @unique @map("shipment_id") // auto-created at shipment birth (RULE-QT-07)
+  departmentId String?             @map("department_id")
+  members      ChatChannelMember[]
+  messages     ChatMessage[]
+  createdAt    DateTime            @default(now())
+
+  @@map("chat_channels")
+}
+
+model ChatChannelMember {
+  id                String      @id @default(uuid())
+  channelId         String      @map("channel_id")
+  channel           ChatChannel @relation(fields: [channelId], references: [id])
+  userId            String      @map("user_id") // customers never members (INV-11) — app guard
+  joinedAt          DateTime    @default(now()) @map("joined_at")
+  leftAt            DateTime?   @map("left_at") // set on offboarding (RULE-EMP-05)
+  lastReadMessageId String?     @map("last_read_message_id") // unread counts
+
+  @@unique([channelId, userId])
+  @@index([userId])
+  @@map("chat_channel_members")
+}
+
+model ChatMessage {
+  id              String      @id @default(uuid())
+  channelId       String      @map("channel_id")
+  channel         ChatChannel @relation(fields: [channelId], references: [id])
+  senderId        String      @map("sender_id")
+  clientMessageId String      @map("client_message_id") // idempotent sends (RULE-CH-02)
+  body            String
+  replyToId       String?     @map("reply_to_id")
+  editedAt        DateTime?   @map("edited_at")
+  deletedAt       DateTime?   @map("deleted_at") // soft delete
+  createdAt       DateTime    @default(now())
+
+  @@unique([channelId, clientMessageId])
+  @@index([channelId, createdAt])
+  @@map("chat_messages")
+}
+
+// ================= NOTIFICATIONS =================
+
+model Notification {
+  id         String                 @id @default(uuid())
+  userId     String                 @map("user_id")
+  type       String // event code, e.g. 'task.assigned'
+  title      String
+  body       String?
+  priority   Int                    @default(0)
+  actionUrl  String?                @map("action_url")
+  groupKey   String?                @map("group_key")
+  readAt     DateTime?              @map("read_at")
+  deliveries NotificationDelivery[]
+  createdAt  DateTime               @default(now())
+
+  @@index([userId, readAt, createdAt])
+  @@map("notifications")
+}
+
+model NotificationDelivery {
+  id             String              @id @default(uuid())
+  notificationId String              @map("notification_id")
+  notification   Notification        @relation(fields: [notificationId], references: [id])
+  channel        NotificationChannel
+  status         DeliveryStatus      @default(queued) // "I never received it" is answerable (RULE-NT-03)
+  sentAt         DateTime?           @map("sent_at")
+  error          String?
+
+  @@index([notificationId])
+  @@map("notification_deliveries")
+}
+
+model NotificationPreference {
+  id      String              @id @default(uuid())
+  userId  String              @map("user_id")
+  type    String // 'task.assigned' & 'shipment.held' cannot be disabled — app-enforced (RULE-NT-01)
+  channel NotificationChannel
+  enabled Boolean             @default(true)
+
+  @@unique([userId, type, channel])
+  @@map("notification_preferences")
+}
+
+// ================= AUDIT & REFERENCE DATA =================
+
+model AuditLog {
+  id            String   @id @default(uuid()) // written once, by the global interceptor (INV-15)
+  actorId       String?  @map("actor_id") // null for system jobs
+  action        String // 'shipment.step.complete', …
+  resourceType  String   @map("resource_type")
+  resourceId    String   @map("resource_id")
+  diff          Json? // field-level before/after
+  ip            String?
+  correlationId String   @map("correlation_id")
+  createdAt     DateTime @default(now())
+
+  @@index([resourceType, resourceId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_logs")
+}
+
+model ReferenceSequence {
+  id        String @id @default(uuid())
+  entity    String // 'lead' | 'customer' | 'query' | 'quotation' | 'shipment' | 'invoice'
+  year      Int
+  lastValue Int    @default(0) @map("last_value") // allocated inside the owning transaction
+
+  @@unique([entity, year])
+  @@map("reference_sequences")
+}
+
+model Port {
+  code    String @id // UN/LOCODE
+  name    String
+  country String
+
+  @@map("ports")
+}
+
+model ContainerType {
+  code  String @id // '20GP', '40HC', 'REEFER20', …
+  label String
+
+  @@map("container_types")
+}
+
+// ================= INTAKE CHANNELS & PUBLIC STOREFRONT =================
+// CRM_MASTER §5.20/§5.21, WORKFLOW §2b/§2c/§8a/§8b.
+
+// Indicative pricing for the public rate calculator (§5.20). The calculator
+// picks the most specific active card per service (exact lane+container >
+// lane > service-only) and sums; a hard-coded fallback guarantees a result
+// even before any card is seeded. Non-binding — the quotation is authoritative.
+model RateCard {
+  id                String      @id @default(uuid())
+  service           ServiceCode
+  originPort        String?     @map("origin_port") // null = any lane
+  destinationPort   String?     @map("destination_port")
+  containerTypeCode String?     @map("container_type_code") // null = any container
+  currency          String      @default("USD") @db.Char(3)
+  baseAmount        Decimal     @map("base_amount") @db.Decimal(14, 2)
+  perKgAmount       Decimal?    @map("per_kg_amount") @db.Decimal(14, 4) // optional weight surcharge
+  minAmount         Decimal?    @map("min_amount") @db.Decimal(14, 2)
+  notes             String?
+  isActive          Boolean     @default(true) @map("is_active")
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+
+  @@index([service, isActive])
+  @@index([originPort, destinationPort])
+  @@map("rate_cards")
+}
+
+// Publicly-browsable indicative available capacity/lanes (§5.20). Curated by
+// Operations/Transport; the public sees only active `open` postings. This is
+// a lead-gen shopfront — NOT the Phase-2 TMS carrier load-matching board (§10).
+model LoadBoardPosting {
+  id                String          @id @default(uuid())
+  referenceNo       String          @unique @map("reference_no") // LB-YYYY-NNNNN
+  mode              TransportMode
+  originPort        String          @map("origin_port")
+  destinationPort   String          @map("destination_port")
+  containerTypeCode String?         @map("container_type_code")
+  equipment         String? // "40HC x3", "Reefer", "Flatbed"
+  capacity          Int? // available units
+  departureDate     DateTime?       @map("departure_date")
+  validUntil        DateTime?       @map("valid_until") // expiry sweep (WORKFLOW §14)
+  transitDays       Int?            @map("transit_days")
+  indicativeRate    Decimal?        @map("indicative_rate") @db.Decimal(14, 2)
+  currency          String          @default("USD") @db.Char(3)
+  services          ServiceCode[] // what's on offer
+  notes             String?
+  status            LoadBoardStatus @default(open)
+  isActive          Boolean         @default(true) @map("is_active")
+  createdById       String?         @map("created_by_id") // internal poster (ops/transport)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([status, isActive])
+  @@index([originPort, destinationPort])
+  @@map("load_board_postings")
+}
+
+// Anonymous storefront "request a quote" (§5.20, WORKFLOW §2b). A demand
+// signal, not a customer — a salesperson converts it into a lead + query.
+model PublicInquiry {
+  id                 String        @id @default(uuid())
+  referenceNo        String        @unique @map("reference_no") // INQ-YYYY-NNNNN
+  contactName        String        @map("contact_name")
+  contactEmail       String        @map("contact_email")
+  contactPhone       String?       @map("contact_phone")
+  companyName        String?       @map("company_name")
+  message            String?
+  services           ServiceCode[]
+  originPort         String?       @map("origin_port")
+  destinationPort    String?       @map("destination_port")
+  containerTypeCode  String?       @map("container_type_code")
+  incoterm           String?
+  cargoDescription   String?       @map("cargo_description")
+  weightKg           Decimal?      @map("weight_kg") @db.Decimal(12, 2)
+  isHazardous        Boolean       @default(false) @map("is_hazardous")
+  isReefer           Boolean       @default(false) @map("is_reefer")
+  estimatedAmount    Decimal?      @map("estimated_amount") @db.Decimal(14, 2) // calculator snapshot
+  estimateCurrency   String?       @map("estimate_currency") @db.Char(3)
+  loadBoardPostingId String?       @map("load_board_posting_id") // set if they came from a posting
+  status             InquiryStatus @default(new)
+  reviewedById       String?       @map("reviewed_by_id")
+  convertedLeadId    String?       @map("converted_lead_id")
+  convertedQueryId   String?       @map("converted_query_id")
+  sourceIp           String?       @map("source_ip")
+  createdAt          DateTime      @default(now())
+  updatedAt          DateTime      @updatedAt
+
+  @@index([status, createdAt])
+  @@map("public_inquiries")
+}
+
+// Inbound bank LC posted to the intake webhook (§5.21, WORKFLOW §2c).
+// Idempotent on the bank's own reference so replays never duplicate.
+model BankLcReferral {
+  id               String       @id @default(uuid())
+  referenceNo      String       @unique @map("reference_no") // LC-YYYY-NNNNN (intake ref)
+  idempotencyKey   String       @unique @map("idempotency_key") // dedupe bank replays
+  lcNumber         String       @map("lc_number") // the bank's LC number
+  bankName         String?      @map("bank_name")
+  bankRef          String?      @map("bank_ref")
+  applicantName    String?      @map("applicant_name") // buyer/importer
+  applicantEmail   String?      @map("applicant_email")
+  applicantPhone   String?      @map("applicant_phone")
+  companyName      String?      @map("company_name")
+  beneficiaryName  String?      @map("beneficiary_name")
+  amount           Decimal?     @db.Decimal(14, 2)
+  currency         String?      @db.Char(3)
+  originPort       String?      @map("origin_port")
+  destinationPort  String?      @map("destination_port")
+  commodity        String?
+  incoterm         String?
+  issueDate        DateTime?    @map("issue_date")
+  expiryDate       DateTime?    @map("expiry_date")
+  rawPayload       Json         @map("raw_payload") // full webhook body, for audit
+  status           BankLcStatus @default(received)
+  reviewedById     String?      @map("reviewed_by_id")
+  convertedCustomerId String?   @map("converted_customer_id")
+  convertedLeadId  String?      @map("converted_lead_id")
+  convertedQueryId String?      @map("converted_query_id")
+  rejectReason     String?      @map("reject_reason")
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([status, createdAt])
+  @@map("bank_lc_referrals")
+}
