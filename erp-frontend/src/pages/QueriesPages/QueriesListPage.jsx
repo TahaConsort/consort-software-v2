@@ -32,6 +32,7 @@ import {
   SERVICE_OPTIONS, labelForService, QUERY_STATUS_LABELS,
   SERVICE_PACKAGE_OPTIONS, PACKAGE_PRESET_SERVICES, CRO_HANDLING_LABELS, CRO_HANDLING_SHORT,
   labelForPackage, packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
+  packageUsesDeliveryAddress, packageUsesImportTerms, routeOf, DEFAULT_CURRENCY,
 } from "@/lib/catalog";
 import { quoteTemplateFor } from "@/lib/quoteTemplates";
 
@@ -48,7 +49,7 @@ const STATUS_STYLES = {
 const QUOTABLE = ["open", "quoted", "revision_requested"];
 
 const money = (n, ccy) =>
-  `${ccy || "USD"} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
 /**
  * QueriesListPage — shipping requests carrying the SELECTED SERVICES that
@@ -300,6 +301,8 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
     destinationPort: "",
     pickupAddress: "",
     deliveryAddress: "",
+    freeDays: "",
+    emptyReturnLocation: "",
     containerTypeCode: "",
     incoterm: "",
     cargoDescription: "",
@@ -325,10 +328,13 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
     setForm((p) => ({
       ...p,
       servicePackage: code,
-      croHandledBy: code === "local_transport" ? "not_applicable" : "consort",
+      croHandledBy: packageHasCroChoice(code) || code === "international" ? "consort" : "not_applicable",
       // Clear the fields the new package cannot carry.
       ...(code === "local_transport" ? { originPort: "", destinationPort: "", incoterm: "" } : {}),
       ...(code === "loading_point_to_port" ? { destinationPort: "" } : {}),
+      // Import delivery starts AT the terminal, so there is no loading point and no
+      // destination port; free days only mean anything here.
+      ...(code === "port_to_consignee" ? { destinationPort: "", pickupAddress: "" } : { freeDays: "", emptyReturnLocation: "" }),
     }));
 
   const selectedCustomer = customers.find((c) => c.id === form.customerId);
@@ -336,6 +342,7 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
   const usesPorts = packageUsesPorts(pkg);
   const needsDestPort = packageUsesDestinationPort(pkg);
   const isLocal = pkg === "local_transport";
+  const isImport = packageUsesImportTerms(pkg);
   // The services the package will preset server-side, shown read-only so Ops can see
   // what they're adding to.
   const presetServices = PACKAGE_PRESET_SERVICES[pkg] ?? [];
@@ -351,8 +358,10 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
       services: form.extraServices.length ? form.extraServices : undefined,
       originPort: usesPorts ? form.originPort || undefined : undefined,
       destinationPort: needsDestPort ? form.destinationPort || undefined : undefined,
-      pickupAddress: form.pickupAddress || undefined,
-      deliveryAddress: isLocal ? form.deliveryAddress || undefined : undefined,
+      pickupAddress: isImport ? undefined : form.pickupAddress || undefined,
+      deliveryAddress: packageUsesDeliveryAddress(pkg) ? form.deliveryAddress || undefined : undefined,
+      freeDays: isImport && form.freeDays !== "" ? Number(form.freeDays) : undefined,
+      emptyReturnLocation: isImport ? form.emptyReturnLocation || undefined : undefined,
       containerTypeCode: form.containerTypeCode || undefined,
       incoterm: usesPorts ? form.incoterm || undefined : undefined,
       cargoDescription: form.cargoDescription || undefined,
@@ -461,6 +470,38 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
                 <Input id="q-deliv" required value={form.deliveryAddress} onChange={(e) => setForm((p) => ({ ...p, deliveryAddress: e.target.value }))} placeholder="Delivery point" />
               </div>
             </div>
+          ) : isImport ? (
+            /* Import delivery runs port → door: a terminal code out, a street address in. */
+            <>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label>Port / terminal holding the container</Label>
+                  <Select value={form.originPort || "none"} onValueChange={(v) => setForm((p) => ({ ...p, originPort: v === "none" ? "" : v }))}
+                    items={[{ value: "none", label: "—" }, ...ref.ports.map((p) => ({ value: p.code, label: `${p.name} (${p.code})` }))]}>
+                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">—</SelectItem>
+                      {ref.ports.map((p) => <SelectItem key={p.code} value={p.code}>{p.name} ({p.code})</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-consignee">Consignee delivery address</Label>
+                  <Input id="q-consignee" required value={form.deliveryAddress} onChange={(e) => setForm((p) => ({ ...p, deliveryAddress: e.target.value }))} placeholder="Where the container is delivered" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-freedays">Free days <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input id="q-freedays" type="number" min="0" max="365" value={form.freeDays} onChange={(e) => setForm((p) => ({ ...p, freeDays: e.target.value }))} placeholder="e.g. 7" />
+                  <p className="text-[11px] text-muted-foreground">Detention-free window the line granted the consignee.</p>
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="q-return">Empty return location <span className="text-muted-foreground font-normal">(optional)</span></Label>
+                  <Input id="q-return" value={form.emptyReturnLocation} onChange={(e) => setForm((p) => ({ ...p, emptyReturnLocation: e.target.value }))} placeholder="Dry port / yard address" />
+                </div>
+              </div>
+            </>
           ) : usesPorts ? (
             <>
               <div className="space-y-1.5">
@@ -558,7 +599,7 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
       cover, so Ops only fills in prices. Totals are recomputed server-side regardless
       of what we send (RULE-QT-02). ── */
 const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
-  const [currency, setCurrency] = useState("USD");
+  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
   const [validityDate, setValidityDate] = useState("");
   const [lines, setLines] = useState(() =>
     quoteTemplateFor({
@@ -604,11 +645,7 @@ const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
     if (payload) onSubmit(payload, alsoSend);
   };
 
-  // A local job runs between two addresses; a port job between port codes.
-  const route =
-    query.servicePackage === "local_transport"
-      ? [query.pickupAddress, query.deliveryAddress].filter(Boolean).join(" → ")
-      : [query.originPort, query.destinationPort].filter(Boolean).join(" → ");
+  const route = routeOf(query);
 
   return (
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
@@ -756,11 +793,7 @@ const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
     return () => { alive = false; };
   }, [query.id]);
 
-  // A local job runs between two addresses; a port job between port codes.
-  const route =
-    query.servicePackage === "local_transport"
-      ? [query.pickupAddress, query.deliveryAddress].filter(Boolean).join(" → ")
-      : [query.originPort, query.destinationPort].filter(Boolean).join(" → ");
+  const route = routeOf(query);
   const expired = quote?.validityDate && new Date(quote.validityDate) < new Date();
 
   return (

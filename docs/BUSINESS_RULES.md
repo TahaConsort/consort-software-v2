@@ -136,7 +136,8 @@ Scope is applied **in the repository layer**, not remembered by controllers. Out
 - **RULE-QRY-03** — Cancellation requires a reason; reasons feed the unserved-demand report.
 - **RULE-QRY-04** — A query with no quotation after 90 days auto-expires; staleness at 14 days notifies BDO and ASM.
 - **RULE-QRY-05** — **Every query records a service package and a non-empty set of services.** The customer picks the package (ADR-046); it presets the service set from the catalog (ADR-041), and Ops may add to it but never below it. Package, CRO mode and service set are all carried onto the quotation and frozen onto the shipment at approval (INV-14).
-- **RULE-QRY-06** — The CRO mode must be one the package allows: `local_transport` ⇒ `not_applicable`; `loading_point_to_port` and `international` ⇒ `customer` or `consort`. Enforced at the API boundary and by the `*_cro_mode_valid` CHECK constraints (ADR-046).
+- **RULE-QRY-06** — The CRO mode must be one the package allows: `local_transport` and `port_to_consignee` ⇒ `not_applicable`; `loading_point_to_port` and `international` ⇒ `customer` or `consort`. Enforced at the API boundary and by the `*_cro_mode_valid` CHECK constraints (ADR-046/049).
+- **RULE-QRY-07** — The endpoints a query must carry are a function of its package (ADR-049): `local_transport` needs a pickup **and** delivery address and no ports; `loading_point_to_port` needs an origin port; `international` needs both ports; `port_to_consignee` needs an origin port (the terminal holding the container) **and** a delivery address, and rejects a destination port.
 
 ---
 
@@ -149,9 +150,10 @@ The mechanism behind "a local order has fewer steps and no customs role." Normat
 - **RULE-SVC-03** — `shipments.status` derives from the highest completed step **on the composed path**; a shorter path exposes only its own subset of the status enum.
 - **RULE-SVC-04** — `lc_finance` is implied when the customer's `source` is `bank_lc`, and may also be selected explicitly (ADR-041/042). It is additive on top of any package.
 - **RULE-SVC-05** — Display renumbers the composed path 1..N; `step_code` and the canonical number are retained for cross-shipment reporting.
-- **RULE-SVC-06** — **Every package composes exactly one terminal step deriving `delivered`** (`delivered`, `local_delivered` or `port_job_completed`). Load-bearing: settlement requires status `delivered`, so a package without one could never settle or close.
+- **RULE-SVC-06** — **Every package composes exactly one step deriving `delivered` from its delivery milestone** (`delivered`, `local_delivered` or `port_job_completed`). Load-bearing: settlement requires status `delivered`, so a package without one could never settle or close. An empty-return step running after it may also derive `delivered` — harmless, because settlement additionally refuses while any step is pending.
 - **RULE-SVC-07** — Composition **requires** a package; there is no null-package fallback, because skipping the package gate would put the local trucking leg on every shipment. Rows predating packages are resolved by `inferPackageFromServices` and backfilled by `scripts/backfillServicePackages.js`.
-- **RULE-SVC-06** — Changing services after approval is out of Phase-1 scope; the only path is cancel-and-requote, which is audited.
+- **RULE-SVC-08** — Changing services after approval is out of Phase-1 scope; the only path is cancel-and-requote, which is audited. *(Was a second RULE-SVC-06 — a duplicate ID, renumbered.)*
+- **RULE-SVC-09** — **A package's CRO mode and route shape are decided by the package, not the caller** (ADR-046/049). `local_transport` and `port_to_consignee` are always `not_applicable`; `international` is always `consort`; only `loading_point_to_port` offers a choice. Enforced in three places that must agree: `allowedCroModes`, the intake schema, and the `*_cro_mode_valid` CHECK constraints. The same applies to endpoints — which of `origin_port` / `destination_port` / `pickup_address` / `delivery_address` a query must carry is a function of the package (`packageUsesPorts`, `packageUsesPickupAddress`, `packageUsesDeliveryAddress`).
 
 ---
 

@@ -8,7 +8,7 @@ export const completeStepSchema = z.object({
 });
 
 export const reopenStepSchema = z.object({
-  reason: z.string().min(3, "A reopen reason is required (RULE-SH-05)"),
+  reason: z.string().min(3, "A reopen reason is required"),
 });
 
 // One manual sub-action of a step (RULE-SH-13, ADR-048). `done` defaults to true so a

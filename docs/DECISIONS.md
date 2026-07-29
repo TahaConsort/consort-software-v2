@@ -43,6 +43,10 @@ Each ADR records **one canonical resolution**: the decision, why, and what it fo
 | ADR-043 | **Visit Plans as a first-class entity** | Accepted |
 | ADR-044 | **`cfo` joins the Management tier** | Accepted |
 | ADR-045 | **Employee removal is deactivate-and-reassign** | Accepted |
+| ADR-046 | **Service packages sit above the service catalog** | Accepted |
+| ADR-047 | **A customer may upload inbound documents, nothing more** | Accepted |
+| ADR-048 | **One main step with sub-actions, not many steps** | Accepted |
+| ADR-049 | **Port → Consignee is a fourth package** | Accepted |
 
 Reserved numbers were consumed by the v1 conflict review; their resolutions were folded into the v2 documents and the ADRs above. Never reuse a reserved number.
 
@@ -280,7 +284,7 @@ Every query records a non-empty set of selected services (RULE-QRY-05); the set 
 
 ## ADR-046 — Service packages sit above the service catalog
 
-**Status:** Accepted.
+**Status:** Accepted. Extended by ADR-049, which adds a fourth package.
 
 **Context.** The business sells three things — Local Transport, Loading Point → Port, and International Shipment — and one of them has a sub-option (who obtains the CRO). The closed `ServiceCode` catalog (ADR-041) cannot express this. Two concrete failures forced the decision:
 
@@ -345,4 +349,30 @@ Consequences:
 
 ---
 
-*ADR-001 through ADR-039 codify the resolutions the other documents already cite; ADR-040 through ADR-045 record the service-driven business logic (service catalog, composed OTD template, acquisition channels, Visit Plans, `cfo`, deactivate-and-reassign); ADR-046/047 layer the three sold service packages above that catalog and scope the customer's inbound upload; ADR-048 adds the sub-action checklist beneath a step.*
+## ADR-049 — Port → Consignee is a fourth package, not a reuse of the destination-agent steps
+
+**Status:** Accepted.
+
+**Context.** The business also sells the **import** leg on its own: a container has landed and been released, and the customer wants it collected from the terminal, delivered to the consignee, and the empty returned. Three existing steps already describe that physical work — `destination_do`, `destination_pickup`, `empty_return` — reached by adding the `destination_services` code to an international job. Reusing them by presetting `destination_services` was the obvious move and is wrong on three counts:
+
+1. Those steps are the **far end of somebody else's export job**, performed by an overseas agent and owned by Operations. This leg is our own vehicles on domestic roads, and ADR-046 already established that a trucking leg is Transport-owned end to end so the job never 403s across a department handoff.
+2. `destination_do` collects a delivery order and gate pass **from an agent**. Here the customer supplies both, along with the BOL and the free-days count, and they belong in the `order_confirmed` document pack (ADR-048) — the same place every other package collects what the customer owes us.
+3. Presetting `destination_services` would compose both sets the moment Ops added the code by hand, giving a shipment two empty-return steps.
+
+**Decision.** `ServicePackage` gains `port_to_consignee`, presetting `local_transport` + `port_handling`. Two new step codes — `import_container_pickup` (canonical 152) and `import_empty_return` (canonical 178) — carry the EIRs; `order_confirmed` and `local_delivered` are reused by adding the package to their gate. The composed path is five steps:
+
+`order_lock` → `order_confirmed` → `import_container_pickup` → `local_delivered` → `import_empty_return`
+
+**Consequences.**
+- The package has **no CRO**: the line already released the box, and the customer's delivery order stands in for it. `allowedCroModes` and the three `*_cro_mode_valid` CHECK constraints are widened from "only `local_transport` is `not_applicable`" to a two-package list. Those constraints are **dropped and recreated**, not re-added — the file's `ADD`/`EXCEPTION WHEN duplicate_object` idiom would have silently kept the old predicate, which rejects every row of the new package.
+- It is the **first package to want a port and a street address at once** (`origin_port` is where the container sits, `delivery_address` is the consignee), so `packageUsesPorts` no longer implies "no addresses". `packageUsesPickupAddress` / `packageUsesDeliveryAddress` replace the `isLocal` ternary that had been copy-pasted across five UI call sites.
+- Three existing templates are **narrowed** from "any package" to the two export packages — `port_handover` (this package buys `port_handling` to get the box *out*, and would otherwise compose an origin gate-in it never performs) and the three destination-agent steps. No existing package's path changes.
+- `queries`/`shipments` gain `free_days` and `empty_return_location`. Free days is the detention clock the whole job races; a number that lives in step notes cannot be reported on or alerted against.
+- `inferPackageFromServices` **cannot** return this package — it shares its service set with `loading_point_to_port`, and no row predating the package can be an import leg anyway.
+- The operational job ends at the empty return, but **closing still waits for the money**: `import_empty_return` derives `delivered`, and `maybeSettleTx` already refuses to settle while any step is pending, so the existing settle-then-close rule (RULE-SH-12) is unchanged.
+
+**Forbids.** Presetting `destination_services` on this package; a per-package variant of an existing step code; collecting the customer's delivery order anywhere but the `order_confirmed` pack.
+
+---
+
+*ADR-001 through ADR-039 codify the resolutions the other documents already cite; ADR-040 through ADR-045 record the service-driven business logic (service catalog, composed OTD template, acquisition channels, Visit Plans, `cfo`, deactivate-and-reassign); ADR-046/047 layer the sold service packages above that catalog and scope the customer's inbound upload; ADR-048 adds the sub-action checklist beneath a step; ADR-049 adds the import delivery leg as a fourth package.*

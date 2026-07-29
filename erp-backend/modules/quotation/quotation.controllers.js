@@ -3,6 +3,7 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
+import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 import { isManagement, hasRole } from "../auth/auth.middleware.js";
 import { scopedQuotationWhere, quotationInScope } from "./quotation.middleware.js";
 import { createShipmentFromApproval } from "../shipment/shipment.service.js";
@@ -18,6 +19,12 @@ import { createShipmentFromApproval } from "../shipment/shipment.service.js";
 const emitEvent = (tx, eventType, payload) =>
   tx.outboxEvent.create({ data: { eventType, payload, correlationId: crypto.randomUUID() } });
 
+/* ── GET /api/quotations/charge-types ── (catalog for the quote-builder dropdown) */
+export const listChargeTypes = catchAsync(async (req, res) => {
+  const types = await prisma.chargeType.findMany({ where: { isActive: true }, orderBy: { label: "asc" } });
+  res.json({ success: true, data: types });
+});
+
 // Server-side line + total computation (RULE-QT-02 — client totals ignored).
 const priceLines = (chargeLines) =>
   chargeLines.map((l, i) => {
@@ -25,7 +32,7 @@ const priceLines = (chargeLines) =>
     const unitPrice = Number(l.unitPrice);
     return {
       service: l.service ?? null,
-      // Cost sheet (internal) — drives payable-charge seeding at approval.
+      // Cost sheet (internal) — the buy-side expectation, read back as the P&L estimate.
       chargeCode: l.chargeCode ?? null,
       costAmount: l.costAmount != null ? Number(l.costAmount) : null,
       costVendorId: l.costVendorId ?? null,
@@ -125,7 +132,7 @@ export const createQuotation = catchAsync(async (req, res, next) => {
           services: query.services,
           servicePackage: query.servicePackage,
           croHandledBy: query.croHandledBy,
-          currency: req.body.currency ?? "USD",
+          currency: req.body.currency ?? DEFAULT_CURRENCY,
           fxRate: req.body.fxRate ?? undefined,
           validityDate: req.body.validityDate ?? undefined,
           totalAmount: totalOf(lines),

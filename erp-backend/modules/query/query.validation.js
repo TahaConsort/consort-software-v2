@@ -4,7 +4,10 @@ import {
   CRO_MODES,
   SERVICE_CODES,
   SERVICE_PACKAGES,
+  packageUsesDeliveryAddress,
   packageUsesDestinationPort,
+  packageUsesImportTerms,
+  packageUsesPickupAddress,
   packageUsesPorts,
 } from "../../utils/servicePackage.js";
 
@@ -35,6 +38,11 @@ const baseQueryFields = {
   // port is the wrong shape.
   pickupAddress: z.string().max(500).optional(),
   deliveryAddress: z.string().max(500).optional(),
+  // port_to_consignee terms. Both optional at intake — the delivery order often lands
+  // after the query is raised, and the free-days count comes with it. The order_confirmed
+  // checklist is what actually forces them to be settled before the container moves.
+  freeDays: z.coerce.number().int().min(0).max(365).optional(),
+  emptyReturnLocation: z.string().max(500).optional(),
   containerTypeCode: z.string().optional(),
   incoterm: z.string().optional(),
   cargoDescription: z.string().optional(),
@@ -65,6 +73,16 @@ const refineCoherence = (schema) =>
     .refine((v) => v.servicePackage !== "local_transport" || !v.destinationPort, {
       path: ["destinationPort"],
       message: "Local Transport moves between addresses — leave the port fields empty",
+    })
+    // The import leg ENDS at a door, so a destination port is a contradiction: the
+    // origin port is the terminal holding the container.
+    .refine((v) => v.servicePackage !== "port_to_consignee" || !v.destinationPort, {
+      path: ["destinationPort"],
+      message: "Import delivery ends at the consignee's address — leave the destination port empty",
+    })
+    .refine((v) => v.servicePackage === undefined || packageUsesImportTerms(v.servicePackage) || v.freeDays === undefined, {
+      path: ["freeDays"],
+      message: "Free days apply to an import delivery only",
     });
 
 /**
@@ -73,13 +91,15 @@ const refineCoherence = (schema) =>
  */
 const refineCompleteness = (schema) =>
   schema
-    .refine((v) => v.servicePackage !== "local_transport" || !!v.pickupAddress, {
+    .refine((v) => !packageUsesPickupAddress(v.servicePackage) || !!v.pickupAddress, {
       path: ["pickupAddress"],
       message: "A pickup address is required for Local Transport",
     })
-    .refine((v) => v.servicePackage !== "local_transport" || !!v.deliveryAddress, {
+    // Local Transport and the import leg both END at a door — Local Transport starts at
+    // one too, the import leg starts at the terminal named by originPort.
+    .refine((v) => !packageUsesDeliveryAddress(v.servicePackage) || !!v.deliveryAddress, {
       path: ["deliveryAddress"],
-      message: "A delivery address is required for Local Transport",
+      message: "A delivery address is required for this service",
     })
     .refine((v) => !packageUsesPorts(v.servicePackage) || !!v.originPort, {
       path: ["originPort"],

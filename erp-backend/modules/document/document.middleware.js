@@ -77,7 +77,7 @@ const buildUpload = async () => {
 export const uploadSingle = (field) => async (req, res, next) => {
   const upload = await buildUpload();
   if (!upload) {
-    return next(new AppError("File upload unavailable — run `npm i multer` in erp-backend (RULE-DOC-02)", 503));
+    return next(new AppError("File upload unavailable — run `npm i multer` in erp-backend", 503));
   }
   upload.single(field)(req, res, (err) => {
     if (err) {

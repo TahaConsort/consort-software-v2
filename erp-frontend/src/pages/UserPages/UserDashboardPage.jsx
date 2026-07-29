@@ -17,9 +17,11 @@ import { useAuthStore } from "@/store/authStore";
 import { useDashboardStore } from "@/store/dashboardStore";
 import { useTheme } from "@/context/ThemeContext";
 import {
-  QUERY_STATUS_LABELS, QUOTATION_STATUS_LABELS, INVOICE_STATUS_LABELS,
+  QUERY_STATUS_LABELS, QUOTATION_STATUS_LABELS,
+  paymentStateOf, overdueDaysOf, PAYMENT_STATE_CLASS, DEFAULT_CURRENCY,
   SERVICE_PACKAGE_OPTIONS, CRO_HANDLING_SHORT, labelForPackage,
   packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
+  packageUsesDeliveryAddress, packageUsesImportTerms, routeOf,
 } from "@/lib/catalog";
 import DocumentsPanel from "@/components/DocumentsPanel";
 import { onSocket, joinRoom } from "@/lib/socket";
@@ -28,7 +30,7 @@ import * as quotationService from "@/services/quotationService";
 import * as financeService from "@/services/financeService";
 import * as serviceCatalogService from "@/services/serviceCatalogService";
 
-const money = (n, ccy) => `${ccy || "USD"} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+const money = (n, ccy) => `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "");
 
 /**
@@ -169,12 +171,7 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
   const total = s.progress?.total ?? 0;
   const delivered = total > 0 && done === total;
   const currentStep = (s.otdSteps ?? []).find((st) => st.status === "pending");
-  const lane =
-    s.servicePackage === "local_transport"
-      ? [s.pickupAddress, s.deliveryAddress].filter(Boolean).join(" → ") || null
-      : s.originPort && s.destinationPort
-        ? `${s.originPort} → ${s.destinationPort}`
-        : s.originPort || null;
+  const lane = routeOf(s) || null;
   // The customer supplies the CRO on this shipment and we're still waiting for it.
   const awaitingCro =
     s.croHandledBy === "customer" &&
@@ -338,15 +335,7 @@ const RequestsTab = ({ onChanged }) => {
                       <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[q.croHandledBy]}</Badge>
                     )}
                   </div>
-                  {q.servicePackage === "local_transport" ? (
-                    (q.pickupAddress || q.deliveryAddress) && (
-                      <p className="text-xs text-muted-foreground mt-1">{q.pickupAddress ?? "—"} → {q.deliveryAddress ?? "—"}</p>
-                    )
-                  ) : (
-                    (q.originPort || q.destinationPort) && (
-                      <p className="text-xs text-muted-foreground mt-1">{q.originPort ?? "—"} → {q.destinationPort ?? "—"}</p>
-                    )
-                  )}
+                  {routeOf(q) && <p className="text-xs text-muted-foreground mt-1">{routeOf(q)}</p>}
                 </div>
                 <Badge variant="outline" className="text-xs">{QUERY_STATUS_LABELS[q.status] ?? q.status}</Badge>
               </div>
@@ -420,6 +409,7 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
   const [ref, setRef] = useState({ ports: [], containerTypes: [] });
   const [form, setForm] = useState({
     originPort: "", destinationPort: "", pickupAddress: "", deliveryAddress: "",
+    freeDays: "", emptyReturnLocation: "",
     containerTypeCode: "", incoterm: "FOB", cargoDescription: "", weightKg: "",
   });
   const [preview, setPreview] = useState(null);
@@ -445,13 +435,16 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
 
   const choosePackage = (code) => {
     setServicePackage(code);
-    // Only Loading Point → Port offers the choice; the others are fixed.
-    setCroHandledBy(code === "local_transport" ? "not_applicable" : "consort");
+    // Only Loading Point → Port offers the choice; the others are fixed. Local transport
+    // has no container and import delivery has one the line already released, so neither
+    // has a CRO at all.
+    setCroHandledBy(packageHasCroChoice(code) || code === "international" ? "consort" : "not_applicable");
   };
 
   const usesPorts = packageUsesPorts(servicePackage);
   const needsDestPort = packageUsesDestinationPort(servicePackage);
   const isLocal = servicePackage === "local_transport";
+  const isImport = packageUsesImportTerms(servicePackage);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -460,11 +453,14 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
       await queryService.createQuery({
         servicePackage,
         croHandledBy,
-        // A local job travels between two addresses; a port job between port codes.
+        // A local job travels between two addresses, an import delivery from a port to
+        // an address, an export job between port codes.
         originPort: usesPorts ? form.originPort || undefined : undefined,
         destinationPort: needsDestPort ? form.destinationPort || undefined : undefined,
-        pickupAddress: form.pickupAddress || undefined,
-        deliveryAddress: isLocal ? form.deliveryAddress || undefined : undefined,
+        pickupAddress: isImport ? undefined : form.pickupAddress || undefined,
+        deliveryAddress: packageUsesDeliveryAddress(servicePackage) ? form.deliveryAddress || undefined : undefined,
+        freeDays: isImport && form.freeDays !== "" ? Number(form.freeDays) : undefined,
+        emptyReturnLocation: isImport ? form.emptyReturnLocation || undefined : undefined,
         containerTypeCode: form.containerTypeCode || undefined,
         incoterm: usesPorts ? form.incoterm || undefined : undefined,
         cargoDescription: form.cargoDescription || undefined,
@@ -589,7 +585,53 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
               </div>
             )}
 
-            {usesPorts && (
+            {/* Import delivery: the container is already at a terminal, so we ask where
+                it is sitting and where it has to go — not for a loading point. */}
+            {isImport && (
+              <div className="grid gap-3">
+                <PortSelect
+                  label="Which port is your container at?"
+                  value={form.originPort}
+                  ports={ref.ports}
+                  onChange={(v) => set("originPort", v)}
+                />
+                <div className="space-y-1.5">
+                  <Label htmlFor="consignee">Delivery address</Label>
+                  <Input id="consignee" required value={form.deliveryAddress}
+                    onChange={(e) => set("deliveryAddress", e.target.value)}
+                    placeholder="Where should we deliver the container?" />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="freedays">Free days <span className="text-muted-foreground font-normal">(if known)</span></Label>
+                    <Input id="freedays" type="number" min="0" max="365" value={form.freeDays}
+                      onChange={(e) => set("freeDays", e.target.value)} placeholder="e.g. 7" />
+                    <p className="text-[11px] text-muted-foreground">
+                      How many days the shipping line gives you before detention charges start.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="emptyreturn">Empty return location <span className="text-muted-foreground font-normal">(if known)</span></Label>
+                    <Input id="emptyreturn" value={form.emptyReturnLocation}
+                      onChange={(e) => set("emptyReturnLocation", e.target.value)}
+                      placeholder="Dry port or yard we return the empty to" />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Container</Label>
+                  <Select value={form.containerTypeCode || "none"} onValueChange={(v) => set("containerTypeCode", v === "none" ? "" : v)}
+                    items={[{ value: "none", label: "—" }, ...ref.containerTypes.map((c) => ({ value: c.code, label: c.label }))]}>
+                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">—</SelectItem>
+                      {ref.containerTypes.map((c) => <SelectItem key={c.code} value={c.code}>{c.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
+
+            {usesPorts && !isImport && (
               <>
                 <div className="space-y-1.5">
                   <Label htmlFor="pickup2">Loading point / factory address</Label>
@@ -702,14 +744,28 @@ const InvoicesTab = () => {
       {invoices.length === 0 && <p className="text-sm text-muted-foreground">No invoices yet.</p>}
       <ul className="divide-y">
         {invoices.map((inv) => {
-          const paid = (inv.payments ?? []).reduce((a, p) => a + Number(p.amount ?? 0), 0);
+          // A customer is tracking what they owe, not our invoice lifecycle — so the
+          // badge reads Unpaid/Paid, never "Draft".
+          const pay = paymentStateOf(inv);
+          const overdue = overdueDaysOf(inv);
           return (
             <li key={inv.id} className="py-3 flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <p className="font-medium text-primary">{inv.referenceNo}</p>
-                <p className="text-xs text-muted-foreground">{money(inv.totalAmount, inv.currency)}{paid > 0 && inv.status !== "paid" ? ` · paid ${money(paid, inv.currency)}` : ""}</p>
+                <p className="text-xs text-muted-foreground">
+                  {money(inv.totalAmount, inv.currency)}
+                  {pay.key === "part_paid" ? ` · paid ${money(pay.paid, inv.currency)} · ${money(pay.outstanding, inv.currency)} still due` : ""}
+                  {inv.dueDate && pay.key !== "paid" && pay.key !== "void" ? ` · due ${fmtDate(inv.dueDate)}` : ""}
+                </p>
               </div>
-              <Badge variant="outline" className="text-xs">{INVOICE_STATUS_LABELS[inv.status] ?? inv.status}</Badge>
+              <div className="flex items-center gap-1.5 shrink-0">
+                {overdue > 0 && (
+                  <Badge variant="outline" className="text-[10px] bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300">
+                    {overdue}d overdue
+                  </Badge>
+                )}
+                <Badge variant="outline" className={`text-xs ${PAYMENT_STATE_CLASS[pay.key] ?? ""}`}>{pay.label}</Badge>
+              </div>
             </li>
           );
         })}

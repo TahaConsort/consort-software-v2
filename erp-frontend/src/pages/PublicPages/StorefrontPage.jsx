@@ -13,7 +13,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select";
-import { SERVICE_OPTIONS, labelForService } from "@/lib/catalog";
+import { SERVICE_OPTIONS, labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
 import { getStorefrontReference, getLoadBoard, getRateQuote } from "@/services/storefrontService";
 import { createQuery } from "@/services/queryService";
 import { saveQuoteDraft } from "@/lib/quoteDraft";
@@ -22,7 +22,7 @@ import { useAuthStore } from "@/store/authStore";
 const MODE_ICON = { sea: Ship, road: Truck, air: Plane, rail: Train };
 const ANY = "any";
 
-const money = (n, ccy = "USD") =>
+const money = (n, ccy = DEFAULT_CURRENCY) =>
   new Intl.NumberFormat("en-US", { style: "currency", currency: ccy, maximumFractionDigits: 0 }).format(Number(n || 0));
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "—");

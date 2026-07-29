@@ -130,19 +130,23 @@ enum ServiceCode {
   destination_services // destination agent: DO + gate pass, destination pickup, delivery, empty return
 }
 
-// The three packages the business actually sells. Sits ABOVE ServiceCode: picking a
+// The packages the business actually sells. Sits ABOVE ServiceCode: picking a
 // package presets `services[]` (utils/servicePackage.js), so everything already keyed
 // on ServiceCode — charge types, rate cards, P&L — is untouched. Needed as its own
-// dimension because `local_transport` and `loading_point_to_port` share the
-// `local_transport` service code yet require different step paths.
+// dimension because `local_transport`, `loading_point_to_port` and `port_to_consignee`
+// share the `local_transport` service code yet require different step paths.
 enum ServicePackage {
   local_transport // #1 inland trucking only — no port, no CRO, no customs, no trade-doc pack
   loading_point_to_port // #2 factory/loading point → port gate
   international // #3 full export path: CRO, customs, terminal, ocean freight, BL, telex
+  // #4 the IMPORT leg, sold on its own: the box is already discharged and released, so
+  // there is no CRO. The customer supplies BOL + delivery order + gate pass + free days;
+  // we pull the container off the terminal, deliver to the consignee, return the empty.
+  port_to_consignee
 }
 
 // Who obtains the Container Release Order. The sub-option on package #2; forced to
-// `consort` on #3 and `not_applicable` on #1 (CHECK in prisma/sql/constraints.sql).
+// `consort` on #3 and `not_applicable` on #1 and #4 (CHECK in prisma/sql/constraints.sql).
 enum CroHandling {
   not_applicable // package #1 — no container, no CRO
   customer // customer supplies the CRO; we record their copy
@@ -182,6 +186,12 @@ enum OtdStepCode {
   local_delivered // canonical 172 — package local_transport terminal; derives status `delivered`
   cro_received_from_customer // canonical 50 — the croHandledBy=customer variant of cro_released
   port_job_completed // canonical 175 — package loading_point_to_port terminal; derives `delivered`
+  // The import delivery leg (package port_to_consignee). Deliberately NOT the
+  // destination_pickup/empty_return pair: those are the destination AGENT's steps on an
+  // export job and sit with Operations, whereas this leg is our own trucks and is
+  // Transport-owned end to end, like the local trucking package.
+  import_container_pickup // canonical 152 — package port_to_consignee; derives `destination_pickup`
+  import_empty_return // canonical 178 — package port_to_consignee terminal; derives `delivered`
   // canonical 95 — ONE customs step carrying filing, duty, examination and seal as
   // sub-actions (ADR-048). Supersedes customs_entry + inspected_sealed, which stay in
   // this enum (and as `active: false` template rows) so historical shipments still resolve.
@@ -386,14 +396,6 @@ enum VendorType {
 enum ChargeDirection {
   receivable // money IN — customer side
   payable // money OUT — vendor side
-}
-
-enum ChargeStatus {
-  estimated // seeded from the quotation cost sheet
-  confirmed // actual amount committed
-  invoiced // on an issued invoice
-  settled // that invoice fully paid
-  cancelled // will not occur
 }
 
 // ================= IDENTITY & ORGANISATION =================
@@ -653,6 +655,12 @@ model Query {
   // Free-text door addresses for local_transport, where a UN/LOCODE port is the wrong shape.
   pickupAddress     String?       @map("pickup_address")
   deliveryAddress   String?       @map("delivery_address")
+  // ── port_to_consignee terms. Free days is the detention-free window the line grants
+  // the consignee; blowing it is what turns a clean import job into a demurrage bill,
+  // so it is captured as a number rather than buried in step notes. The return location
+  // is where the empty goes back (often a dry port, not the terminal it came off).
+  freeDays          Int?          @map("free_days")
+  emptyReturnLocation String?     @map("empty_return_location")
   containerTypeCode String?       @map("container_type_code")
   incoterm          String?
   cargoDescription  String?       @map("cargo_description")
@@ -680,7 +688,7 @@ model Quotation {
   services          ServiceCode[] // snapshot from the query
   servicePackage    ServicePackage?       @map("service_package") // snapshot from the query
   croHandledBy      CroHandling           @default(not_applicable) @map("cro_handled_by") // snapshot from the query
-  currency          String                @default("USD") @db.Char(3)
+  currency          String                @default("PKR") @db.Char(3)
   fxRate            Decimal?              @map("fx_rate") @db.Decimal(12, 6)
   totalAmount       Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
   validityDate      DateTime?             @map("validity_date") // auto-expiry (RULE-QT-06)
@@ -823,6 +831,10 @@ model Shipment {
   // port is the wrong shape. Snapshotted from the Query so transport knows where to drive.
   pickupAddress    String?                 @map("pickup_address")
   deliveryAddress  String?                 @map("delivery_address")
+  // Snapshotted from the Query at approval, same as the addresses above (package
+  // port_to_consignee — see the Query model for what they mean).
+  freeDays         Int?                    @map("free_days")
+  emptyReturnLocation String?              @map("empty_return_location")
   incoterm         String?
   cancelReason     String?                 @map("cancel_reason") // RULE-SH-11
   closedById       String?                 @map("closed_by_id") // ops_manager / Management (RULE-SH-12)
@@ -840,7 +852,6 @@ model Shipment {
   exceptions       ShipmentException[]
   statusHistory    ShipmentStatusHistory[]
   invoices         Invoice[]
-  charges          ShipmentCharge[]
   createdAt        DateTime                @default(now())
   updatedAt        DateTime                @updatedAt
 
@@ -866,7 +877,6 @@ model OtdStep {
   reopenCount     Int            @default(0) @map("reopen_count") // RULE-SH-05
   notes           String?        // free-text handover notes for the step owner
   formData        Json?          @map("form_data") // structured per-step capture (route/party/etc.)
-  charges         ShipmentCharge[]
   actions         OtdStepAction[] // the step's sub-action checklist (ADR-048)
 
   @@unique([shipmentId, canonicalNo]) // rows exist ONLY for the composed path (INV-04)
@@ -968,7 +978,6 @@ model InvoiceLine {
   unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
   amount      Decimal @db.Decimal(14, 2)
   sortOrder   Int     @default(0) @map("sort_order")
-  charge      ShipmentCharge? // set when this line was generated from a ShipmentCharge
 
   @@index([invoiceId])
   @@map("invoice_lines")
@@ -1010,7 +1019,6 @@ model Vendor {
   notes            String?
   isActive         Boolean          @default(true) @map("is_active")
   invoices         Invoice[]
-  charges          ShipmentCharge[]
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -1019,7 +1027,10 @@ model Vendor {
   @@map("vendors")
 }
 
-// Seeded, admin-extensible charge catalog (a table, not an enum)
+// Seeded, admin-extensible charge catalog (a table, not an enum). This is quote
+// pricing vocabulary — QuotationChargeLine.chargeCode names one of these codes so
+// the quote builder can categorise what it is selling. There is no shipment-side
+// charge ledger: on a job, invoices are the money record.
 model ChargeType {
   code             String           @id // 'ocean_freight', 'lolo', ...
   label            String
@@ -1027,43 +1038,8 @@ model ChargeType {
   defaultStepCode  OtdStepCode?     @map("default_step_code") // where this money usually lands
   service          ServiceCode? // which sold service it belongs to
   isActive         Boolean          @default(true) @map("is_active")
-  charges          ShipmentCharge[]
 
   @@map("charge_types")
-}
-
-// The job-charge ledger — one row per expected/actual money movement on a shipment
-model ShipmentCharge {
-  id                    String          @id @default(uuid())
-  shipmentId            String          @map("shipment_id")
-  shipment              Shipment        @relation(fields: [shipmentId], references: [id])
-  otdStepId             String?         @map("otd_step_id") // per-step money; null = job-level
-  otdStep               OtdStep?        @relation(fields: [otdStepId], references: [id])
-  chargeCode            String          @map("charge_code")
-  chargeType            ChargeType      @relation(fields: [chargeCode], references: [code])
-  direction             ChargeDirection
-  vendorId              String?         @map("vendor_id") // payables; null for receivables (customer implied)
-  vendor                Vendor?         @relation(fields: [vendorId], references: [id])
-  description           String?
-  currency              String          @default("USD") @db.Char(3)
-  fxRate                Decimal?        @map("fx_rate") @db.Decimal(12, 6)
-  estimatedAmount       Decimal         @map("estimated_amount") @db.Decimal(14, 2)
-  actualAmount          Decimal?        @map("actual_amount") @db.Decimal(14, 2)
-  status                ChargeStatus    @default(estimated)
-  invoiceLineId         String?         @unique @map("invoice_line_id")
-  invoiceLine           InvoiceLine?    @relation(fields: [invoiceLineId], references: [id])
-  quotationChargeLineId String?         @map("quotation_charge_line_id")
-  confirmedById         String?         @map("confirmed_by_id")
-  confirmedAt           DateTime?       @map("confirmed_at")
-  cancelReason          String?         @map("cancel_reason")
-  createdById           String?         @map("created_by_id")
-  createdAt             DateTime        @default(now())
-  updatedAt             DateTime        @updatedAt
-
-  @@index([shipmentId, direction, status])
-  @@index([otdStepId])
-  @@index([vendorId, status])
-  @@map("shipment_charges")
 }
 
 // ================= ACTION ENGINE & TASKS =================
@@ -1300,7 +1276,7 @@ model RateCard {
   originPort        String?     @map("origin_port") // null = any lane
   destinationPort   String?     @map("destination_port")
   containerTypeCode String?     @map("container_type_code") // null = any container
-  currency          String      @default("USD") @db.Char(3)
+  currency          String      @default("PKR") @db.Char(3)
   baseAmount        Decimal     @map("base_amount") @db.Decimal(14, 2)
   perKgAmount       Decimal?    @map("per_kg_amount") @db.Decimal(14, 4) // optional weight surcharge
   minAmount         Decimal?    @map("min_amount") @db.Decimal(14, 2)
@@ -1330,7 +1306,7 @@ model LoadBoardPosting {
   validUntil        DateTime?       @map("valid_until") // expiry sweep (WORKFLOW §14)
   transitDays       Int?            @map("transit_days")
   indicativeRate    Decimal?        @map("indicative_rate") @db.Decimal(14, 2)
-  currency          String          @default("USD") @db.Char(3)
+  currency          String          @default("PKR") @db.Char(3)
   services          ServiceCode[] // what's on offer
   notes             String?
   status            LoadBoardStatus @default(open)

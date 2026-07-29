@@ -7,7 +7,10 @@ import {
   CRO_HANDLING_LABELS,
   inferPackageFromServices,
   PACKAGE_SERVICES,
+  packageUsesDeliveryAddress,
   packageUsesDestinationPort,
+  packageUsesImportTerms,
+  packageUsesPickupAddress,
   packageUsesPorts,
   resolveCroMode,
   resolveServices,
@@ -99,7 +102,7 @@ export const composePreview = catchAsync(async (req, res, next) => {
   });
 });
 
-/* ── GET /api/services/packages ── the three offerings + their CRO options */
+/* ── GET /api/services/packages ── the offerings + their CRO options and route shape */
 export const getPackages = catchAsync(async (req, res) => {
   res.json({
     success: true,
@@ -111,6 +114,12 @@ export const getPackages = catchAsync(async (req, res) => {
       croModes: allowedCroModes(code).map((m) => ({ code: m, label: CRO_HANDLING_LABELS[m] })),
       usesPorts: packageUsesPorts(code),
       usesDestinationPort: packageUsesDestinationPort(code),
+      // Which door fields the intake form should ask for. port_to_consignee is the
+      // first package to want a port AND an address, so a client cannot infer these
+      // from usesPorts alone any more.
+      usesPickupAddress: packageUsesPickupAddress(code),
+      usesDeliveryAddress: packageUsesDeliveryAddress(code),
+      usesImportTerms: packageUsesImportTerms(code),
     })),
   });
 });

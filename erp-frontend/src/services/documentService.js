@@ -18,6 +18,7 @@ export const DOC_TYPE_OPTIONS = [
   { value: "authority_letterhead", label: "Authority Letterhead" },
   { value: "undertaking", label: "Undertaking" },
   { value: "quotation", label: "Quotation" },
+  { value: "rate_confirmation", label: "Rate Confirmation (RC)" },
   { value: "lc", label: "Letter of Credit / SWIFT Advice" },
   { value: "cro", label: "Container Release Order (CRO)" },
   { value: "inspection_cert", label: "Inspection & Seal Certificate" },

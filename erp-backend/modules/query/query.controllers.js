@@ -132,6 +132,8 @@ export const createQuery = catchAsync(async (req, res, next) => {
         destinationPort: req.body.destinationPort ?? null,
         pickupAddress: req.body.pickupAddress ?? null,
         deliveryAddress: req.body.deliveryAddress ?? null,
+        freeDays: req.body.freeDays ?? null,
+        emptyReturnLocation: req.body.emptyReturnLocation ?? null,
         containerTypeCode: req.body.containerTypeCode ?? null,
         incoterm: req.body.incoterm ?? null,
         cargoDescription: req.body.cargoDescription ?? null,

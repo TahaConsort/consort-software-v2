@@ -8,6 +8,7 @@ import {
   approveQuotation,
   rejectQuotation,
   reviseQuotation,
+  listChargeTypes,
 } from "./quotation.controllers.js";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireQuotationAccess, attachQuotationScope } from "./quotation.middleware.js";
@@ -24,6 +25,9 @@ const router = express.Router();
 router.use(protect, requireQuotationAccess, attachQuotationScope);
 
 router.get("/", requirePermission("quotation.read"), listQuotations);
+// The seeded charge-code catalog the quote builder prices against. Declared
+// before `/:id` or the param route swallows it.
+router.get("/charge-types", requirePermission("quotation.read"), listChargeTypes);
 router.get("/:id", requirePermission("quotation.read"), getQuotation);
 
 // Ops drafts / edits / revises; only ops_manager sends (four-eyes, RULE-QT-01).

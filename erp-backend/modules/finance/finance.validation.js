@@ -22,16 +22,6 @@ export const createInvoiceSchema = z.object({
     .min(1, "At least one charge line is required"),
 });
 
-// Draft an invoice from existing job-charges (freight-forwarding OTC upgrade).
-export const invoiceFromChargesSchema = z.object({
-  shipmentId: z.string().min(1, "shipmentId is required"),
-  direction: z.enum(["receivable", "payable"]),
-  chargeIds: z.array(z.string().min(1)).min(1, "Select at least one charge to bill"),
-  vendorId: z.string().min(1).optional(), // required for payables (all charges must share it)
-  currency: z.string().length(3).optional(),
-  dueDate: z.coerce.date().optional(),
-});
-
 export const recordPaymentSchema = z.object({
   amount: z.coerce.number().positive("Payment amount must be positive"),
   method: z.enum(["bank_transfer", "cheque", "cash", "lc_settlement", "other"]),

@@ -34,8 +34,8 @@ const MANAGEMENT_PERMS = [
   "report.read", "audit.read", "dashboard.read",
   // Intake channels & storefront (CRM_MASTER §5.20/§5.21)
   "inquiry.read", "inquiry.convert", "lc.read", "lc.convert", "loadboard.manage",
-  // Vendors & job-charge ledger (freight-forwarding OTC upgrade)
-  "vendor.read", "vendor.manage", "charge.read", "charge.create", "charge.confirm",
+  // Vendors — the counterparties on payable invoices
+  "vendor.read", "vendor.manage",
 ];
 
 export const PERMISSIONS_BY_ROLE = {
@@ -60,7 +60,7 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "inquiry.read", "inquiry.convert",
-    "vendor.read", "charge.read",
+    "vendor.read",
   ],
 
   bdo: [
@@ -75,7 +75,7 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "inquiry.read", "inquiry.convert",
-    "vendor.read", "charge.read",
+    "vendor.read",
   ],
 
   ops_manager: [
@@ -88,7 +88,7 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "lc.read", "lc.convert", "loadboard.manage",
-    "vendor.read", "vendor.manage", "charge.read", "charge.create", "charge.confirm",
+    "vendor.read", "vendor.manage",
   ],
 
   ops_exec: [
@@ -99,7 +99,7 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
     "lc.read", "lc.convert",
-    "vendor.read", "charge.read", "charge.create",
+    "vendor.read",
   ],
 
   compliance_manager: [
@@ -109,7 +109,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete", "task.reassign",
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "vendor.read", "charge.read", "charge.create", "charge.confirm",
+    "vendor.read",
   ],
 
   compliance_exec: [
@@ -118,7 +118,6 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
-    "charge.read",
   ],
 
   transport_manager: [
@@ -128,7 +127,7 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "loadboard.manage",
-    "vendor.read", "vendor.manage", "charge.read", "charge.create", "charge.confirm",
+    "vendor.read", "vendor.manage",
   ],
 
   // Mirrors compliance_exec. Transport owns 5 of the 6 steps on a Local Transport job,
@@ -139,7 +138,6 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
-    "charge.read",
   ],
 
   accounts: [
@@ -148,7 +146,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "vendor.read", "vendor.manage", "charge.read", "charge.create", "charge.confirm",
+    "vendor.read", "vendor.manage",
   ],
 
   customer: [

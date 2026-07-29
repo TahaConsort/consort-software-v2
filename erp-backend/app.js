@@ -29,7 +29,6 @@ import loadboardRoutes from "./modules/loadboard/loadboard.routes.js";
 import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
-import chargeRoutes from "./modules/charge/charge.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
 import { AppError } from "./utils/AppError.js";
 
@@ -105,7 +104,6 @@ app.use("/api/otc", otcRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/vendors", vendorRoutes);
-app.use("/api/charges", chargeRoutes);
 app.use("/api/documents", documentRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/dashboard", dashboardRoutes);

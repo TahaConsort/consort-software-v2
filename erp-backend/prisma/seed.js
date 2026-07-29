@@ -17,6 +17,7 @@
 import bcrypt from "bcrypt";
 import { pathToFileURL } from "url";
 import prisma from "../config/prisma.js";
+import { DEFAULT_CURRENCY } from "../utils/currency.js";
 
 const DEPARTMENTS = [
   { code: "management", name: "Management" },
@@ -49,11 +50,21 @@ const DEPARTMENTS = [
 const LOCAL = "local_transport";
 const LP_PORT = "loading_point_to_port";
 const INTL = "international";
+const PORT_CONSIGNEE = "port_to_consignee";
+// The two EXPORT packages that run a full origin leg (empty pickup → stuffing → inland
+// transit → terminal gate-in). Deliberately excludes port_to_consignee, which moves in
+// the opposite direction: it starts at the terminal instead of ending there.
 const ALL_PORT_PACKAGES = [LP_PORT, INTL];
 
 const OTD_STEP_TEMPLATES = [
   // ── Every package ──────────────────────────────────────────────────────────────
-  { canonicalNo: 10, stepCode: "order_lock", title: "Order Lock",
+  // The order is locked against a signed RATE CONFIRMATION, on every package — the
+  // quotation says what we offered, the RC is the rate actually agreed, and nothing
+  // downstream should move until it exists. The gate lives in
+  // OTD_STEP_ACTION_TEMPLATES (ADR-048) rather than `requiredDocTypes` so the step
+  // renders an upload item on its checklist; missingRequiredDocs unions both
+  // sources, so RULE-SH-06 blocks completion either way.
+  { canonicalNo: 10, stepCode: "order_lock", title: "Order Lock (Rate Confirmation)",
     ownerDepartment: "operations", always: true, packages: [], croModes: [], services: [],
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "order_confirmed" },
 
@@ -65,7 +76,7 @@ const OTD_STEP_TEMPLATES = [
   //    package — international collects a seven-document pack, loading-point-to-port the
   //    original three. missingRequiredDocs unions both sources, so RULE-SH-06 is unchanged.
   { canonicalNo: 20, stepCode: "order_confirmed", title: "Customer Doc Pack & Order Confirmation",
-    ownerDepartment: "operations", always: true, packages: ALL_PORT_PACKAGES, croModes: [], services: [],
+    ownerDepartment: "operations", always: true, packages: [...ALL_PORT_PACKAGES, PORT_CONSIGNEE], croModes: [], services: [],
     requiredDocTypes: [],
     dueOffsetHours: 48, derivedStatus: "order_confirmed" },
 
@@ -128,8 +139,11 @@ const OTD_STEP_TEMPLATES = [
     requiredDocTypes: ["inspection_cert"], dueOffsetHours: 48, derivedStatus: "inspected_sealed", active: false },
 
   // ── Terminal + ocean ──────────────────────────────────────────────────────────
+  // Package-gated to the export packages: this is the ORIGIN gate-in, and
+  // port_to_consignee also buys `port_handling` (it pays terminal charges to get the
+  // box OUT). Without the gate that package would compose a gate-in it never performs.
   { canonicalNo: 110, stepCode: "port_handover", title: "Port Gate-In / Terminal Handover (EIR)",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["port_handling", "sea_freight"],
+    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["port_handling", "sea_freight"],
     requiredDocTypes: ["eir_in"], dueOffsetHours: 24, derivedStatus: "port_handover" },
   { canonicalNo: 120, stepCode: "bol_issued", title: "Bill of Lading Issuance",
     ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["sea_freight"],
@@ -142,12 +156,24 @@ const OTD_STEP_TEMPLATES = [
     requiredDocTypes: ["telex"], dueOffsetHours: 48, derivedStatus: "telex_released" },
 
   // ── Destination agent (add-on: Ops adds `destination_services`) ───────────────
+  // Package-gated to the export packages. These are the FAR end of an export job, run
+  // by an overseas agent; port_to_consignee does the same physical work at home with
+  // our own trucks and has its own Transport-owned steps below. Without the gate,
+  // adding `destination_services` to an import job would compose both sets.
   { canonicalNo: 150, stepCode: "destination_do", title: "Delivery Order & Gate Pass (Dest. Agent)",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
     requiredDocTypes: ["delivery_order", "gate_pass"], dueOffsetHours: 48, derivedStatus: "destination_do" },
   { canonicalNo: 160, stepCode: "destination_pickup", title: "Destination Container Pickup (EIR)",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
     requiredDocTypes: ["eir_pickup"], dueOffsetHours: 48, derivedStatus: "destination_pickup" },
+
+  // ── Package #4: the import delivery leg (port → consignee). Transport-owned end to
+  //    end, same reasoning as the local trucking package — it is our own vehicles, and
+  //    a department handoff mid-run only produces 403s. The customer's BOL / delivery
+  //    order / gate pass are collected earlier, on the order_confirmed checklist.
+  { canonicalNo: 152, stepCode: "import_container_pickup", title: "Container Pickup from Terminal (EIR)",
+    ownerDepartment: "transport", always: true, packages: [PORT_CONSIGNEE], croModes: [], services: [],
+    requiredDocTypes: ["eir_pickup"], dueOffsetHours: 24, derivedStatus: "destination_pickup" },
 
   // ── Terminal steps, one per package. Each derives `delivered`, which is what
   //    maybeSettleTx (otc.service.js) requires before a shipment can settle — so a
@@ -155,15 +181,24 @@ const OTD_STEP_TEMPLATES = [
   { canonicalNo: 170, stepCode: "delivered", title: "Final Delivery / POD",
     ownerDepartment: "operations", always: true, packages: [INTL], croModes: [], services: [],
     requiredDocTypes: ["pod"], dueOffsetHours: 48, derivedStatus: "delivered" },
+  // Shared by the local trucking job and the import delivery leg — both are our own
+  // vehicle arriving at a door and collecting a signature.
   { canonicalNo: 172, stepCode: "local_delivered", title: "Delivered & POD Collected",
-    ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
+    ownerDepartment: "transport", always: true, packages: [LOCAL, PORT_CONSIGNEE], croModes: [], services: [],
     requiredDocTypes: ["pod"], dueOffsetHours: 24, derivedStatus: "delivered" },
   { canonicalNo: 175, stepCode: "port_job_completed", title: "Port Handover Confirmed / Job Complete",
     ownerDepartment: "operations", always: true, packages: [LP_PORT], croModes: [], services: [],
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "delivered" },
 
+  // Empty return — two rows because the two packages return the box for different
+  // reasons and different departments do it. Both derive `delivered` (there is no
+  // later status) and both sit AFTER their delivery step, which maybeSettleTx already
+  // accounts for: it refuses to settle while any step is still pending.
+  { canonicalNo: 178, stepCode: "import_empty_return", title: "Empty Container Return (EIR)",
+    ownerDepartment: "transport", always: true, packages: [PORT_CONSIGNEE], croModes: [], services: [],
+    requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
   { canonicalNo: 180, stepCode: "empty_return", title: "Empty Container Return (EIR)",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
     requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
 ];
 
@@ -176,6 +211,11 @@ const OTD_STEP_TEMPLATES = [
 // the shipment (same rule as RULE-SH-06), never ticked by hand. `kind: "manual"` items
 // are ticked by a member of the step's owning department.
 const OTD_STEP_ACTION_TEMPLATES = [
+  // ── Order lock — EVERY package. Empty packages/croModes/services means no gate,
+  //    so local trucking, loading-point-to-port and international all carry it.
+  //    The order cannot lock until the signed RC is on the shipment.
+  { stepCode: "order_lock", actionCode: "rate_confirmation", title: "Rate Confirmation (RC)", kind: "document", docType: "rate_confirmation", sortOrder: 10, required: true, packages: [], croModes: [], services: [] },
+
   // Order confirmation — INTERNATIONAL. The full export document pack the customer
   // must hand over before the order is confirmed.
   { stepCode: "order_confirmed", actionCode: "packing_list",         title: "Packing List",           kind: "document", docType: "packing_list",          sortOrder: 10, required: true, packages: [INTL],    croModes: [], services: [] },
@@ -193,6 +233,15 @@ const OTD_STEP_ACTION_TEMPLATES = [
   { stepCode: "order_confirmed", actionCode: "lp_packing_list",       title: "Packing List",          kind: "document", docType: "packing_list",          sortOrder: 10, required: true, packages: [LP_PORT], croModes: [], services: [] },
   { stepCode: "order_confirmed", actionCode: "lp_commercial_invoice", title: "Commercial Invoice",    kind: "document", docType: "commercial_invoice",    sortOrder: 20, required: true, packages: [LP_PORT], croModes: [], services: [] },
   { stepCode: "order_confirmed", actionCode: "lp_authority_letter",   title: "Authority Letterhead",  kind: "document", docType: "authority_letterhead",  sortOrder: 30, required: true, packages: [LP_PORT], croModes: [], services: [] },
+
+  // Order confirmation — PORT → CONSIGNEE. What the customer must hand over before we
+  // can take their container off the terminal. The BOL proves title, the delivery order
+  // is the line's release, the gate pass is what the terminal actually wants at the
+  // gate, and the free days tell us the clock we are racing before detention starts.
+  { stepCode: "order_confirmed", actionCode: "pc_bol",           title: "Bill of Lading (BOL)",              kind: "document", docType: "bol",            sortOrder: 10, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_delivery_order", title: "Delivery Order (DO)",              kind: "document", docType: "delivery_order", sortOrder: 20, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_gate_pass",     title: "Gate Pass",                         kind: "document", docType: "gate_pass",      sortOrder: 30, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_free_days",     title: "Free days confirmed with customer", kind: "manual",   docType: null,             sortOrder: 40, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
 
   // Customs clearance — the merged step's working checklist.
   { stepCode: "customs_clearance", actionCode: "gd_filed",         title: "GD filed in WeBOC / PSW",        kind: "manual",   docType: null,               sortOrder: 10, required: true, packages: [], croModes: [], services: [] },
@@ -254,28 +303,31 @@ const CONTAINER_TYPES = [
 
 // Rate cards powering the public rate calculator (CRM_MASTER §5.20). Generic
 // service-only rows are the fallback; lane-specific rows override them.
+// Amounts are in DEFAULT_CURRENCY (PKR), restated from the original USD figures at
+// USD_TO_PKR. Indicative storefront pricing only — replace with real desk rates.
 const RATE_CARDS = [
-  { service: "local_transport",  baseAmount: 350,  perKgAmount: 0.02, minAmount: 250 },
-  { service: "customs_clearance", baseAmount: 200,  minAmount: 150 },
-  { service: "sea_freight",      baseAmount: 1200, perKgAmount: 0.01, minAmount: 900 },
-  { service: "port_handling",    baseAmount: 300,  minAmount: 200 },
-  { service: "lc_finance",       baseAmount: 450,  minAmount: 300 },
-  { service: "destination_services", baseAmount: 400, minAmount: 300 },
+  { service: "local_transport",  baseAmount: 98_000,  perKgAmount: 5.6, minAmount: 70_000 },
+  { service: "customs_clearance", baseAmount: 56_000,  minAmount: 42_000 },
+  { service: "sea_freight",      baseAmount: 336_000, perKgAmount: 2.8, minAmount: 252_000 },
+  { service: "port_handling",    baseAmount: 84_000,  minAmount: 56_000 },
+  { service: "lc_finance",       baseAmount: 126_000, minAmount: 84_000 },
+  { service: "destination_services", baseAmount: 112_000, minAmount: 84_000 },
   // Lane-specific sea freight overrides
-  { service: "sea_freight", originPort: "PKKHI", destinationPort: "AEJEA", baseAmount: 950 },
-  { service: "sea_freight", originPort: "PKKHI", destinationPort: "CNSHA", baseAmount: 1450 },
-  { service: "sea_freight", originPort: "PKKHI", destinationPort: "NLRTM", baseAmount: 2200 },
-  { service: "sea_freight", originPort: "AEJEA", destinationPort: "USNYC", baseAmount: 2100 },
+  { service: "sea_freight", originPort: "PKKHI", destinationPort: "AEJEA", baseAmount: 266_000 },
+  { service: "sea_freight", originPort: "PKKHI", destinationPort: "CNSHA", baseAmount: 406_000 },
+  { service: "sea_freight", originPort: "PKKHI", destinationPort: "NLRTM", baseAmount: 616_000 },
+  { service: "sea_freight", originPort: "AEJEA", destinationPort: "USNYC", baseAmount: 588_000 },
 ];
 
 const DAY = 24 * 60 * 60 * 1000;
 // Load board postings shown on the public storefront (CRM_MASTER §5.20).
+// indicativeRate is in DEFAULT_CURRENCY (PKR), same basis as RATE_CARDS above.
 const LOAD_BOARD_POSTINGS = [
-  { mode: "sea",  originPort: "PKKHI", destinationPort: "AEJEA", containerTypeCode: "40HC", equipment: "40HC x4", capacity: 4, transitDays: 5,  indicativeRate: 950,  departureInDays: 3,  services: ["sea_freight", "port_handling"] },
-  { mode: "sea",  originPort: "PKKHI", destinationPort: "CNSHA", containerTypeCode: "20GP", equipment: "20GP x6", capacity: 6, transitDays: 18, indicativeRate: 1450, departureInDays: 6,  services: ["sea_freight", "customs_clearance", "port_handling"] },
-  { mode: "road", originPort: "PKKHI", destinationPort: "PKQCT", equipment: "Flatbed x2",   capacity: 2, transitDays: 1,  indicativeRate: 300,  departureInDays: 1,  services: ["local_transport"] },
-  { mode: "sea",  originPort: "PKKHI", destinationPort: "NLRTM", containerTypeCode: "REEFER40", equipment: "Reefer 40 x2", capacity: 2, transitDays: 24, indicativeRate: 2600, departureInDays: 9, services: ["sea_freight", "customs_clearance", "port_handling", "lc_finance"] },
-  { mode: "sea",  originPort: "AEJEA", destinationPort: "USNYC", containerTypeCode: "40GP", equipment: "40GP x3", capacity: 3, transitDays: 22, indicativeRate: 2100, departureInDays: 5,  services: ["sea_freight", "port_handling"] },
+  { mode: "sea",  originPort: "PKKHI", destinationPort: "AEJEA", containerTypeCode: "40HC", equipment: "40HC x4", capacity: 4, transitDays: 5,  indicativeRate: 266_000,  departureInDays: 3,  services: ["sea_freight", "port_handling"] },
+  { mode: "sea",  originPort: "PKKHI", destinationPort: "CNSHA", containerTypeCode: "20GP", equipment: "20GP x6", capacity: 6, transitDays: 18, indicativeRate: 406_000, departureInDays: 6,  services: ["sea_freight", "customs_clearance", "port_handling"] },
+  { mode: "road", originPort: "PKKHI", destinationPort: "PKQCT", equipment: "Flatbed x2",   capacity: 2, transitDays: 1,  indicativeRate: 84_000,  departureInDays: 1,  services: ["local_transport"] },
+  { mode: "sea",  originPort: "PKKHI", destinationPort: "NLRTM", containerTypeCode: "REEFER40", equipment: "Reefer 40 x2", capacity: 2, transitDays: 24, indicativeRate: 728_000, departureInDays: 9, services: ["sea_freight", "customs_clearance", "port_handling", "lc_finance"] },
+  { mode: "sea",  originPort: "AEJEA", destinationPort: "USNYC", containerTypeCode: "40GP", equipment: "40GP x3", capacity: 3, transitDays: 22, indicativeRate: 588_000, departureInDays: 5,  services: ["sea_freight", "port_handling"] },
 ];
 
 // ── Bootstrap accounts (staging) ───────────────────────────────────────────────
@@ -313,17 +365,69 @@ const DEPT_HEADS = {
   hr: "hr@consort.test",
 };
 
+/**
+ * Refuse to wipe a database that looks like it holds real work.
+ *
+ * `clearData()` deletes 40+ tables and cannot be undone. This project's
+ * DATABASE_URL points at a SHARED remote Postgres carrying the working demo —
+ * customers, shipments, invoices, the audit trail — so a reflexive
+ * `node prisma/seed.js` while debugging destroys it. It has happened. The two
+ * signals that matter are "the DB is not local" and "the DB already has business
+ * rows"; either one alone is enough to stop and make the caller say so explicitly.
+ */
+async function assertWipeAllowed() {
+  if (process.argv.includes("--force-wipe")) {
+    console.warn("⚠  --force-wipe given — clearing all data.");
+    return;
+  }
+
+  const url = process.env.DATABASE_URL ?? "";
+  const host = (url.match(/@([^/:?]+)/) ?? [])[1] ?? "(unknown)";
+  const isLocal = /^(localhost|127\.0\.0\.1|::1|host\.docker\.internal)$/i.test(host);
+
+  // Business rows, not catalogs — a seeded-but-unused DB should stay wipeable.
+  const [shipments, quotations, queries, customers, invoices] = await Promise.all([
+    prisma.shipment.count(),
+    prisma.quotation.count(),
+    prisma.query.count(),
+    prisma.customer.count(),
+    prisma.invoice.count(),
+  ]);
+  const total = shipments + quotations + queries + customers + invoices;
+
+  if (isLocal && total === 0) return;
+
+  console.error(`
+✖ Refusing to wipe the database.
+
+  host      ${host}${isLocal ? " (local)" : "  ← NOT a local database"}
+  business  ${shipments} shipments · ${quotations} quotations · ${queries} queries · ${customers} customers · ${invoices} invoices
+
+  A bare seed runs clearData(), which deletes 40+ tables including the audit log,
+  chat history and uploaded documents. None of that is recoverable.
+
+  What you almost certainly want instead:
+    node prisma/seed.js --templates-only   step/task/charge catalogs (upserts, no delete)
+    node prisma/seed.js --accounts-only    role logins + reporting tree (upserts, no delete)
+
+  If you genuinely mean to destroy everything above, say so:
+    node prisma/seed.js --force-wipe
+`);
+  process.exit(1);
+}
+
 // ── Wipe all business + account data (departments/templates/reference are
 // re-upserted below). FK-safe order: children first, then break the
 // department→user head FK, then users/employees/customers, then sequences.
 async function clearData() {
+  await assertWipeAllowed();
   await prisma.department.updateMany({ data: { headUserId: null } });
 
   const steps = [
     "rateCard", "loadBoardPosting", "publicInquiry", "bankLcReferral",
     "auditLog", "outboxEvent", "notificationDelivery", "notification", "notificationPreference",
     "chatMessage", "chatChannelMember", "chatChannel", "document",
-    "shipmentCharge", "payment", "invoiceLine", "invoice",
+    "payment", "invoiceLine", "invoice",
     "otcMilestone", "otdStep", "shipmentStatusHistory", "shipmentException", "task", "shipment",
     "quotationChargeLine", "quotation", "query",
     "visitPlan", "outreach", "leadStatusHistory", "lead",
@@ -393,6 +497,10 @@ export async function seedAccounts() {
 // customer-CRO step is a chase, not a filing.
 const TASK_TITLE_OVERRIDES = {
   cro_received_from_customer: "Obtain CRO copy from customer",
+  // `empty_return` and `import_empty_return` share a title; the task board shows both
+  // to Transport and Operations respectively, so say which job each one belongs to.
+  import_container_pickup: "Collect the container from the terminal",
+  import_empty_return: "Return the empty container to the yard",
 };
 
 /**
@@ -503,7 +611,7 @@ async function main() {
       data: {
         ...rest,
         referenceNo: `LB-${year}-${String(i + 1).padStart(5, "0")}`,
-        currency: "USD",
+        currency: DEFAULT_CURRENCY,
         departureDate: new Date(Date.now() + departureInDays * DAY),
         validUntil: new Date(Date.now() + (departureInDays + 14) * DAY),
       },
@@ -532,9 +640,12 @@ const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(proces
 
 if (isEntryPoint) {
   // Two non-destructive subsets, the only forms safe to run against a database that
-  // already holds real work. Bare `node prisma/seed.js` WIPES 40+ tables.
+  // already holds real work. Bare `node prisma/seed.js` WIPES 40+ tables — and is
+  // refused outright by assertWipeAllowed() unless the DB is local and empty, or
+  // --force-wipe is passed.
   //   --templates-only  step/task/charge catalogs (upsert/replace-in-place)
   //   --accounts-only   role logins, reporting tree, department heads (all upserts)
+  //   --force-wipe      override the guard and clear everything (irreversible)
   const templatesOnly = process.argv.includes("--templates-only");
   const accountsOnly = process.argv.includes("--accounts-only");
 

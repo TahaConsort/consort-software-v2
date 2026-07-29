@@ -18,12 +18,6 @@ export const createInvoice = async (payload) => {
   return res.data;
 };
 
-// Draft an invoice from existing job-charges (freight-forwarding OTC upgrade).
-export const createInvoiceFromCharges = async (payload) => {
-  const res = await api.post("/finance/invoices/from-charges", payload);
-  return res.data;
-};
-
 export const issueInvoice = async (id) => {
   const res = await api.post(`/finance/invoices/${id}/issue`);
   return res.data;

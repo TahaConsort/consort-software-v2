@@ -27,7 +27,7 @@ const hydrate = async (tasks) => {
   const shipmentIds = [...new Set(tasks.map((t) => t.shipmentId).filter(Boolean))];
   const stepIds = [...new Set(tasks.map((t) => t.otdStepId).filter(Boolean))];
 
-  const [departments, assignees, shipments, chargeGroups] = await Promise.all([
+  const [departments, assignees, shipments, invoiceGroups] = await Promise.all([
     prisma.department.findMany({ where: { id: { in: deptIds } }, select: { id: true, name: true, code: true } }),
     prisma.user.findMany({
       where: { id: { in: assigneeIds } },
@@ -36,11 +36,11 @@ const hydrate = async (tasks) => {
     prisma.shipment.findMany({ where: { id: { in: shipmentIds } }, select: { id: true, referenceNo: true } }),
     // Batch the per-step money for all step-linked tasks on this page.
     stepIds.length
-      ? prisma.shipmentCharge.groupBy({
-          by: ["otdStepId", "direction"],
-          where: { otdStepId: { in: stepIds }, status: { not: "cancelled" } },
+      ? prisma.invoice.groupBy({
+          by: ["otdStepId", "kind"],
+          where: { otdStepId: { in: stepIds }, status: { not: "void" } },
           _count: true,
-          _sum: { estimatedAmount: true },
+          _sum: { totalAmount: true },
         })
       : Promise.resolve([]),
   ]);
@@ -48,11 +48,11 @@ const hydrate = async (tasks) => {
   const userById = new Map(assignees.map((u) => [u.id, u]));
   const shipById = new Map(shipments.map((s) => [s.id, s]));
 
-  // Fold the grouped charge sums into { stepId: { receivable, payable } }.
+  // Fold the grouped invoice sums into { stepId: { receivable, payable } }.
   const moneyByStep = new Map();
-  for (const g of chargeGroups) {
+  for (const g of invoiceGroups) {
     const entry = moneyByStep.get(g.otdStepId) ?? { receivable: { count: 0, total: 0 }, payable: { count: 0, total: 0 } };
-    entry[g.direction] = { count: g._count, total: Number(g._sum.estimatedAmount ?? 0) };
+    entry[g.kind ?? "receivable"] = { count: g._count, total: Number(g._sum.totalAmount ?? 0) };
     moneyByStep.set(g.otdStepId, entry);
   }
 

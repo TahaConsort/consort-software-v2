@@ -20,6 +20,7 @@ const LINE = {
   ocean_freight: "Ocean Freight",
   documentation_fee: "Documentation / BL Fee",
   freight_forwarding_fee: "Freight Forwarding Service Fee",
+  detention_demurrage: "Detention / Demurrage",
 };
 
 const TEMPLATES = {
@@ -32,6 +33,16 @@ const TEMPLATES = {
     "port_handling",
     "inland_transport",
     "documentation_fee",
+  ],
+  // Import delivery: terminal charges to get the box out, the run to the consignee, the
+  // run back with the empty. Detention is priced at zero by default and only bites when
+  // the free days run out — but it belongs on the sheet so nobody forgets to quote it.
+  port_to_consignee: [
+    "port_handling",
+    "inland_transport",
+    "loading_labour",
+    "detention_demurrage",
+    "freight_forwarding_fee",
   ],
 };
 
@@ -48,6 +59,9 @@ const SERVICE_OF = {
   ocean_freight: "sea_freight",
   documentation_fee: "sea_freight",
   freight_forwarding_fee: undefined,
+  // Detention is a consequence of the whole job, not of one service — left unassigned
+  // so it never lands on a step's P&L that didn't cause it.
+  detention_demurrage: undefined,
 };
 
 /**

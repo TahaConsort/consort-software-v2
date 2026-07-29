@@ -7,8 +7,8 @@ import {
   cancelShipment,
   closeShipment,
   setSchedule,
+  getShipmentPnl,
 } from "./shipment.controllers.js";
-import { getShipmentPnl } from "../charge/charge.controllers.js";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireShipmentAccess, attachShipmentScope } from "./shipment.middleware.js";
 import { validate } from "../../middleware/validate.middleware.js";
@@ -26,8 +26,10 @@ router.use(protect, requireShipmentAccess, attachShipmentScope);
 router.get("/", requirePermission("shipment.read"), listShipments);
 router.get("/:id", requirePermission("shipment.read"), getShipment);
 
-// Job P&L — estimated vs actual revenue/cost/margin + open payables (charge ledger).
-router.get("/:id/pnl", requirePermission("charge.read"), getShipmentPnl);
+// Job P&L — quoted vs invoiced revenue/cost/margin + open payables. Margin is
+// reporting, not step work, so it is gated on `report.read` rather than shipment
+// access: department executives see the job, not what the company makes on it.
+router.get("/:id/pnl", requirePermission("report.read"), getShipmentPnl);
 
 // Schedule (ETD/ETA) — enables the ETA-breach sweep (WORKFLOW §14).
 router.patch("/:id/schedule", requirePermission("shipment.schedule"), validate(scheduleSchema), setSchedule);

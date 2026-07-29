@@ -19,6 +19,7 @@ export const DOC_TYPES = [
   "authority_letterhead",
   "undertaking", // customer's undertaking letter — part of the export order-confirmation pack
   "quotation", // the approved quotation, auto-rendered onto the shipment at approval (ADR-048)
+  "rate_confirmation", // RC — the signed rate the order is locked against (gates order_lock)
   "lc",
   "cro",
   "inspection_cert",
@@ -33,6 +34,44 @@ export const DOC_TYPES = [
   "proof", // evidence attached to a specific step (pickup photo, gate pass, …)
   "other",
 ];
+
+/**
+ * Human labels for the vocabulary above. The step gate names missing documents back
+ * to whoever owns the step, and "rate_confirmation" is a database code, not language
+ * — this is what turns it into "Rate Confirmation (RC)". Mirrors DOC_TYPE_OPTIONS in
+ * erp-frontend/src/services/documentService.js.
+ */
+export const DOC_TYPE_LABELS = {
+  gd: "GD / Customs Declaration",
+  bol: "Bill of Lading (BOL)",
+  pod: "Proof of Delivery (POD)",
+  invoice: "Invoice",
+  packing_list: "Packing List",
+  commercial_invoice: "Commercial Invoice",
+  sales_tax_invoice: "Sales Tax Invoice",
+  certificate_of_origin: "Certificate of Origin",
+  authority_letterhead: "Authority Letterhead",
+  undertaking: "Undertaking",
+  quotation: "Quotation",
+  rate_confirmation: "Rate Confirmation (RC)",
+  lc: "Letter of Credit / SWIFT Advice",
+  cro: "Container Release Order (CRO)",
+  inspection_cert: "Inspection & Seal Certificate",
+  bank_receipt: "Bank Submission Receipt",
+  telex: "Telex Release Confirmation",
+  eir_out: "EIR — Empty Container Pickup",
+  eir_in: "EIR — Port Gate-In",
+  eir_pickup: "EIR — Destination Pickup",
+  eir_empty_return: "EIR — Empty Return",
+  delivery_order: "Delivery Order (DO)",
+  gate_pass: "Gate Pass",
+  proof: "Proof / Evidence",
+  other: "Other",
+};
+
+// Falls back to a de-underscored code so an unlabelled type never renders raw.
+export const docTypeLabel = (code) =>
+  DOC_TYPE_LABELS[code] ?? String(code ?? "").replace(/_/g, " ");
 
 // Multipart body (parsed alongside the file). docType is the legal/document kind
 // that drives the RULE-SH-06 required-doc gate. otdStepId optionally groups the

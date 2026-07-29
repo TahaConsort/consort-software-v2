@@ -3,7 +3,6 @@ import {
   listInvoices,
   getInvoice,
   createInvoice,
-  createInvoiceFromCharges,
   issueInvoice,
   recordPayment,
   voidInvoice,
@@ -11,7 +10,7 @@ import {
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireFinanceAccess, attachInvoiceScope } from "./finance.middleware.js";
 import { validate } from "../../middleware/validate.middleware.js";
-import { createInvoiceSchema, invoiceFromChargesSchema, recordPaymentSchema, voidInvoiceSchema } from "./finance.validation.js";
+import { createInvoiceSchema, recordPaymentSchema, voidInvoiceSchema } from "./finance.validation.js";
 
 const router = express.Router();
 
@@ -21,7 +20,6 @@ router.use(protect);
 // than the finance desk (Accounts + Ops/Compliance/Transport managers + Management),
 // so it sits BEFORE the finance-access gate and is guarded purely by the permission.
 router.post("/invoices", requirePermission("invoice.create"), validate(createInvoiceSchema), createInvoice);
-router.post("/invoices/from-charges", requirePermission("invoice.create"), validate(invoiceFromChargesSchema), createInvoiceFromCharges);
 
 // Everything below is the finance desk + customers, with row scope.
 router.use(requireFinanceAccess, attachInvoiceScope);

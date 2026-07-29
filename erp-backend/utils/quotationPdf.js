@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { UPLOAD_ROOT, ensureDir } from "../modules/document/document.service.js";
+import { DEFAULT_CURRENCY } from "./currency.js";
 
 /**
  * Renders the approved quotation to a PDF and stores it under `uploads/` so it can be
@@ -48,7 +49,7 @@ export const renderQuotationPdf = async ({ quotation, query, customer, shipmentR
     doc.on("error", reject);
     doc.pipe(out);
 
-    const ccy = quotation.currency ?? "USD";
+    const ccy = quotation.currency ?? DEFAULT_CURRENCY;
 
     doc.fontSize(18).font("Helvetica-Bold").text("QUOTATION", { align: "left" });
     doc.moveDown(0.2);

@@ -16,7 +16,7 @@ import * as quotationService from "@/services/quotationService";
 import * as queryService from "@/services/queryService";
 import * as chargeService from "@/services/chargeService";
 import * as vendorService from "@/services/vendorService";
-import { QUOTATION_STATUS_LABELS, labelForService } from "@/lib/catalog";
+import { QUOTATION_STATUS_LABELS, labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
 
 const STATUS_STYLES = {
   draft: "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-300",
@@ -26,7 +26,7 @@ const STATUS_STYLES = {
   expired: "bg-red-50 text-red-600 border-red-200 dark:bg-red-950/20 dark:text-red-300",
 };
 
-const money = (n, ccy) => `${ccy || "USD"} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+const money = (n, ccy) => `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
 const QuotationsListPage = () => {
   const { quotations, loading, error, statusFilter, setStatusFilter, fetchQuotations } = useQuotationStore();
@@ -187,7 +187,7 @@ const QuotationsListPage = () => {
 const CreateQuotationDialog = ({ busy, onClose, onSubmit }) => {
   const [queries, setQueries] = useState([]);
   const [queryId, setQueryId] = useState("");
-  const [currency, setCurrency] = useState("USD");
+  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
   const [validityDate, setValidityDate] = useState("");
   const [lines, setLines] = useState([{ description: "", quantity: 1, unitPrice: "", chargeCode: "", cost: "", vendorId: "" }]);
   const [chargeTypes, setChargeTypes] = useState([]);

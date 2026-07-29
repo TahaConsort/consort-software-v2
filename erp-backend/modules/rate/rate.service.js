@@ -1,4 +1,5 @@
 import prisma from "../../config/prisma.js";
+import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 
 /**
  * Rate calculator (CRM_MASTER §5.20). Produces an INDICATIVE, non-binding
@@ -9,20 +10,23 @@ import prisma from "../../config/prisma.js";
  * always the issued quotation (§5.7) — nothing here is persisted.
  */
 
-// Fallback base rates (USD) per service — used when no rate card matches.
+// Fallback base rates per service, in DEFAULT_CURRENCY — used when no rate card
+// matches. Restated from this repo's original USD figures at USD_TO_PKR; they are
+// indicative placeholders, so replace them with the desk's real PKR pricing rather
+// than treating the conversion as authoritative.
 const DEFAULT_BASE = {
-  local_transport: 350,
-  customs_clearance: 200,
-  sea_freight: 1200,
-  port_handling: 300,
-  lc_finance: 450,
-  destination_services: 400,
+  local_transport: 98_000, // was USD 350
+  customs_clearance: 56_000, // was USD 200
+  sea_freight: 336_000, // was USD 1200
+  port_handling: 84_000, // was USD 300
+  lc_finance: 126_000, // was USD 450
+  destination_services: 112_000, // was USD 400
 };
 
-// Fallback per-kg surcharge (USD) per service.
+// Fallback per-kg surcharge per service, same basis.
 const DEFAULT_PER_KG = {
-  local_transport: 0.02,
-  sea_freight: 0.01,
+  local_transport: 5.6, // was USD 0.02
+  sea_freight: 2.8, // was USD 0.01
 };
 
 // Container multiplier applied to the base component.
@@ -103,7 +107,7 @@ export const computeRateQuote = async ({
   const subtotal = round2(lines.reduce((s, l) => s + l.amount, 0));
 
   return {
-    currency: "USD",
+    currency: DEFAULT_CURRENCY,
     lane: originPort && destinationPort ? `${originPort} → ${destinationPort}` : null,
     containerTypeCode: containerTypeCode ?? null,
     weightKg: weight || null,

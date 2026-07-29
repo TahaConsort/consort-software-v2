@@ -10,7 +10,7 @@ import { SERVICE_CODES } from "../../utils/servicePackage.js";
 const chargeLineSchema = z.object({
   service: z.enum(SERVICE_CODES).optional(),
   // Cost sheet (freight-forwarding OTC upgrade) — internal only.
-  chargeCode: z.string().max(60).optional(), // ChargeType.code — drives charge seeding + step mapping
+  chargeCode: z.string().max(60).optional(), // ChargeType.code — categorises the line for reporting
   costAmount: z.coerce.number().nonnegative("Cost cannot be negative").optional(), // buy price
   costVendorId: z.string().min(1).optional(), // planned vendor hint
   description: z.string().min(1, "Charge line needs a description"),

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
-import { labelForService } from "@/lib/catalog";
+import { labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
 import { useAuthStore } from "@/store/authStore";
 import { listInquiries, setInquiryStatus, convertInquiry } from "@/services/inquiryService";
 
@@ -19,7 +19,7 @@ const STATUS_STYLE = {
   closed: "border-zinc-400 text-zinc-500",
 };
 
-const money = (n, ccy = "USD") =>
+const money = (n, ccy = DEFAULT_CURRENCY) =>
   n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy, maximumFractionDigits: 0 }).format(Number(n));
 
 /**
@@ -128,7 +128,7 @@ export default function InquiriesListPage() {
                       {(i.services || []).map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
                     </div>
                   </td>
-                  <td className="px-4 py-2.5 text-xs">{money(i.estimatedAmount, i.estimateCurrency || "USD")}</td>
+                  <td className="px-4 py-2.5 text-xs">{money(i.estimatedAmount, i.estimateCurrency || DEFAULT_CURRENCY)}</td>
                   <td className="px-4 py-2.5"><Badge variant="outline" className={`capitalize text-[10px] ${STATUS_STYLE[i.status] ?? ""}`}>{i.status}</Badge></td>
                   <td className="px-4 py-2.5">
                     <div className="flex items-center justify-end gap-1">
@@ -163,7 +163,7 @@ export default function InquiriesListPage() {
                 <p><span className="text-muted-foreground">Lane:</span> {detail.originPort || "—"} → {detail.destinationPort || "—"}{detail.containerTypeCode ? ` · ${detail.containerTypeCode}` : ""}</p>
                 <p><span className="text-muted-foreground">Services:</span> {(detail.services || []).map(labelForService).join(", ") || "—"}</p>
                 {detail.cargoDescription && <p><span className="text-muted-foreground">Cargo:</span> {detail.cargoDescription}</p>}
-                {detail.estimatedAmount != null && <p><span className="text-muted-foreground">Estimate:</span> {money(detail.estimatedAmount, detail.estimateCurrency || "USD")}</p>}
+                {detail.estimatedAmount != null && <p><span className="text-muted-foreground">Estimate:</span> {money(detail.estimatedAmount, detail.estimateCurrency || DEFAULT_CURRENCY)}</p>}
                 {detail.message && <p className="rounded-md bg-muted/50 p-2 text-muted-foreground">{detail.message}</p>}
               </div>
               <DialogFooter className="flex-wrap gap-2">

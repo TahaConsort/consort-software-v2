@@ -20,7 +20,7 @@ export const resumeSchema = z.object({
 });
 
 export const cancelSchema = z.object({
-  reason: z.string().min(3, "A cancellation reason is required (RULE-SH-11)"),
+  reason: z.string().min(3, "A cancellation reason is required"),
 });
 
 // ETD/ETA — feeds the nightly ETA-breach sweep (WORKFLOW §14) and the tracking

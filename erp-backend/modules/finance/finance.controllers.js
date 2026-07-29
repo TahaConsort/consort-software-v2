@@ -3,6 +3,7 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
+import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 import { invoiceInScope } from "./finance.middleware.js";
 import { completeMilestoneTx, maybeSettleTx, invoiceStateTx } from "../otc/otc.service.js";
 import { assertShipmentUnlocked, assertPayableWritable } from "../shipment/shipment.service.js";
@@ -10,15 +11,6 @@ import { assertShipmentUnlocked, assertPayableWritable } from "../shipment/shipm
 // Receivable writes lock on settled; payable writes stay open until closed/cancelled.
 const assertInvoiceWritable = (shipment, kind, action) =>
   kind === "payable" ? assertPayableWritable(shipment, action) : assertShipmentUnlocked(shipment, action);
-
-// Move a set of charges linked to given invoice-line ids into a new status.
-const transitionChargesForLines = (tx, lineIds, from, to, extra = {}) =>
-  lineIds.length
-    ? tx.shipmentCharge.updateMany({
-        where: { invoiceLineId: { in: lineIds }, status: { in: from } },
-        data: { status: to, ...extra },
-      })
-    : Promise.resolve();
 
 /**
  * Finance (CRM_MASTER §5.11, RULE-FI). Invoices auto-drafted at approval
@@ -82,7 +74,7 @@ export const createInvoice = catchAsync(async (req, res, next) => {
         counterparty: vendorName,
         // quotationId is nullable now — manual invoices carry none.
         status: "draft",
-        currency: currency ?? "USD",
+        currency: currency ?? DEFAULT_CURRENCY,
         totalAmount,
         dueDate: dueDate ?? null,
         lines: { create: priced },
@@ -92,74 +84,6 @@ export const createInvoice = catchAsync(async (req, res, next) => {
   });
 
   res.status(201).json({ success: true, message: `${created.kind === "payable" ? "Payable" : "Receivable"} invoice ${created.referenceNo} drafted`, data: created });
-});
-
-/* ── POST /api/finance/invoices/from-charges ── (draft an invoice from job-charges) */
-export const createInvoiceFromCharges = catchAsync(async (req, res, next) => {
-  const { shipmentId, direction, chargeIds, vendorId, currency, dueDate } = req.body;
-
-  const shipment = await prisma.shipment.findUnique({ where: { id: shipmentId } });
-  if (!shipment) return next(new AppError("Shipment not found", 404));
-  const kind = direction;
-  assertInvoiceWritable(shipment, kind, "raise invoices against it");
-
-  const charges = await prisma.shipmentCharge.findMany({ where: { id: { in: chargeIds }, shipmentId } });
-  if (charges.length !== chargeIds.length) return next(new AppError("Some charges were not found on this shipment", 400));
-  if (charges.some((c) => c.direction !== direction)) return next(new AppError("All charges must share the invoice direction", 422));
-  if (charges.some((c) => c.invoiceLineId || !["estimated", "confirmed"].includes(c.status))) {
-    return next(new AppError("A selected charge is already billed or not billable", 409));
-  }
-
-  let vendorName = null;
-  let resolvedVendorId = null;
-  if (direction === "payable") {
-    // Payables need a single vendor. Use the request vendor, else the charges' common vendor.
-    const chargeVendorIds = [...new Set(charges.map((c) => c.vendorId).filter(Boolean))];
-    resolvedVendorId = vendorId ?? (chargeVendorIds.length === 1 ? chargeVendorIds[0] : null);
-    if (!resolvedVendorId) return next(new AppError("A payable invoice needs a single vendor across its charges", 422));
-    if (chargeVendorIds.some((v) => v !== resolvedVendorId)) {
-      return next(new AppError("All payable charges must belong to the same vendor", 422));
-    }
-    const vendor = await prisma.vendor.findUnique({ where: { id: resolvedVendorId } });
-    if (!vendor) return next(new AppError("Vendor not found", 400));
-    vendorName = vendor.name;
-  }
-
-  const lineOf = (c, i) => {
-    const amount = Number(c.actualAmount ?? c.estimatedAmount);
-    return { description: c.description ?? c.chargeCode, quantity: 1, unitPrice: amount, amount, sortOrder: i };
-  };
-  const priced = charges.map(lineOf);
-  const totalAmount = Math.round(priced.reduce((s, l) => s + l.amount, 0) * 100) / 100;
-  const invCurrency = currency ?? charges[0].currency ?? "USD";
-
-  const created = await prisma.$transaction(async (tx) => {
-    const referenceNo = await allocateRef(tx, "invoice");
-    const invoice = await tx.invoice.create({
-      data: {
-        referenceNo,
-        shipmentId,
-        kind,
-        vendorId: resolvedVendorId,
-        counterparty: vendorName,
-        status: "draft",
-        currency: invCurrency,
-        totalAmount,
-        dueDate: dueDate ?? null,
-      },
-    });
-    // Create lines individually so each charge links to its own line.
-    for (let i = 0; i < charges.length; i++) {
-      const line = await tx.invoiceLine.create({ data: { invoiceId: invoice.id, ...priced[i] } });
-      await tx.shipmentCharge.update({ where: { id: charges[i].id }, data: { invoiceLineId: line.id } });
-    }
-    return tx.invoice.findUnique({
-      where: { id: invoice.id },
-      include: { lines: { orderBy: { sortOrder: "asc" } }, payments: true },
-    });
-  });
-
-  res.status(201).json({ success: true, message: `${kind === "payable" ? "Payable" : "Receivable"} invoice ${created.referenceNo} drafted from ${charges.length} charge(s)`, data: created });
 });
 
 /* ── GET /api/finance/invoices?shipmentId= ── */
@@ -176,7 +100,14 @@ export const listInvoices = catchAsync(async (req, res) => {
   const invoices = await prisma.invoice.findMany({
     where,
     orderBy: { createdAt: "desc" },
-    include: { lines: { orderBy: { sortOrder: "asc" } }, payments: { orderBy: { receivedAt: "desc" } }, vendor: true },
+    include: {
+      lines: { orderBy: { sortOrder: "asc" } },
+      payments: { orderBy: { receivedAt: "desc" } },
+      vendor: true,
+      // The finance list links back to the job — without the ref it can only offer
+      // an anonymous "Shipment" button.
+      shipment: { select: { id: true, referenceNo: true, status: true } },
+    },
   });
   res.json({ success: true, data: invoices });
 });
@@ -185,7 +116,14 @@ export const listInvoices = catchAsync(async (req, res) => {
 export const getInvoice = catchAsync(async (req, res, next) => {
   const invoice = await prisma.invoice.findUnique({
     where: { id: req.params.id },
-    include: { lines: { orderBy: { sortOrder: "asc" } }, payments: { orderBy: { receivedAt: "desc" } }, vendor: true },
+    include: {
+      lines: { orderBy: { sortOrder: "asc" } },
+      payments: { orderBy: { receivedAt: "desc" } },
+      vendor: true,
+      // The finance list links back to the job — without the ref it can only offer
+      // an anonymous "Shipment" button.
+      shipment: { select: { id: true, referenceNo: true, status: true } },
+    },
   });
   if (!invoice || !invoiceInScope(req, invoice)) return next(new AppError("Invoice not found", 404));
   res.json({ success: true, data: invoice });
@@ -202,8 +140,6 @@ export const issueInvoice = catchAsync(async (req, res, next) => {
   const customer = shipment ? await prisma.customer.findUnique({ where: { id: shipment.customerId } }) : null;
   const termDays = customer?.creditTermsDays ?? 30;
 
-  const lineIds = (await prisma.invoiceLine.findMany({ where: { invoiceId: invoice.id }, select: { id: true } })).map((l) => l.id);
-
   const updated = await prisma.$transaction(async (tx) => {
     const u = await tx.invoice.update({
       where: { id: invoice.id },
@@ -214,8 +150,6 @@ export const issueInvoice = catchAsync(async (req, res, next) => {
         dueDate: new Date(Date.now() + termDays * 24 * 60 * 60 * 1000),
       },
     });
-    // Any linked job-charges move estimated/confirmed → invoiced.
-    await transitionChargesForLines(tx, lineIds, ["estimated", "confirmed"], "invoiced");
     // OTC 1 belongs to the SHIPMENT, not to this invoice — it completes only
     // once no RECEIVABLE invoice is left in draft (RULE-FI-02). Payables are a
     // separate ledger and never touch OTC milestones or settlement.
@@ -251,10 +185,6 @@ export const recordPayment = catchAsync(async (req, res, next) => {
   const newTotal = paidSoFar + Number(req.body.amount);
   const fullySettled = newTotal + 0.001 >= Number(invoice.totalAmount);
 
-  const lineIds = fullySettled
-    ? (await prisma.invoiceLine.findMany({ where: { invoiceId: invoice.id }, select: { id: true } })).map((l) => l.id)
-    : [];
-
   const result = await prisma.$transaction(async (tx) => {
     await tx.payment.create({
       data: {
@@ -271,8 +201,6 @@ export const recordPayment = catchAsync(async (req, res, next) => {
       where: { id: invoice.id },
       data: { status: fullySettled ? "paid" : "part_paid" },
     });
-    // A fully-paid invoice settles its linked job-charges (both ledgers).
-    if (fullySettled) await transitionChargesForLines(tx, lineIds, ["invoiced"], "settled");
     let ledgerClear = false;
     let shipmentStatus = shipment?.status;
     // OTC milestone 2 + settlement track the RECEIVABLE ledger only; paying a
@@ -315,21 +243,9 @@ export const voidInvoice = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: invoice.shipmentId } });
   assertInvoiceWritable(shipment, invoice.kind, "void its invoices"); // RULE-SH-12 (payables stay open on settled)
 
-  const lineIds = (await prisma.invoiceLine.findMany({ where: { invoiceId: invoice.id }, select: { id: true } })).map((l) => l.id);
-
-  const updated = await prisma.$transaction(async (tx) => {
-    const u = await tx.invoice.update({
-      where: { id: invoice.id },
-      data: { status: "void", voidedById: req.user.id, voidedAt: new Date(), voidReason: req.body.reason },
-    });
-    // Unlink the job-charges so they can be re-billed on a fresh invoice.
-    if (lineIds.length) {
-      await tx.shipmentCharge.updateMany({
-        where: { invoiceLineId: { in: lineIds } },
-        data: { status: "confirmed", invoiceLineId: null },
-      });
-    }
-    return u;
+  const updated = await prisma.invoice.update({
+    where: { id: invoice.id },
+    data: { status: "void", voidedById: req.user.id, voidedAt: new Date(), voidReason: req.body.reason },
   });
   res.json({ success: true, message: "Invoice voided", data: updated });
 });

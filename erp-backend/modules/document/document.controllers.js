@@ -234,7 +234,7 @@ export const deleteDocument = catchAsync(async (req, res, next) => {
 
   // A step-mandatory document cannot be deleted (RULE-DOC-04).
   if (await isStepMandatoryDoc(doc)) {
-    return next(new AppError("This document is mandatory for a shipment step and cannot be deleted (RULE-DOC-04)", 409));
+    return next(new AppError("This document is mandatory for a shipment step and cannot be deleted", 409));
   }
 
   await prisma.$transaction(async (tx) => {

@@ -11,6 +11,7 @@ import {
 } from "../../utils/composition.js";
 import { inferPackageFromServices, resolveCroMode } from "../../utils/servicePackage.js";
 import { missingRequiredDocs } from "../document/document.service.js";
+import { docTypeLabel } from "../document/document.validation.js";
 import { renderQuotationPdf } from "../../utils/quotationPdf.js";
 import { maybeSettleTx } from "../otc/otc.service.js";
 
@@ -97,6 +98,8 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       destinationPort: query.destinationPort ?? null,
       pickupAddress: query.pickupAddress ?? null,
       deliveryAddress: query.deliveryAddress ?? null,
+      freeDays: query.freeDays ?? null,
+      emptyReturnLocation: query.emptyReturnLocation ?? null,
       incoterm: query.incoterm ?? null,
     },
   });
@@ -190,80 +193,20 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       totalAmount: quotation.totalAmount,
     },
   });
-  // The job-charge ledger — one receivable charge per quotation line (linked to
-  // the auto-drafted invoice line) and, where the cost sheet was filled in, one
-  // payable charge per line. Charges land on their default step when that step is
-  // on the composed path, else job-level (null otdStepId).
-  const chargeTypes = await tx.chargeType.findMany();
-  const chargeTypeByCode = Object.fromEntries(chargeTypes.map((c) => [c.code, c]));
-  const chargeTypeByService = {};
-  for (const ct of chargeTypes) {
-    if (ct.service && !chargeTypeByService[ct.service]) chargeTypeByService[ct.service] = ct;
-  }
-  const createdSteps = await tx.otdStep.findMany({ where: { shipmentId: shipment.id } });
-  const stepIdByCode = Object.fromEntries(createdSteps.map((s) => [s.stepCode, s.id]));
-
-  const resolveCharge = (line) => {
-    // Prefer the line's explicit chargeCode; else fall back to a service default; else `other`.
-    let ct = line.chargeCode ? chargeTypeByCode[line.chargeCode] : null;
-    if (!ct && line.service) ct = chargeTypeByService[line.service];
-    if (!ct) ct = chargeTypeByCode.other;
-    const stepId = ct?.defaultStepCode ? stepIdByCode[ct.defaultStepCode] ?? null : null;
-    return { chargeCode: ct?.code ?? "other", otdStepId: stepId };
-  };
-
-  // Batch the invoice lines + charges (pre-generated ids) so the approval
-  // transaction stays a handful of round-trips regardless of line count.
-  const invoiceLineData = [];
-  const chargeData = [];
-  for (const l of quotation.chargeLines ?? []) {
-    const lineId = crypto.randomUUID();
-    invoiceLineData.push({
-      id: lineId,
-      invoiceId: invoice.id,
-      description: l.description,
-      quantity: l.quantity,
-      unitPrice: l.unitPrice,
-      amount: l.amount,
-      sortOrder: l.sortOrder,
-    });
-
-    const resolved = resolveCharge(l);
-    chargeData.push({
-      shipmentId: shipment.id,
-      otdStepId: resolved.otdStepId,
-      chargeCode: resolved.chargeCode,
-      direction: "receivable",
-      description: l.description,
-      currency: quotation.currency,
-      fxRate: quotation.fxRate ?? undefined,
-      estimatedAmount: l.amount,
-      status: "estimated",
-      invoiceLineId: lineId,
-      quotationChargeLineId: l.id,
-      createdById: actorId,
-    });
-
-    // Cost sheet → payable charge (buy side). Only when a cost was quoted.
-    if (l.costAmount != null) {
-      chargeData.push({
-        shipmentId: shipment.id,
-        otdStepId: resolved.otdStepId,
-        chargeCode: resolved.chargeCode,
-        direction: "payable",
-        vendorId: l.costVendorId ?? null,
-        description: l.description,
-        currency: quotation.currency,
-        fxRate: quotation.fxRate ?? undefined,
-        estimatedAmount: l.costAmount,
-        status: "estimated",
-        quotationChargeLineId: l.id,
-        createdById: actorId,
-      });
-    }
-  }
+  // Batch the invoice lines (pre-generated ids) so the approval transaction stays
+  // a handful of round-trips regardless of line count. The quotation's cost sheet
+  // is NOT materialised here — it stays quote-side as the P&L estimate, and the
+  // real cost lands as payable invoices when it is actually incurred.
+  const invoiceLineData = (quotation.chargeLines ?? []).map((l) => ({
+    id: crypto.randomUUID(),
+    invoiceId: invoice.id,
+    description: l.description,
+    quantity: l.quantity,
+    unitPrice: l.unitPrice,
+    amount: l.amount,
+    sortOrder: l.sortOrder,
+  }));
   if (invoiceLineData.length) await tx.invoiceLine.createMany({ data: invoiceLineData });
-  if (chargeData.length) await tx.shipmentCharge.createMany({ data: chargeData });
 
   // Audit + the two domain events (Action Engine + chat/notifications).
   await audit(tx, {
@@ -405,10 +348,13 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
       orderBy: { sortOrder: "asc" },
     }),
   ]);
+  // The message is read by whoever owns the step, so it names the work that is
+  // outstanding in their words — no rule citations, and document types spelled out
+  // rather than shown as raw codes.
   if (missing.length || pendingActions.length) {
     const parts = [];
-    if (pendingActions.length) parts.push(`checklist items still open: ${pendingActions.map((a) => a.title).join(", ")} (RULE-SH-13)`);
-    if (missing.length) parts.push(`documents not attached: ${missing.join(", ")} (RULE-SH-06)`);
+    if (pendingActions.length) parts.push(`checklist items still open: ${pendingActions.map((a) => a.title).join(", ")}`);
+    if (missing.length) parts.push(`documents not attached: ${missing.map(docTypeLabel).join(", ")}`);
     throw new AppError(`This step isn't finished — ${parts.join("; ")}`, 422);
   }
 

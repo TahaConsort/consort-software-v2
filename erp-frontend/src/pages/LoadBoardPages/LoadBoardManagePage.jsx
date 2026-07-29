@@ -10,12 +10,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { SERVICE_OPTIONS, labelForService } from "@/lib/catalog";
+import { SERVICE_OPTIONS, labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
 import { getStorefrontReference } from "@/services/storefrontService";
 import { listPostings, createPosting, deletePosting } from "@/services/loadboardService";
 
 const MODES = ["sea", "road", "air", "rail"];
-const money = (n, ccy = "USD") =>
+const money = (n, ccy = DEFAULT_CURRENCY) =>
   n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy, maximumFractionDigits: 0 }).format(Number(n));
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : "—");
 
@@ -227,7 +227,7 @@ export default function LoadBoardManagePage() {
                 <Input id="lb-transit" type="number" min="0" value={form.transitDays} onChange={(e) => setForm((p) => ({ ...p, transitDays: e.target.value }))} />
               </div>
               <div className="space-y-1.5 col-span-2">
-                <Label htmlFor="lb-rate">Indicative rate (USD)</Label>
+                <Label htmlFor="lb-rate">Indicative rate ({DEFAULT_CURRENCY})</Label>
                 <Input id="lb-rate" type="number" min="0" value={form.indicativeRate} onChange={(e) => setForm((p) => ({ ...p, indicativeRate: e.target.value }))} />
               </div>
             </div>

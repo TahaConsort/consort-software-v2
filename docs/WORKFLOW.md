@@ -248,15 +248,20 @@ stateDiagram-v2
 
 ## 4a. Service Package → OTD Template
 
-The customer chooses **one of three service packages** (ADR-046). The package presets the query's `services ServiceCode[]` set, and on quote approval the shipment is seeded with the **subset of the canonical step catalog the package, CRO mode and service set select** — always in canonical order. This is the mechanism behind "a local order has fewer steps and no customs role."
+The customer chooses **one of four service packages** (ADR-046, ADR-049). The package presets the query's `services ServiceCode[]` set, and on quote approval the shipment is seeded with the **subset of the canonical step catalog the package, CRO mode and service set select** — always in canonical order. This is the mechanism behind "a local order has fewer steps and no customs role."
 
-| Package | Presets `services` | CRO sub-option |
-|---|---|---|
-| `local_transport` — Local Transport | `local_transport` | none (`not_applicable`) |
-| `loading_point_to_port` — Loading Point → Port | `local_transport`, `port_handling` | **`customer` or `consort`** |
-| `international` — International Shipment | `local_transport`, `port_handling`, `customs_clearance`, `sea_freight` | `consort` |
+| Package | Route shape | Presets `services` | CRO sub-option |
+|---|---|---|---|
+| `local_transport` — Local Transport | address → address | `local_transport` | none (`not_applicable`) |
+| `loading_point_to_port` — Loading Point → Port | address → port | `local_transport`, `port_handling` | **`customer` or `consort`** |
+| `international` — International Shipment | port → port | `local_transport`, `port_handling`, `customs_clearance`, `sea_freight` | `consort` |
+| `port_to_consignee` — Port → Consignee (import delivery) | port → address | `local_transport`, `port_handling` | none (`not_applicable`) |
 
-`lc_finance` and `destination_services` are add-ons layered on any package: `lc_finance` is implied when the customer's `source` is Bank LC (§1) and may also be added explicitly; `destination_services` is an Ops per-job addition.
+`lc_finance` and `destination_services` are add-ons layered on any package: `lc_finance` is implied when the customer's `source` is Bank LC (§1) and may also be added explicitly; `destination_services` is an Ops per-job addition to an **export** package.
+
+**Why `port_to_consignee` does not simply reuse the destination-agent steps.** The physical work matches (`destination_do` / `destination_pickup` / `empty_return`), but those are the far end of somebody else's export job — performed by an overseas agent and Operations-owned — whereas this leg runs on our own vehicles and is Transport-owned end to end. The customer also supplies the delivery order and gate pass themselves, so those belong in the `order_confirmed` pack rather than in a step that goes and obtains them. See ADR-049.
+
+`port_to_consignee` is the first package to need **a port code and a street address at the same time**: `origin_port` is the terminal holding the container, `delivery_address` is the consignee. It also carries two terms no other package has — `free_days` (the detention-free window the line granted) and `empty_return_location` (where the empty goes back, often a dry port rather than the terminal it came off).
 
 ### 4a.1 Step → package/CRO/service composition
 
@@ -265,7 +270,7 @@ Three gates are evaluated **package → CRO mode → service**, each *empty mean
 | # | Step (code) | Owner | Packages | CRO | Service | Required docs |
 |---|---|---|---|---|---|---|
 | 10 | `order_lock` | Operations | **ALWAYS** | — | — | — |
-| 20 | `order_confirmed` (customer doc pack) | Operations | lp→port, intl | — | — | *(sub-actions — §4a.2)* |
+| 20 | `order_confirmed` (customer doc pack) | Operations | lp→port, intl, port→cons | — | — | *(sub-actions — §4a.2)* |
 | 22 | `transporter_assigned` | Transport | local | — | — | — |
 | 24 | `vehicle_dispatched` | Transport | local | — | — | — |
 | 26 | `goods_loaded` | Transport | local | — | — | proof |
@@ -280,23 +285,25 @@ Three gates are evaluated **package → CRO mode → service**, each *empty mean
 | 95 | `customs_clearance` | Compliance | — | — | `customs_clearance` | *(sub-actions — §4a.2)* |
 | ~~90~~ | ~~`customs_entry`~~ | *superseded by 95 (ADR-048) — row kept `active: false` so historical shipments still resolve* ||||
 | ~~100~~ | ~~`inspected_sealed`~~ | *superseded by 95 (ADR-048)* ||||
-| 110 | `port_handover` (gate-in) | Operations | — | — | `port_handling` ∨ `sea_freight` | eir_in |
+| 110 | `port_handover` (gate-in) | Operations | lp→port, intl | — | `port_handling` ∨ `sea_freight` | eir_in |
 | 120 | `bol_issued` | Operations | — | — | `sea_freight` | bol |
 | 130 | `bol_submitted` (docs to bank) | Finance | — | — | `lc_finance` | bank_receipt |
 | 140 | `telex_released` | Finance | — | — | `sea_freight` | telex |
-| 150 | `destination_do` | Operations | — | — | `destination_services` | delivery_order, gate_pass |
-| 160 | `destination_pickup` | Operations | — | — | `destination_services` | eir_pickup |
+| 150 | `destination_do` | Operations | lp→port, intl | — | `destination_services` | delivery_order, gate_pass |
+| 152 | `import_container_pickup` (off the terminal) | **Transport** | port→cons | — | — | eir_pickup |
+| 160 | `destination_pickup` | Operations | lp→port, intl | — | `destination_services` | eir_pickup |
 | 170 | `delivered` (final delivery / POD) | Operations | intl | — | — | pod |
-| 172 | `local_delivered` (delivered & POD) | **Transport** | local | — | — | pod |
+| 172 | `local_delivered` (delivered & POD) | **Transport** | local, port→cons | — | — | pod |
 | 175 | `port_job_completed` (handover confirmed) | Operations | lp→port | — | — | — |
-| 180 | `empty_return` | Operations | — | — | `destination_services` | eir_empty_return |
+| 178 | `import_empty_return` | **Transport** | port→cons | — | — | eir_empty_return |
+| 180 | `empty_return` | Operations | lp→port, intl | — | `destination_services` | eir_empty_return |
 
 Rules:
 
 1. Seed every step passing all three gates, ordered by canonical number. Renumber for display as 1..N of the composed path.
 2. **A department with no step on the composed path has no role on that shipment** — no queue entry, no task, no ownership. A local-only shipment therefore never involves Compliance/Customs.
 3. `shipments.status` is derived from the highest completed step **on the composed path** (§5.1). A shorter path exposes only its own subset of the status enum.
-4. Every package composes **exactly one terminal step deriving `delivered`** — 170, 172 or 175. This is load-bearing: `maybeSettleTx` only settles a shipment whose status is `delivered`, so a package without one could never settle or close.
+4. Every package composes **exactly one step deriving `delivered`** from its delivery milestone — 170, 172 or 175. This is load-bearing: `maybeSettleTx` only settles a shipment whose status is `delivered`, so a package without one could never settle or close. An empty-return step (178/180) runs *after* it and also derives `delivered`, which changes nothing: settlement additionally refuses while any step is still pending.
 5. The two CRO rows (50 and 55) are **mutually exclusive** and are separate template rows rather than one conditional row, because `OtdStep` persists neither `title` nor `requiredDocTypes` — both are looked up from the template by `step_code` at completion time.
 6. The composed template, the package and the CRO mode are all **frozen at approval** and stored on the shipment (INV-14). Changing them afterwards is a controlled, audited re-scope (out of Phase-1 scope unless raised as an exception).
 7. The one permitted out-of-order pair (RULE-SH-03) is `lc_generated` ↔ `vessel_booked`, keyed on **step code**, not canonical number — so re-spacing the catalog can never silently relocate the exemption.
@@ -319,6 +326,17 @@ Two steps are single milestones made of several parts. Rather than split them in
 ```
 
 **`order_confirmed` — loading point → port** (3 items): `packing_list`, `commercial_invoice`, `authority_letterhead`. Local Transport composes no checklist at all — it has no `order_confirmed` step.
+
+**`order_confirmed` — port → consignee** (4 items — 3 documents, 1 manual):
+
+```
+□ Bill of Lading (BOL)                    document · bol
+□ Delivery Order (DO)                     document · delivery_order
+□ Gate Pass                               document · gate_pass
+□ Free days confirmed with customer       manual
+```
+
+This is everything the customer owes us before we can take their container off the terminal: the BOL proves title, the delivery order is the line's release, the gate pass is what the terminal wants at the gate, and the free days set the clock we are racing before detention starts. The number itself is captured at intake on `queries.free_days` and snapshotted to the shipment — the checklist item is the confirmation that it was actually agreed.
 
 **`customs_clearance`** (6 items — 4 manual, 2 documents):
 
@@ -375,6 +393,18 @@ stateDiagram-v2
 Package `international` with `croHandledBy: consort` composes 10, 20, 40, 55, 60, 70, 80, **95**, 110, 120, 140, 170. Adding `lc_finance` inserts `lc_generated` (30) and `bol_submitted` (130) → 14 steps; adding `destination_services` inserts `destination_do` (150), `destination_pickup` (160) and `empty_return` (180) → 15.
 
 Two of those twelve carry checklists (§4a.2): step 2 collects the seven-document customer pack, and step 8 (`customs_clearance`) carries the six filing/examination items that were previously two separate steps.
+
+### 4a.6 Example — Port → Consignee (5 steps; the import delivery leg)
+
+```
+1  order_lock                  Ops        rate_confirmation
+2  order_confirmed             Ops        4-item checklist: bol, delivery_order, gate_pass, free days confirmed
+3  import_container_pickup     Transport  eir_pickup           ← collected off the terminal
+4  local_delivered             Transport  pod                  → derives `delivered`
+5  import_empty_return         Transport  eir_empty_return     ← the empty goes back; the job is done
+```
+
+The operational job ends at step 5, but the shipment does **not** close there: settlement still requires all five OTD steps done, all five OTC milestones complete and every live invoice paid (§5.3), after which `ops_manager` / Management closes it (RULE-SH-12).
 
 ---
 

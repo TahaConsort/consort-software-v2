@@ -6,7 +6,7 @@ import { allocateRef } from "../../utils/referenceNumber.js";
 /**
  * Vendor master — CRUD (freight-forwarding OTC upgrade). Read is broad
  * (`vendor.read`); writes require `vendor.manage`. Vendors are referenced by
- * payable ShipmentCharges and payable Invoices.
+ * payable Invoices.
  */
 
 const normalize = (name) => name.trim().toLowerCase().replace(/\s+/g, " ");

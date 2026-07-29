@@ -2,6 +2,7 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
+import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 import { serializePosting } from "./loadboard.service.js";
 
 /**
@@ -43,7 +44,7 @@ export const createPosting = catchAsync(async (req, res) => {
         validUntil: b.validUntil ?? null,
         transitDays: b.transitDays ?? null,
         indicativeRate: b.indicativeRate ?? null,
-        currency: b.currency ?? "USD",
+        currency: b.currency ?? DEFAULT_CURRENCY,
         services: b.services ?? [],
         notes: b.notes ?? null,
         createdById: req.user.id,

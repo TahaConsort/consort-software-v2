@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAuthStore } from "@/store/authStore";
 import { listReferrals, setReferralStatus, rejectReferral, convertReferral } from "@/services/lcService";
+import { DEFAULT_CURRENCY } from "@/lib/catalog";
 
 const STATUS_STYLE = {
   received: "border-blue-400 text-blue-700 dark:text-blue-300",
@@ -19,8 +20,8 @@ const STATUS_STYLE = {
   rejected: "border-red-400 text-red-600",
 };
 
-const money = (n, ccy = "USD") =>
-  n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || "USD", maximumFractionDigits: 0 }).format(Number(n));
+const money = (n, ccy = DEFAULT_CURRENCY) =>
+  n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || DEFAULT_CURRENCY, maximumFractionDigits: 0 }).format(Number(n));
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : "—");
 

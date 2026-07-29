@@ -9,7 +9,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { VENDOR_TYPE_LABELS, VENDOR_TYPE_OPTIONS } from "@/lib/catalog";
+import { VENDOR_TYPE_LABELS, VENDOR_TYPE_OPTIONS, DEFAULT_CURRENCY } from "@/lib/catalog";
 import { useAuthStore } from "@/store/authStore";
 import { listVendors, createVendor, updateVendor, deactivateVendor } from "@/services/vendorService";
 
@@ -221,7 +221,7 @@ export default function VendorsListPage() {
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="v-ccy">Currency</Label>
-                <Input id="v-ccy" maxLength={3} value={form.currency} onChange={(e) => setForm((p) => ({ ...p, currency: e.target.value }))} placeholder="USD" />
+                <Input id="v-ccy" maxLength={3} value={form.currency} onChange={(e) => setForm((p) => ({ ...p, currency: e.target.value }))} placeholder={DEFAULT_CURRENCY} />
               </div>
             </div>
 

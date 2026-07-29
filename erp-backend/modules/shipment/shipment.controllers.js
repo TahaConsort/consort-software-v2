@@ -34,6 +34,87 @@ const hydrate = async (shipments) => {
   });
 };
 
+const num = (v) => (v == null ? 0 : Number(v));
+// Convert an amount into the shipment/quotation base currency via its fxRate.
+const inBase = (amount, fxRate) => num(amount) * (fxRate == null ? 1 : Number(fxRate));
+const round2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
+
+/* ── GET /api/shipments/:id/pnl ── */
+// Invoices are the single money record on a job, so actuals come straight off the
+// two invoice ledgers: receivables are revenue, payables are cost. The *estimate*
+// has no invoice to sit on — it comes from the approved quotation, whose sell
+// lines are what we quoted and whose cost sheet is what we expected to pay.
+export const getShipmentPnl = catchAsync(async (req, res, next) => {
+  const shipmentId = req.params.id;
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: shipmentId },
+    select: { id: true, quotationId: true },
+  });
+  if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+
+  const [invoices, quotation] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { shipmentId, status: { not: "void" } },
+      select: { kind: true, status: true, totalAmount: true, currency: true, fxRate: true, payments: { select: { amount: true } } },
+    }),
+    prisma.quotation.findUnique({
+      where: { id: shipment.quotationId },
+      select: { currency: true, fxRate: true, chargeLines: { select: { amount: true, costAmount: true } } },
+    }),
+  ]);
+
+  const qFx = quotation?.fxRate ?? null;
+  const quoted = {
+    // Sell side — what the customer accepted.
+    revenue: round2((quotation?.chargeLines ?? []).reduce((s, l) => s + inBase(l.amount, qFx), 0)),
+    // Buy side — the internal cost sheet. Lines left blank simply don't contribute.
+    cost: round2((quotation?.chargeLines ?? []).reduce((s, l) => s + inBase(l.costAmount, qFx), 0)),
+  };
+
+  const side = (kind) => {
+    const rows = invoices.filter((i) => (i.kind ?? "receivable") === kind);
+    const invoiced = rows.reduce((s, i) => s + inBase(i.totalAmount, i.fxRate), 0);
+    const collected = rows.reduce(
+      (s, i) => s + inBase(i.payments.reduce((ps, p) => ps + num(p.amount), 0), i.fxRate),
+      0,
+    );
+    return { invoiced: round2(invoiced), collected: round2(collected) };
+  };
+
+  const revenue = side("receivable");
+  const cost = side("payable");
+  // Anything invoiced but not yet fully paid on the buy side.
+  const openPayables = invoices.filter(
+    (i) => (i.kind ?? "receivable") === "payable" && i.status !== "paid",
+  );
+  const currencies = [...new Set(invoices.map((i) => i.currency).filter(Boolean))];
+
+  res.json({
+    success: true,
+    data: {
+      // `actual` = invoiced. Until a job is invoiced it reads 0, which is the
+      // honest answer — the estimate alongside it carries the expectation.
+      revenue: { estimated: quoted.revenue, actual: revenue.invoiced, invoiced: revenue.invoiced, collected: revenue.collected },
+      cost: { estimated: quoted.cost, actual: cost.invoiced, invoiced: cost.invoiced, paid: cost.collected },
+      margin: {
+        estimated: round2(quoted.revenue - quoted.cost),
+        actual: round2(revenue.invoiced - cost.invoiced),
+      },
+      openPayables: {
+        count: openPayables.length,
+        amount: round2(
+          openPayables.reduce(
+            (s, i) => s + inBase(num(i.totalAmount) - i.payments.reduce((ps, p) => ps + num(p.amount), 0), i.fxRate),
+            0,
+          ),
+        ),
+      },
+      mixedCurrency: currencies.length > 1,
+      currencies,
+    },
+  });
+});
+
 /* ── GET /api/shipments?status=&exceptionState= ── */
 export const listShipments = catchAsync(async (req, res) => {
   const extra = {};
@@ -54,12 +135,11 @@ export const getShipment = catchAsync(async (req, res, next) => {
       exceptions: { orderBy: { raisedAt: "desc" } },
       invoices: {
         orderBy: { createdAt: "desc" },
-        include: { payments: { orderBy: { receivedAt: "desc" } } }, // for the OTC payment-tracking view
-      },
-      // Job-charge ledger — the frontend groups these by otdStepId for per-step money.
-      charges: {
-        orderBy: { createdAt: "asc" },
-        include: { chargeType: true, vendor: true },
+        include: {
+          payments: { orderBy: { receivedAt: "desc" } }, // for the OTC payment-tracking view
+          lines: { orderBy: { sortOrder: "asc" } }, // what the invoice is actually billing for
+          vendor: { select: { id: true, name: true } }, // payables name who we owe
+        },
       },
     },
   });
@@ -67,7 +147,6 @@ export const getShipment = catchAsync(async (req, res, next) => {
 
   // Portal customers never see the payable (vendor cost) side of the ledger.
   if (req.user?.customerId) {
-    shipment.charges = shipment.charges.filter((c) => c.direction === "receivable");
     shipment.invoices = shipment.invoices.filter((i) => i.kind === "receivable");
   }
 
@@ -237,15 +316,15 @@ export const closeShipment = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
   if (shipment.status !== "settled") {
-    return next(new AppError("Only a settled shipment can be closed (RULE-SH-12)", 409));
+    return next(new AppError("Only a settled shipment can be closed", 409));
   }
 
   // Closing locks the payable ledger too — surface any still-open vendor bills so
   // closure is a deliberate act (they don't block settlement, but they do close).
-  const openPayables = await prisma.shipmentCharge.aggregate({
-    where: { shipmentId: shipment.id, direction: "payable", status: { notIn: ["settled", "cancelled"] } },
+  const openPayables = await prisma.invoice.aggregate({
+    where: { shipmentId: shipment.id, kind: "payable", status: { notIn: ["paid", "void"] } },
     _count: true,
-    _sum: { estimatedAmount: true },
+    _sum: { totalAmount: true },
   });
 
   await prisma.$transaction(async (tx) => {
@@ -267,7 +346,7 @@ export const closeShipment = catchAsync(async (req, res, next) => {
       action: "shipment.close",
       resourceType: "shipment",
       resourceId: shipment.id,
-      diff: { openPayableCount: openPayables._count, openPayableAmount: openPayables._sum.estimatedAmount ?? 0 },
+      diff: { openPayableCount: openPayables._count, openPayableAmount: openPayables._sum.totalAmount ?? 0 },
     });
     await emitShipmentEvent(tx, "shipment.closed", { shipmentId: shipment.id });
   });

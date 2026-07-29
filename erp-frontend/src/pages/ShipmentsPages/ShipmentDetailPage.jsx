@@ -19,19 +19,19 @@ import * as otdService from "@/services/otdService";
 import * as otcService from "@/services/otcService";
 import * as financeService from "@/services/financeService";
 import * as documentService from "@/services/documentService";
-import * as chargeService from "@/services/chargeService";
 import * as vendorService from "@/services/vendorService";
 import { DOC_TYPE_LABELS, DOC_TYPE_OPTIONS } from "@/services/documentService";
 import { INVOICE_KIND_LABELS } from "@/services/financeService";
 import {
   SHIPMENT_STATUS_LABELS, OTC_MILESTONE_LABELS, INVOICE_STATUS_LABELS, labelForService,
-  CHARGE_STATUS_LABELS, CRO_HANDLING_SHORT, labelForPackage,
+  CRO_HANDLING_SHORT, labelForPackage, paymentStateOf, PAYMENT_STATE_CLASS, DEFAULT_CURRENCY,
+  routeOf,
 } from "@/lib/catalog";
 import { onSocket, joinRoom } from "@/lib/socket";
 import DocumentsPanel from "@/components/DocumentsPanel";
 
 const prettyStep = (code) => code.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const money = (n, ccy) => `${ccy || "USD"} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+const money = (n, ccy) => `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "—");
 
 // Role → department (RULE-SH-04 ownership). Management roles deliberately map to
@@ -52,7 +52,7 @@ const DEPT_LABELS = { operations: "Operations", compliance: "Compliance", transp
 
 // One-line plain-language meaning per step, so whoever owns it knows the job.
 const STEP_HINTS = {
-  order_lock: "Lock the confirmed order so processing can begin.",
+  order_lock: "Attach the signed Rate Confirmation (RC) — the order locks against it and nothing downstream moves until it is on file.",
   order_confirmed: "Collect the customer's document pack and confirm the order — work the checklist below.",
   lc_generated: "Letter of Credit raised/received for this trade.",
   container_allocated: "Book and allocate the container(s).",
@@ -82,6 +82,9 @@ const STEP_HINTS = {
   destination_pickup: "Destination agent picks up the container; capture the pickup EIR.",
   delivered: "Cargo delivered to the consignee (POD).",
   empty_return: "Return the empty container to the yard; capture the empty-return EIR.",
+  // Package: Port → Consignee — the import delivery leg, run on our own vehicles.
+  import_container_pickup: "Take the delivery order and gate pass to the terminal, collect the container and capture the pickup EIR.",
+  import_empty_return: "Return the empty container to the yard or dry port; capture the empty-return EIR. This is the last step of the job.",
 };
 
 const ShipmentDetailPage = () => {
@@ -101,7 +104,8 @@ const ShipmentDetailPage = () => {
   const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState(null); // { kind, payload }
 
-  const canReadCharges = hasPermission("charge.read");
+  // Job P&L is management/finance reporting, not day-to-day step work.
+  const canViewPnl = hasPermission("report.read");
 
   const load = useCallback(async () => {
     try {
@@ -110,7 +114,7 @@ const ShipmentDetailPage = () => {
         // Checklist + document list are advisory UX — a failure must not sink the page.
         documentService.requiredDocs(id).catch(() => null),
         documentService.listDocuments("shipment", id).catch(() => null),
-        canReadCharges ? shipmentService.getShipmentPnl(id).catch(() => null) : Promise.resolve(null),
+        canViewPnl ? shipmentService.getShipmentPnl(id).catch(() => null) : Promise.resolve(null),
       ]);
       setShipment(res.data);
       // The endpoint answers { shipmentId, checklist } — take the array, or the
@@ -124,11 +128,11 @@ const ShipmentDetailPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [id, canReadCharges]);
+  }, [id, canViewPnl]);
 
-  // Vendors for the confirm/bill dialogs (payables). Loaded once, best-effort.
+  // Vendors for the payable-invoice dialog. Loaded once, best-effort.
   useEffect(() => {
-    if (!hasPermission("charge.confirm") && !hasPermission("invoice.create")) return;
+    if (!hasPermission("invoice.create")) return;
     vendorService.listVendors({ isActive: true }).then((r) => setVendors(r.data || [])).catch(() => {});
   }, [hasPermission]);
 
@@ -187,15 +191,7 @@ const ShipmentDetailPage = () => {
     if (inv.otdStepId) (m[inv.otdStepId] ??= []).push(inv);
     return m;
   }, {});
-  const chargesByStep = (shipment.charges ?? []).reduce((m, c) => {
-    const key = c.otdStepId ?? "__job__";
-    (m[key] ??= []).push(c);
-    return m;
-  }, {});
-  const jobCharges = chargesByStep.__job__ ?? [];
   const canBill = hasPermission("invoice.create");
-  const canConfirmCharge = hasPermission("charge.confirm");
-  const canCreateCharge = hasPermission("charge.create");
 
   return (
     <div className="space-y-6">
@@ -221,9 +217,20 @@ const ShipmentDetailPage = () => {
             )}
             {(shipment.services ?? []).map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
           </div>
-          {(shipment.pickupAddress || shipment.deliveryAddress) && (
-            <p className="text-xs text-muted-foreground mt-2">
-              {shipment.pickupAddress ?? "—"} → {shipment.deliveryAddress ?? shipment.originPort ?? "—"}
+          {routeOf(shipment) && (
+            <p className="text-xs text-muted-foreground mt-2">{routeOf(shipment)}</p>
+          )}
+          {/* Import terms — the detention clock and where the empty goes back. Only the
+              import package carries them, and both are what the yard asks for. */}
+          {(shipment.freeDays != null || shipment.emptyReturnLocation) && (
+            <p className="text-xs text-muted-foreground mt-1 flex flex-wrap items-center gap-x-2">
+              {shipment.freeDays != null && (
+                <span>Free days <span className="font-medium text-foreground">{shipment.freeDays}</span></span>
+              )}
+              {shipment.freeDays != null && shipment.emptyReturnLocation && <span>·</span>}
+              {shipment.emptyReturnLocation && (
+                <span>Empty return <span className="font-medium text-foreground">{shipment.emptyReturnLocation}</span></span>
+              )}
             </p>
           )}
           <p className="text-xs text-muted-foreground mt-2 flex items-center gap-1">
@@ -381,11 +388,7 @@ const ShipmentDetailPage = () => {
                       docEntry={docEntry}
                       stepDocs={docsByStep[step.id] ?? []}
                       stepInvoices={invoicesByStep[step.id] ?? []}
-                      stepCharges={chargesByStep[step.id] ?? []}
                       canBill={canBill}
-                      canReadCharges={canReadCharges}
-                      canConfirmCharge={canConfirmCharge && !locked}
-                      canCreateCharge={canCreateCharge && !locked}
                       canEditNotes={hasPermission("shipment.step.complete") && !locked && !held}
                       canUpload={hasPermission("document.upload") && !locked}
                       canTickActions={hasPermission("shipment.step.complete") && ownedByMe && !locked && !held && !done}
@@ -397,10 +400,6 @@ const ShipmentDetailPage = () => {
                       onSaveNotes={(notes) => act(() => otdService.updateStepDetails(id, step.displayNo, { notes }), "Step details saved")}
                       onUpload={(docType) => setDialog({ kind: "stepUpload", stepId: step.id, docType })}
                       onCreateInvoice={() => setDialog({ kind: "createInvoice", stepId: step.id, stepCode: step.stepCode })}
-                      onAddCharge={() => setDialog({ kind: "addCharge", stepId: step.id })}
-                      onConfirmCharge={(c) => setDialog({ kind: "confirmCharge", charge: c })}
-                      onBillCharge={(c) => setDialog({ kind: "billCharge", charge: c })}
-                      onCancelCharge={(c) => setDialog({ kind: "cancelCharge", charge: c })}
                       onDownload={(d) => documentService.downloadDocument(d.id, d.fileName)}
                     />
                  )}
@@ -408,7 +407,7 @@ const ShipmentDetailPage = () => {
               );
             })}
           </ol>
-          {held && <p className="text-xs text-amber-600 mt-3">Shipment is on hold — OTD writes are blocked until it resumes (RULE-SH-09).</p>}
+          {held && <p className="text-xs text-amber-600 mt-3">Shipment is on hold — OTD writes are blocked until it resumes.</p>}
         </div>
 
         {/* OTC + invoices */}
@@ -416,27 +415,42 @@ const ShipmentDetailPage = () => {
           {/* Job P&L (freight-forwarding OTC upgrade) */}
           {pnl && <PnlCard pnl={pnl} />}
 
-          {/* Job-level charges not tied to a step (e.g. demurrage) */}
-          {canReadCharges && (jobCharges.length > 0 || canCreateCharge) && (
-            <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="font-semibold flex items-center gap-2"><Banknote className="w-4 h-4" /> Job-level charges</h2>
-                {canCreateCharge && !locked && (
-                  <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1" onClick={() => setDialog({ kind: "addCharge", stepId: null })}><Plus className="w-3 h-3" /> Add</Button>
-                )}
+               {/* OTC — invoice & payment tracking (receivables vs payables) */}
+          <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
+            <h2 className="font-semibold mb-3 flex items-center gap-2"><Receipt className="w-4 h-4" /> Invoice &amp; Payment Tracking</h2>
+            {(shipment.invoices ?? []).length === 0 ? (
+              <p className="text-sm text-muted-foreground">No invoices yet.</p>
+            ) : (
+              <div className="space-y-4">
+                {["receivable", "payable"].map((kind) => {
+                  const list = (shipment.invoices ?? []).filter((i) => (i.kind ?? "receivable") === kind);
+                  if (!list.length) return null;
+                  const outstanding = list
+                    .filter((i) => i.status !== "void")
+                    .reduce((s, i) => s + Number(i.totalAmount) - (i.payments ?? []).reduce((a, p) => a + Number(p.amount), 0), 0);
+                  return (
+                    <div key={kind}>
+                      <div className="flex items-center justify-between mb-2">
+                        <span className={`text-xs font-semibold ${kind === "payable" ? "text-orange-600 dark:text-orange-400" : "text-emerald-600 dark:text-emerald-400"}`}>
+                          {INVOICE_KIND_LABELS[kind]}{kind === "receivable" ? " (owed to us)" : " (we owe)"}
+                        </span>
+                        <span className="text-xs text-muted-foreground">Outstanding {money(outstanding, list[0]?.currency)}</span>
+                      </div>
+                      <div className="space-y-2">
+                        {list.map((inv) => (
+                          <InvoiceRow key={inv.id} inv={inv} locked={locked} busy={busy} hasPermission={hasPermission}
+                            onIssue={() => act(() => financeService.issueInvoice(inv.id), "Invoice issued")}
+                            onPay={() => setDialog({ kind: "payment", invoiceId: inv.id })}
+                            onVoid={() => setDialog({ kind: "void", invoiceId: inv.id })} />
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-              {jobCharges.length === 0 ? <p className="text-xs text-muted-foreground">No job-level charges.</p> : (
-                <div className="space-y-1.5">
-                  {jobCharges.map((c) => (
-                    <ChargeRow key={c.id} charge={c} busy={busy} canConfirm={canConfirmCharge && !locked} canBill={canBill && !locked}
-                      onConfirm={() => setDialog({ kind: "confirmCharge", charge: c })}
-                      onBill={() => setDialog({ kind: "billCharge", charge: c })}
-                      onCancel={() => setDialog({ kind: "cancelCharge", charge: c })} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+            )}
+            <p className="text-[11px] text-muted-foreground mt-3">Receivables drive OTC milestones 1–2 &amp; settlement; payables are tracked separately.</p>
+          </div>
 
           <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
             <h2 className="font-semibold mb-3">Order to Cash</h2>
@@ -459,42 +473,7 @@ const ShipmentDetailPage = () => {
             <p className="text-[11px] text-muted-foreground mt-2">Milestones 1–2 complete automatically on invoice issue & payment.</p>
           </div>
 
-          {/* OTC — invoice & payment tracking (receivables vs payables) */}
-          <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
-            <h2 className="font-semibold mb-3 flex items-center gap-2"><Receipt className="w-4 h-4" /> Invoice &amp; Payment Tracking</h2>
-            {(shipment.invoices ?? []).length === 0 ? (
-              <p className="text-sm text-muted-foreground">No invoices yet.</p>
-            ) : (
-              <div className="space-y-4">
-                {["receivable", "payable"].map((kind) => {
-                  const list = (shipment.invoices ?? []).filter((i) => (i.kind ?? "receivable") === kind);
-                  if (!list.length) return null;
-                  const outstanding = list
-                    .filter((i) => i.status !== "void")
-                    .reduce((s, i) => s + Number(i.totalAmount) - (i.payments ?? []).reduce((a, p) => a + Number(p.amount), 0), 0);
-                  return (
-                    <div key={kind}>
-                      <div className="flex items-center justify-between mb-2">
-                        <span className={`text-xs font-semibold uppercase tracking-wide ${kind === "payable" ? "text-orange-600 dark:text-orange-400" : "text-emerald-600 dark:text-emerald-400"}`}>
-                          {INVOICE_KIND_LABELS[kind]}{kind === "receivable" ? " (owed to us)" : " (we owe)"}
-                        </span>
-                        <span className="text-xs text-muted-foreground">Outstanding {money(outstanding, list[0]?.currency)}</span>
-                      </div>
-                      <div className="space-y-2">
-                        {list.map((inv) => (
-                          <InvoiceRow key={inv.id} inv={inv} locked={locked} busy={busy} hasPermission={hasPermission}
-                            onIssue={() => act(() => financeService.issueInvoice(inv.id), "Invoice issued")}
-                            onPay={() => setDialog({ kind: "payment", invoiceId: inv.id })}
-                            onVoid={() => setDialog({ kind: "void", invoiceId: inv.id })} />
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-            <p className="text-[11px] text-muted-foreground mt-3">Receivables drive OTC milestones 1–2 &amp; settlement; payables are tracked separately.</p>
-          </div>
+     
 
           {/* Exceptions */}
           {(shipment.exceptions ?? []).length > 0 && (
@@ -557,39 +536,17 @@ const ShipmentDetailPage = () => {
           )} />
       )}
       {dialog?.kind === "createInvoice" && (
-        <CreateInvoiceDialog busy={busy} defaultCurrency={(shipment.invoices?.[0]?.currency) || "USD"} vendors={vendors} onClose={() => setDialog(null)}
+        <CreateInvoiceDialog busy={busy} defaultCurrency={(shipment.invoices?.[0]?.currency) || DEFAULT_CURRENCY} vendors={vendors} onClose={() => setDialog(null)}
           onSubmit={(payload) => act(
             () => financeService.createInvoice({ ...payload, shipmentId: id, otdStepId: dialog.stepId }),
             "Invoice drafted",
           )} />
       )}
-      {dialog?.kind === "addCharge" && (
-        <AddChargeDialog busy={busy} vendors={vendors} defaultCurrency={(shipment.invoices?.[0]?.currency) || "USD"} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(
-            () => chargeService.createCharge({ ...payload, shipmentId: id, otdStepId: dialog.stepId ?? undefined }),
-            "Charge added",
-          )} />
-      )}
-      {dialog?.kind === "confirmCharge" && (
-        <ConfirmChargeDialog busy={busy} charge={dialog.charge} vendors={vendors} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(() => chargeService.confirmCharge(dialog.charge.id, payload), "Charge confirmed")} />
-      )}
-      {dialog?.kind === "billCharge" && (
-        <BillChargeDialog busy={busy} charge={dialog.charge} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(
-            () => financeService.createInvoiceFromCharges({ shipmentId: id, direction: dialog.charge.direction, chargeIds: [dialog.charge.id], ...payload }),
-            "Invoice drafted from charge",
-          )} />
-      )}
-      {dialog?.kind === "cancelCharge" && (
-        <ReasonDialog busy={busy} title="Cancel charge" label="Cancellation reason" confirmText="Cancel charge" destructive onClose={() => setDialog(null)}
-          onSubmit={(reason) => act(() => chargeService.cancelCharge(dialog.charge.id, reason), "Charge cancelled")} />
-      )}
     </div>
   );
 };
 
-/* ── Job P&L card ── */
+/* ── Job P&L card — invoiced money vs what the approved quote promised. ── */
 const PnlCard = ({ pnl }) => {
   const m = (n) => `${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   const marginPct = pnl.revenue.actual > 0 ? Math.round((pnl.margin.actual / pnl.revenue.actual) * 100) : null;
@@ -600,21 +557,21 @@ const PnlCard = ({ pnl }) => {
         <div className="rounded-lg border p-2">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Revenue</p>
           <p className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">{m(pnl.revenue.actual)}</p>
-          <p className="text-[10px] text-muted-foreground">est {m(pnl.revenue.estimated)}</p>
+          <p className="text-[10px] text-muted-foreground">quoted {m(pnl.revenue.estimated)}</p>
         </div>
         <div className="rounded-lg border p-2">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Cost</p>
           <p className="text-sm font-semibold text-orange-600 dark:text-orange-400">{m(pnl.cost.actual)}</p>
-          <p className="text-[10px] text-muted-foreground">est {m(pnl.cost.estimated)}</p>
+          <p className="text-[10px] text-muted-foreground">quoted {m(pnl.cost.estimated)}</p>
         </div>
         <div className="rounded-lg border p-2">
           <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Margin</p>
           <p className={`text-sm font-semibold ${pnl.margin.actual >= 0 ? "text-primary" : "text-destructive"}`}>{m(pnl.margin.actual)}</p>
-          <p className="text-[10px] text-muted-foreground">{marginPct != null ? `${marginPct}%` : `est ${m(pnl.margin.estimated)}`}</p>
+          <p className="text-[10px] text-muted-foreground">{marginPct != null ? `${marginPct}%` : `quoted ${m(pnl.margin.estimated)}`}</p>
         </div>
       </div>
       <div className="flex items-center justify-between mt-3 text-[11px] text-muted-foreground">
-        <span>Collected {m(pnl.revenue.collected)} · Paid {m(pnl.cost.paid)}</span>
+        <span>Invoiced · collected {m(pnl.revenue.collected)} · paid {m(pnl.cost.paid)}</span>
         {pnl.openPayables?.count > 0 && (
           <Badge variant="outline" className="text-[10px] bg-orange-50 text-orange-700 border-orange-300 dark:bg-orange-950/30 dark:text-orange-300">
             {pnl.openPayables.count} open payable{pnl.openPayables.count > 1 ? "s" : ""} · {m(pnl.openPayables.amount)}
@@ -626,33 +583,6 @@ const PnlCard = ({ pnl }) => {
   );
 };
 
-/* ── A compact charge row with direction, amount, status + actions. ── */
-const ChargeRow = ({ charge: c, busy, canConfirm, canBill, onConfirm, onBill, onCancel }) => {
-  const amt = Number(c.actualAmount ?? c.estimatedAmount ?? 0);
-  const party = c.direction === "payable" ? (c.vendor?.name ?? c.description ?? "vendor") : "customer";
-  return (
-    <div className="border rounded-lg p-2 text-xs space-y-1">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-medium">{c.chargeType?.label ?? c.chargeCode}</span>
-        <span className={c.direction === "payable" ? "text-orange-600 dark:text-orange-400" : "text-emerald-600 dark:text-emerald-400"}>
-          {c.direction === "payable" ? "OUT" : "IN"} {c.currency} {amt.toLocaleString(undefined, { minimumFractionDigits: 0 })}
-        </span>
-      </div>
-      <div className="flex items-center justify-between gap-2 text-muted-foreground">
-        <span>{party}</span>
-        <Badge variant="outline" className="text-[9px]">{CHARGE_STATUS_LABELS[c.status] ?? c.status}</Badge>
-      </div>
-      {(canConfirm || canBill) && ["estimated", "confirmed"].includes(c.status) && (
-        <div className="flex flex-wrap gap-1 pt-0.5">
-          {canConfirm && <Button size="sm" variant="outline" className="h-6 text-[10px]" disabled={busy} onClick={onConfirm}>Confirm</Button>}
-          {canBill && !c.invoiceLineId && <Button size="sm" variant="outline" className="h-6 text-[10px]" disabled={busy} onClick={onBill}>Bill</Button>}
-          {canConfirm && <Button size="sm" variant="ghost" className="h-6 text-[10px] text-destructive" disabled={busy} onClick={onCancel}>Cancel</Button>}
-        </div>
-      )}
-    </div>
-  );
-};
-
 const HoldDialog = ({ busy, onClose, onSubmit }) => {
   const [type, setType] = useState("documentation_hold");
   const [reason, setReason] = useState("");
@@ -660,7 +590,7 @@ const HoldDialog = ({ busy, onClose, onSubmit }) => {
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>Hold shipment</DialogTitle>
-          <DialogDescription>Clocks stop and open tasks freeze; documents & chat stay open (RULE-SH-09).</DialogDescription></DialogHeader>
+          <DialogDescription>Clocks stop and open tasks freeze; documents & chat stay open.</DialogDescription></DialogHeader>
         <form onSubmit={(e) => { e.preventDefault(); if (reason.trim().length < 3) return toast.error("A reason is required"); onSubmit({ type, reason: reason.trim() }); }} className="space-y-4 py-2">
           <div className="space-y-1.5"><Label>Type</Label>
             <Select value={type} onValueChange={setType} items={["customs_hold", "payment_hold", "documentation_hold", "weather_hold", "customer_request", "other"].map((t) => ({ value: t, label: t.replace(/_/g, " ") }))}>
@@ -774,7 +704,7 @@ const PaymentDialog = ({ busy, onClose, onSubmit }) => {
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader><DialogTitle>Record payment</DialogTitle>
-          <DialogDescription>Full settlement auto-completes OTC milestone 2 (RULE-FI-03).</DialogDescription></DialogHeader>
+          <DialogDescription>Full settlement auto-completes OTC milestone 2.</DialogDescription></DialogHeader>
         <form onSubmit={(e) => { e.preventDefault(); if (!(Number(amount) > 0)) return toast.error("Enter an amount"); onSubmit({ amount: Number(amount), method, referenceNumber: ref || undefined }); }} className="space-y-4 py-2">
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5"><Label htmlFor="pay-amt">Amount</Label>
@@ -800,29 +730,111 @@ const PaymentDialog = ({ busy, onClose, onSubmit }) => {
   );
 };
 
-/* ── An invoice row with payments + actions (used in the OTC tracking section). ── */
+/* ── An invoice row: paid/unpaid at a glance, full detail on expand. ── */
 const InvoiceRow = ({ inv, locked, busy, hasPermission, onIssue, onPay, onVoid }) => {
-  const paid = (inv.payments ?? []).reduce((a, p) => a + Number(p.amount ?? 0), 0);
+  const [open, setOpen] = useState(false);
+  const pay = paymentStateOf(inv);
+  const lines = inv.lines ?? [];
+  const party = inv.vendor?.name ?? inv.counterparty;
+
   return (
-    <div className="border rounded-lg p-3 text-sm space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <span className="font-medium text-primary">{inv.referenceNo}</span>
-        <Badge variant="outline" className="text-[10px]">{INVOICE_STATUS_LABELS[inv.status]}</Badge>
+    <div className="border rounded-lg text-sm">
+      {/* Summary — reference, what's owed, and whether it's been paid */}
+      <div className="p-3 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <button type="button" className="flex items-center gap-1.5 min-w-0 text-left" onClick={() => setOpen((v) => !v)}>
+            {open ? <ChevronUp className="w-3.5 h-3.5 shrink-0 text-muted-foreground" /> : <ChevronDown className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />}
+            <span className="font-medium truncate">{inv.referenceNo}</span>
+          </button>
+          <Badge variant="outline" className={`text-[10px] shrink-0 ${PAYMENT_STATE_CLASS[pay.key] ?? ""}`}>{pay.label}</Badge>
+        </div>
+
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="font-semibold">{money(inv.totalAmount, inv.currency)}</span>
+          {pay.key !== "void" && (
+            <span className="text-xs text-muted-foreground">
+              {pay.key === "paid"
+                ? `paid in full${inv.payments?.length ? ` · ${inv.payments.length} payment${inv.payments.length > 1 ? "s" : ""}` : ""}`
+                : `${money(pay.outstanding, inv.currency)} outstanding`}
+            </span>
+          )}
+        </div>
+
+        {/* An unpaid invoice nobody has issued yet can't be collected — say so, since
+            "Unpaid" alone doesn't explain why Record payment is unavailable. */}
+        {pay.notYetIssued && pay.key !== "void" && (
+          <p className="text-[11px] text-muted-foreground">
+            Not yet {inv.kind === "payable" ? "approved for payment" : "issued to the customer"}.
+          </p>
+        )}
+        {inv.status === "void" && inv.voidReason && (
+          <p className="text-[11px] text-muted-foreground">Voided — {inv.voidReason}</p>
+        )}
+        {party && <p className="text-xs text-muted-foreground truncate">Party: {party}</p>}
       </div>
-      <div className="text-muted-foreground">
-        {money(inv.totalAmount, inv.currency)}
-        {paid > 0 && inv.status !== "paid" ? ` · paid ${money(paid, inv.currency)}` : ""}
-      </div>
-      {inv.counterparty && <div className="text-xs text-muted-foreground">Party: {inv.counterparty}</div>}
-      {(inv.payments ?? []).length > 0 && (
-        <ul className="text-[11px] text-muted-foreground space-y-0.5">
-          {inv.payments.map((p) => (
-            <li key={p.id}>{money(p.amount, inv.currency)} · {(p.method || "").replace(/_/g, " ")}{p.referenceNumber ? ` · ${p.referenceNumber}` : ""}</li>
-          ))}
-        </ul>
+
+      {/* Detail — what is being billed, the dates, and every payment against it */}
+      {open && (
+        <div className="border-t bg-muted/20 px-3 py-2.5 space-y-3">
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+            <span className="text-muted-foreground">Type <b className="text-foreground font-medium">{INVOICE_KIND_LABELS[inv.kind ?? "receivable"]}</b></span>
+            <span className="text-muted-foreground">Stage <b className="text-foreground font-medium">{INVOICE_STATUS_LABELS[inv.status]}</b></span>
+            <span className="text-muted-foreground">Issued <b className="text-foreground font-medium">{fmtDate(inv.issuedAt)}</b></span>
+            <span className="text-muted-foreground">Due <b className="text-foreground font-medium">{fmtDate(inv.dueDate)}</b></span>
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Charge lines</p>
+            {lines.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">No line breakdown recorded.</p>
+            ) : (
+              <ul className="space-y-1">
+                {lines.map((l) => (
+                  <li key={l.id} className="flex items-start justify-between gap-2 text-[11px]">
+                    <span className="min-w-0">
+                      <span className="block truncate">{l.description}</span>
+                      <span className="text-muted-foreground">
+                        {Number(l.quantity)} × {money(l.unitPrice, inv.currency)}
+                      </span>
+                    </span>
+                    <span className="shrink-0 font-medium">{money(l.amount, inv.currency)}</span>
+                  </li>
+                ))}
+                <li className="flex items-center justify-between gap-2 text-[11px] pt-1 border-t font-semibold">
+                  <span>Total</span><span>{money(inv.totalAmount, inv.currency)}</span>
+                </li>
+              </ul>
+            )}
+          </div>
+
+          <div>
+            <p className="text-[10px] uppercase tracking-wide text-muted-foreground mb-1">Payments</p>
+            {(inv.payments ?? []).length === 0 ? (
+              <p className="text-[11px] text-muted-foreground">Nothing received yet.</p>
+            ) : (
+              <ul className="space-y-0.5 text-[11px]">
+                {inv.payments.map((p) => (
+                  <li key={p.id} className="flex items-center justify-between gap-2">
+                    <span className="text-muted-foreground truncate">
+                      {fmtDate(p.receivedAt)} · {(p.method || "").replace(/_/g, " ")}
+                      {p.referenceNumber ? ` · ${p.referenceNumber}` : ""}
+                    </span>
+                    <span className="shrink-0 font-medium text-emerald-600 dark:text-emerald-400">{money(p.amount, inv.currency)}</span>
+                  </li>
+                ))}
+                {pay.outstanding > 0 && (
+                  <li className="flex items-center justify-between gap-2 pt-1 border-t font-semibold">
+                    <span>Outstanding</span><span>{money(pay.outstanding, inv.currency)}</span>
+                  </li>
+                )}
+              </ul>
+            )}
+          </div>
+        </div>
       )}
-      {!locked && (
-        <div className="flex flex-wrap gap-1">
+
+      {!locked && (inv.status === "draft" || ["issued", "part_paid"].includes(inv.status)) && (
+        <div className="flex flex-wrap gap-1 px-3 pb-3">
           {inv.status === "draft" && hasPermission("invoice.issue") && (
             <Button size="sm" variant="outline" className="h-7 text-[11px]" disabled={busy} onClick={onIssue}>{inv.kind === "payable" ? "Approve" : "Issue"}</Button>
           )}
@@ -839,9 +851,9 @@ const InvoiceRow = ({ inv, locked, busy, hasPermission, onIssue, onPay, onVoid }
 };
 
 /* ── The per-step expandable panel: details/form, required docs, proofs, billing. ── */
-const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, stepCharges, canBill, canReadCharges, canConfirmCharge, canCreateCharge, canEditNotes, canUpload, canTickActions, busy, onSaveNotes, onToggleAction, onUpload, onCreateInvoice, onAddCharge, onConfirmCharge, onBillCharge, onCancelCharge, onDownload }) => {
+const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, canEditNotes, canUpload, canTickActions, busy, onSaveNotes, onToggleAction, onUpload, onCreateInvoice, onDownload }) => {
   const [notes, setNotes] = useState(step.notes ?? "");
-  const route = [shipment.originPort, shipment.destinationPort].filter(Boolean).join(" → ");
+  const route = routeOf(shipment);
   const proofs = stepDocs.filter((d) => d.docType === "proof");
   const actions = step.actions ?? [];
   // Doc types the checklist already covers — listing them twice would read as two
@@ -918,7 +930,7 @@ const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, stepCharg
           </ul>
           {step.actionSummary?.blocking > 0 && (
             <p className="text-[11px] text-amber-600 dark:text-amber-400">
-              This step can&apos;t be completed until the {step.actionSummary.blocking} open item{step.actionSummary.blocking > 1 ? "s are" : " is"} cleared (RULE-SH-13).
+              This step can&apos;t be completed until the {step.actionSummary.blocking} open item{step.actionSummary.blocking > 1 ? "s are" : " is"} cleared.
             </p>
           )}
         </section>
@@ -961,38 +973,41 @@ const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, stepCharg
         )}
       </section>
 
-      {/* 4a. Charges (job-charge ledger) */}
-      {canReadCharges && (
-        <section className="space-y-2">
-          <div className="flex items-center justify-between">
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1"><Banknote className="w-3.5 h-3.5" /> Charges</h4>
-            {canCreateCharge && <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1" disabled={busy} onClick={onAddCharge}><Plus className="w-3 h-3" /> Add charge</Button>}
-          </div>
-          {stepCharges.length === 0 ? <p className="text-xs text-muted-foreground">No charges on this step.</p> : (
-            <div className="space-y-1.5">
-              {stepCharges.map((c) => (
-                <ChargeRow key={c.id} charge={c} busy={busy} canConfirm={canConfirmCharge} canBill={canBill}
-                  onConfirm={() => onConfirmCharge(c)} onBill={() => onBillCharge(c)} onCancel={() => onCancelCharge(c)} />
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* 5. Billing */}
+      {/* 5. Billing — the single money record on a step */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
           <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1"><Receipt className="w-3.5 h-3.5" /> Invoices</h4>
           {canBill && <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1" disabled={busy} onClick={onCreateInvoice}><Plus className="w-3 h-3" /> New invoice</Button>}
         </div>
         {stepInvoices.length === 0 ? <p className="text-xs text-muted-foreground">No invoices from this step.</p> : (
-          <ul className="space-y-1">
-            {stepInvoices.map((inv) => (
-              <li key={inv.id} className="flex items-center justify-between gap-2 text-xs">
-                <span>{inv.referenceNo} · <span className={inv.kind === "payable" ? "text-orange-600 dark:text-orange-400" : "text-emerald-600 dark:text-emerald-400"}>{INVOICE_KIND_LABELS[inv.kind ?? "receivable"]}</span></span>
-                <span className="text-muted-foreground">{money(inv.totalAmount, inv.currency)} · {INVOICE_STATUS_LABELS[inv.status]}</span>
-              </li>
-            ))}
+          <ul className="space-y-1.5">
+            {stepInvoices.map((inv) => {
+              const pay = paymentStateOf(inv);
+              return (
+                <li key={inv.id} className="rounded-md border bg-background px-2 py-1.5 text-xs space-y-1">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">
+                      {inv.referenceNo} · <span className={inv.kind === "payable" ? "text-orange-600 dark:text-orange-400" : "text-emerald-600 dark:text-emerald-400"}>{INVOICE_KIND_LABELS[inv.kind ?? "receivable"]}</span>
+                    </span>
+                    <Badge variant="outline" className={`text-[9px] shrink-0 ${PAYMENT_STATE_CLASS[pay.key] ?? ""}`}>{pay.label}</Badge>
+                  </div>
+                  <div className="flex items-center justify-between gap-2 text-muted-foreground">
+                    <span className="font-medium text-foreground">{money(inv.totalAmount, inv.currency)}</span>
+                    {pay.key !== "void" && pay.key !== "paid" && <span>{money(pay.outstanding, inv.currency)} outstanding</span>}
+                  </div>
+                  {(inv.lines ?? []).length > 0 && (
+                    <ul className="space-y-0.5 pt-0.5 border-t text-[11px] text-muted-foreground">
+                      {inv.lines.map((l) => (
+                        <li key={l.id} className="flex items-center justify-between gap-2">
+                          <span className="truncate">{l.description} <span className="opacity-70">({Number(l.quantity)} × {money(l.unitPrice, inv.currency)})</span></span>
+                          <span className="shrink-0">{money(l.amount, inv.currency)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -1035,7 +1050,7 @@ const CreateInvoiceDialog = ({ busy, defaultCurrency, vendors = [], onClose, onS
   const [kind, setKind] = useState("receivable");
   const [vendorId, setVendorId] = useState("");
   const [counterparty, setCounterparty] = useState("");
-  const [currency, setCurrency] = useState(defaultCurrency || "USD");
+  const [currency, setCurrency] = useState(defaultCurrency || DEFAULT_CURRENCY);
   const [lines, setLines] = useState([{ description: "", quantity: 1, unitPrice: "" }]);
   const setLine = (i, k, v) => setLines((p) => p.map((l, idx) => (idx === i ? { ...l, [k]: v } : l)));
   const addLine = () => setLines((p) => [...p, { description: "", quantity: 1, unitPrice: "" }]);
@@ -1105,141 +1120,6 @@ const CreateInvoiceDialog = ({ busy, defaultCurrency, vendors = [], onClose, onS
             <Button type="submit" disabled={busy}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Create draft"}</Button>
           </DialogFooter>
         </form>
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-/* ── Add an ad-hoc job/step charge. ── */
-const AddChargeDialog = ({ busy, vendors = [], defaultCurrency, onClose, onSubmit }) => {
-  const [chargeCode, setChargeCode] = useState("other");
-  const [direction, setDirection] = useState("payable");
-  const [vendorId, setVendorId] = useState("");
-  const [description, setDescription] = useState("");
-  const [currency, setCurrency] = useState(defaultCurrency || "USD");
-  const [amount, setAmount] = useState("");
-  const [types, setTypes] = useState([]);
-
-  useEffect(() => { chargeService.listChargeTypes().then((r) => setTypes(r.data || [])).catch(() => {}); }, []);
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!(Number(amount) >= 0) || amount === "") return toast.error("Enter an estimated amount");
-    if (direction === "payable" && !vendorId) return toast.error("A payable charge needs a vendor");
-    onSubmit({
-      chargeCode, direction, currency,
-      vendorId: direction === "payable" ? vendorId : undefined,
-      description: description.trim() || undefined,
-      estimatedAmount: Number(amount),
-    });
-  };
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="lg">
-        <DialogHeader><DialogTitle>Add charge</DialogTitle>
-          <DialogDescription>Record an expected cost or revenue on this job (e.g. detention/demurrage).</DialogDescription></DialogHeader>
-        <form onSubmit={submit} className="space-y-4 py-2">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5"><Label>Charge type</Label>
-              <Select value={chargeCode} onValueChange={setChargeCode}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{types.map((t) => <SelectItem key={t.code} value={t.code}>{t.label}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5"><Label>Direction</Label>
-              <Select value={direction} onValueChange={setDirection}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="payable">Payable (we owe)</SelectItem>
-                  <SelectItem value="receivable">Receivable (owed to us)</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          {direction === "payable" && (
-            <div className="space-y-1.5"><Label>Vendor</Label>
-              <Select value={vendorId || "none"} onValueChange={(v) => setVendorId(v === "none" ? "" : v)}>
-                <SelectTrigger><SelectValue placeholder="Select a vendor" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— none —</SelectItem>
-                  {vendors.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-1.5 col-span-2"><Label htmlFor="ac-desc">Description</Label>
-              <Input id="ac-desc" value={description} onChange={(e) => setDescription(e.target.value)} /></div>
-            <div className="space-y-1.5"><Label htmlFor="ac-ccy">Currency</Label>
-              <Input id="ac-ccy" maxLength={3} value={currency} onChange={(e) => setCurrency(e.target.value.toUpperCase())} /></div>
-          </div>
-          <div className="space-y-1.5"><Label htmlFor="ac-amt">Estimated amount</Label>
-            <Input id="ac-amt" type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus /></div>
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-            <Button type="submit" disabled={busy}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Add charge"}</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-/* ── Confirm a charge's actual amount (and vendor for payables). ── */
-const ConfirmChargeDialog = ({ busy, charge, vendors = [], onClose, onSubmit }) => {
-  const [amount, setAmount] = useState(String(charge.actualAmount ?? charge.estimatedAmount ?? ""));
-  const [vendorId, setVendorId] = useState(charge.vendorId ?? "");
-  const submit = (e) => {
-    e.preventDefault();
-    if (!(Number(amount) >= 0) || amount === "") return toast.error("Enter the actual amount");
-    if (charge.direction === "payable" && !vendorId) return toast.error("A payable charge needs a vendor");
-    onSubmit({ actualAmount: Number(amount), vendorId: charge.direction === "payable" ? vendorId : undefined });
-  };
-  return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="sm">
-        <DialogHeader><DialogTitle>Confirm charge</DialogTitle>
-          <DialogDescription>{charge.chargeType?.label ?? charge.chargeCode} · est {charge.currency} {Number(charge.estimatedAmount).toLocaleString()}</DialogDescription></DialogHeader>
-        <form onSubmit={submit} className="space-y-4 py-2">
-          <div className="space-y-1.5"><Label htmlFor="cc-amt">Actual amount</Label>
-            <Input id="cc-amt" type="number" min="0" step="0.01" value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus /></div>
-          {charge.direction === "payable" && (
-            <div className="space-y-1.5"><Label>Vendor</Label>
-              <Select value={vendorId || "none"} onValueChange={(v) => setVendorId(v === "none" ? "" : v)}>
-                <SelectTrigger><SelectValue placeholder="Select a vendor" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— none —</SelectItem>
-                  {vendors.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-          )}
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Back</Button>
-            <Button type="submit" disabled={busy}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Confirm"}</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-/* ── Draft an invoice from a single charge. ── */
-const BillChargeDialog = ({ busy, charge, onClose, onSubmit }) => {
-  const amt = Number(charge.actualAmount ?? charge.estimatedAmount ?? 0);
-  return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="sm">
-        <DialogHeader><DialogTitle>Bill this charge</DialogTitle>
-          <DialogDescription>
-            Draft a {charge.direction} invoice for {charge.chargeType?.label ?? charge.chargeCode} —
-            {" "}{charge.currency} {amt.toLocaleString()}{charge.direction === "payable" && charge.vendor ? ` to ${charge.vendor.name}` : ""}.
-          </DialogDescription></DialogHeader>
-        <DialogFooter className="gap-2 pt-2">
-          <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button type="button" disabled={busy} onClick={() => onSubmit({})}>{busy ? <Loader2 className="w-4 h-4 animate-spin" /> : "Draft invoice"}</Button>
-        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

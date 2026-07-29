@@ -25,6 +25,7 @@ export const SERVICE_PACKAGE_LABELS = {
   local_transport: "Local Transport",
   loading_point_to_port: "Loading Point → Port",
   international: "International Shipment",
+  port_to_consignee: "Port → Consignee (Import Delivery)",
 };
 
 export const SERVICE_PACKAGE_DESCRIPTIONS = {
@@ -34,6 +35,8 @@ export const SERVICE_PACKAGE_DESCRIPTIONS = {
     "We move your cargo from your factory or loading point to the port and hand it over at the terminal gate.",
   international:
     "The full export service — CRO, customs clearance, terminal handling, ocean freight, bill of lading and release.",
+  port_to_consignee:
+    "Your container has landed and been released — we collect it from the terminal, deliver it to the consignee and return the empty.",
 };
 
 // Plain-language "what you get", shown on the package cards in the portal.
@@ -50,6 +53,12 @@ export const SERVICE_PACKAGE_INCLUDES = {
     "Customs declaration & inspection",
     "Vessel booking & ocean freight",
     "Bill of lading & telex release",
+  ],
+  port_to_consignee: [
+    "Container collected from the terminal",
+    "Delivery to the consignee's address",
+    "Proof of delivery collected",
+    "Empty container returned to the yard",
   ],
 };
 
@@ -87,12 +96,40 @@ export const PACKAGE_PRESET_SERVICES = {
   local_transport: ["local_transport"],
   loading_point_to_port: ["local_transport", "port_handling"],
   international: ["local_transport", "port_handling", "customs_clearance", "sea_freight"],
+  port_to_consignee: ["local_transport", "port_handling"],
 };
 
 // Mirrors erp-backend/utils/servicePackage.js — which packages need port codes.
 export const packageUsesPorts = (pkg) => !!pkg && pkg !== "local_transport";
 export const packageUsesDestinationPort = (pkg) => pkg === "international";
 export const packageHasCroChoice = (pkg) => pkg === "loading_point_to_port";
+
+/**
+ * Which door fields a package asks for. Import delivery is the first package to want a
+ * port AND a street address — it starts at the terminal named by originPort and ends at
+ * the consignee — so "uses ports" no longer implies "no addresses".
+ */
+export const packageUsesPickupAddress = (pkg) => pkg === "local_transport";
+export const packageUsesDeliveryAddress = (pkg) =>
+  pkg === "local_transport" || pkg === "port_to_consignee";
+/** Free days + empty-return location: the import leg only. */
+export const packageUsesImportTerms = (pkg) => pkg === "port_to_consignee";
+
+/**
+ * The route line for a query or shipment — which pair of endpoints actually describes
+ * the movement. Local transport runs address → address, import delivery runs
+ * port → address, and the export packages run port → port (or port → nothing, for a job
+ * that ends at the terminal gate).
+ *
+ * One helper because the "is it local?" ternary was copy-pasted across five call sites,
+ * and every one of them printed a blank route the moment a fourth package existed.
+ */
+export const routeOf = (row) => {
+  if (!row) return "";
+  const from = packageUsesPickupAddress(row.servicePackage) ? row.pickupAddress : row.originPort;
+  const to = packageUsesDeliveryAddress(row.servicePackage) ? row.deliveryAddress : row.destinationPort;
+  return [from, to].filter(Boolean).join(" → ");
+};
 
 export const QUERY_STATUS_LABELS = {
   open: "Open",
@@ -174,6 +211,17 @@ export const OTC_MILESTONE_LABELS = {
   settlement_complete: "Settlement Complete",
 };
 
+/**
+ * The trading currency of the business — mirrors DEFAULT_CURRENCY in
+ * erp-backend/utils/currency.js. Used for new-record form defaults and as the
+ * display fallback when a row somehow carries no currency of its own. Records
+ * store their own currency, so anything priced differently still renders correctly.
+ */
+export const DEFAULT_CURRENCY = "PKR";
+
+// The raw lifecycle status. Kept for screens where the distinction between an
+// unissued draft and an issued invoice actually drives an action (the Finance
+// filter, for one — collapsing both to "Unpaid" would give it two identical rows).
 export const INVOICE_STATUS_LABELS = {
   draft: "Draft",
   issued: "Issued",
@@ -182,7 +230,53 @@ export const INVOICE_STATUS_LABELS = {
   void: "Void",
 };
 
-// ── Vendors & job-charge ledger (freight-forwarding OTC upgrade) ──
+/**
+ * How an invoice reads to someone tracking money rather than running the finance
+ * desk: is it paid or not? "Draft" answers a question nobody on a shipment page is
+ * asking. Draft and issued both mean the money has not arrived, so both read
+ * "Unpaid" — `notYetIssued` is carried alongside for the one caller that needs to
+ * explain why an unpaid invoice cannot be collected yet.
+ */
+export const paymentStateOf = (inv) => {
+  const paid = (inv?.payments ?? []).reduce((s, p) => s + Number(p.amount ?? 0), 0);
+  const total = Number(inv?.totalAmount ?? 0);
+  if (inv?.status === "void") return { key: "void", label: "Void", paid, outstanding: 0, notYetIssued: false };
+  if (inv?.status === "paid") return { key: "paid", label: "Paid", paid, outstanding: 0, notYetIssued: false };
+  const outstanding = Math.max(0, total - paid);
+  const notYetIssued = inv?.status === "draft";
+  if (paid > 0) return { key: "part_paid", label: "Partly Paid", paid, outstanding, notYetIssued };
+  return { key: "unpaid", label: "Unpaid", paid, outstanding, notYetIssued };
+};
+
+/**
+ * Whole days an invoice is past its due date, or 0. Only money still owed can be
+ * overdue — a paid or voided invoice never is, however old its due date.
+ */
+export const overdueDaysOf = (inv) => {
+  if (!inv?.dueDate || ["paid", "void"].includes(inv?.status)) return 0;
+  const ms = Date.now() - new Date(inv.dueDate).getTime();
+  return ms <= 0 ? 0 : Math.floor(ms / 86_400_000);
+};
+
+// The payment states a person filters by, and the raw statuses each covers.
+// Draft and issued both mean "not paid", so they share one filter entry.
+export const PAYMENT_STATE_FILTERS = [
+  { value: "", label: "All invoices", statuses: null },
+  { value: "unpaid", label: "Unpaid", statuses: ["draft", "issued"] },
+  { value: "part_paid", label: "Partly Paid", statuses: ["part_paid"] },
+  { value: "paid", label: "Paid", statuses: ["paid"] },
+  { value: "void", label: "Void", statuses: ["void"] },
+];
+
+// Badge styling per payment state — green paid, amber partly, red unpaid, muted void.
+export const PAYMENT_STATE_CLASS = {
+  paid: "bg-green-50 text-green-700 border-green-300 dark:bg-green-950/30 dark:text-green-300",
+  part_paid: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300",
+  unpaid: "bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300",
+  void: "bg-muted text-muted-foreground border-muted-foreground/30 line-through",
+};
+
+// ── Vendors — the counterparties on payable invoices ──
 
 export const VENDOR_TYPE_LABELS = {
   transporter: "Transporter",
@@ -195,16 +289,3 @@ export const VENDOR_TYPE_LABELS = {
 };
 
 export const VENDOR_TYPE_OPTIONS = Object.entries(VENDOR_TYPE_LABELS).map(([value, label]) => ({ value, label }));
-
-export const CHARGE_DIRECTION_LABELS = {
-  receivable: "Receivable (money in)",
-  payable: "Payable (money out)",
-};
-
-export const CHARGE_STATUS_LABELS = {
-  estimated: "Estimated",
-  confirmed: "Confirmed",
-  invoiced: "Invoiced",
-  settled: "Settled",
-  cancelled: "Cancelled",
-};

@@ -28,30 +28,34 @@ DO $$ BEGIN
   ALTER TABLE shipments ADD CONSTRAINT shipments_services_nonempty CHECK (cardinality(services) > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Package ↔ CRO-mode consistency: only loading_point_to_port and international have a
--- CRO at all, so local_transport must be not_applicable and the other two must not be.
--- A NULL service_package is a pre-package row and is exempt.
-DO $$ BEGIN
-  ALTER TABLE queries ADD CONSTRAINT queries_cro_mode_valid CHECK (
-    service_package IS NULL
-    OR (service_package = 'local_transport' AND cro_handled_by = 'not_applicable')
-    OR (service_package <> 'local_transport' AND cro_handled_by <> 'not_applicable')
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE quotations ADD CONSTRAINT quotations_cro_mode_valid CHECK (
-    service_package IS NULL
-    OR (service_package = 'local_transport' AND cro_handled_by = 'not_applicable')
-    OR (service_package <> 'local_transport' AND cro_handled_by <> 'not_applicable')
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE shipments ADD CONSTRAINT shipments_cro_mode_valid CHECK (
-    service_package IS NULL
-    OR (service_package = 'local_transport' AND cro_handled_by = 'not_applicable')
-    OR (service_package <> 'local_transport' AND cro_handled_by <> 'not_applicable')
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Package ↔ CRO-mode consistency. Only loading_point_to_port and international have a
+-- Container Release Order in play: local_transport has no container, and
+-- port_to_consignee has one the line already released (the customer's delivery order
+-- stands in for the CRO). Those two must be not_applicable; the export packages must
+-- not be. A NULL service_package is a pre-package row and is exempt.
+--
+-- DROP-then-ADD rather than the ADD/EXCEPTION idiom used elsewhere in this file: these
+-- definitions have CHANGED, and a bare ADD would swallow duplicate_object and silently
+-- leave the OLD predicate in place — which rejects every port_to_consignee row.
+-- Mirrors allowedCroModes() in utils/servicePackage.js; keep the two in step.
+ALTER TABLE queries DROP CONSTRAINT IF EXISTS queries_cro_mode_valid;
+ALTER TABLE queries ADD CONSTRAINT queries_cro_mode_valid CHECK (
+  service_package IS NULL
+  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
+  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
+);
+ALTER TABLE quotations DROP CONSTRAINT IF EXISTS quotations_cro_mode_valid;
+ALTER TABLE quotations ADD CONSTRAINT quotations_cro_mode_valid CHECK (
+  service_package IS NULL
+  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
+  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
+);
+ALTER TABLE shipments DROP CONSTRAINT IF EXISTS shipments_cro_mode_valid;
+ALTER TABLE shipments ADD CONSTRAINT shipments_cro_mode_valid CHECK (
+  service_package IS NULL
+  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
+  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
+);
 
 -- Outreach / Visit Plans target exactly one of lead, customer
 DO $$ BEGIN
