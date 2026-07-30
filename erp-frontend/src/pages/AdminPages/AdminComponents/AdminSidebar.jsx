@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React from "react";
 import {
   X,
   LayoutDashboard,
@@ -24,6 +24,7 @@ import {
   Landmark,
   Package,
   Truck,
+  Workflow,
 } from "lucide-react";
 import { NavLink } from "react-router-dom";
 import AdminLogoutModal from "./AdminLogoutModal";
@@ -63,20 +64,17 @@ const NAV_ITEMS = [
   { name: "Security", icon: Lock, path: "/admin/security", roles: NON_MGMT_INTERNAL },
   { name: "Reports", icon: BarChart3, path: "/admin/reports", roles: REPORT_ROLES }, // report.read (§5.18)
   { name: "Action Engine", icon: Cpu, path: "/admin/action-engine", roles: [] }, // Management only (§5.12)
+  { name: "Workflow", icon: Workflow, path: "/admin/workflow", roles: [] }, // Management only (ADR-051)
   { name: "Audit", icon: ShieldCheck, path: "/admin/audit", roles: [] }, // Management only (§5.19)
 ];
 
 const AdminSidebar = ({ open, setOpen }) => {
   const admin = useAuthStore((state) => state.user);
   const unreadCount = useNotificationStore((s) => s.unreadCount);
-  const fetchNotifications = useNotificationStore((s) => s.fetchNotifications);
 
-  // Light poll for the unread badge (REST is complete without sockets).
-  useEffect(() => {
-    fetchNotifications();
-    const t = setInterval(fetchNotifications, 60_000);
-    return () => clearInterval(t);
-  }, [fetchNotifications]);
+  // No fetch or poll here: AdminLayout already mounts one, and this ran a SECOND 60s
+  // interval against the same store — two requests a minute for one badge. `notification:new`
+  // pushes live via RealtimeBridge, so reading the store's count is enough.
 
   const navItems = NAV_ITEMS.filter(
     (item) => isManagement(admin) || hasAnyRole(admin, item.roles),

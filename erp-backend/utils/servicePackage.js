@@ -55,6 +55,14 @@ export const CRO_HANDLING_LABELS = {
   consort: "Consort arranges the CRO",
 };
 
+export const LC_MODES = ["not_applicable", "customer", "consort"];
+
+export const LC_HANDLING_LABELS = {
+  not_applicable: "No LC",
+  customer: "Customer provides the LC",
+  consort: "Consort manages the LC",
+};
+
 /**
  * The package→services preset. Ops may add services ON TOP of these, never below —
  * `resolveServices` unions rather than replaces.
@@ -92,6 +100,17 @@ export const defaultCroMode = (servicePackage) =>
   NO_CRO_PACKAGES.includes(servicePackage) ? "not_applicable" : "consort";
 
 /**
+ * Packages that can trade under a Letter of Credit (ADR-050): the export legs.
+ * Unlike the CRO, an LC is genuinely optional on both — open-account exports exist —
+ * so `not_applicable` stays selectable there and means "no LC on this trade".
+ */
+const LC_PACKAGES = ["loading_point_to_port", "international"];
+
+/** Which LC modes a package may hold — mirrors the *_lc_mode_valid CHECKs in prisma/sql/constraints.sql. */
+export const allowedLcModes = (servicePackage) =>
+  LC_PACKAGES.includes(servicePackage) ? ["not_applicable", "customer", "consort"] : ["not_applicable"];
+
+/**
  * Does this package touch a port (and therefore need a port code)?
  *
  * For #2 and #3 the origin port is where the cargo is GOING; for #4 it is where the
@@ -124,11 +143,18 @@ export const packageUsesImportTerms = (servicePackage) => servicePackage === "po
  * definition an LC-financed shipment (previously duplicated in query.controllers and
  * intake.service).
  */
-export const resolveServices = ({ servicePackage, services = [], customerSource } = {}) => [
+export const resolveServices = ({ servicePackage, services = [], customerSource, lcHandledBy } = {}) => [
   ...new Set([
     ...(PACKAGE_SERVICES[servicePackage] ?? []),
     ...(services ?? []),
-    ...(customerSource === "bank_lc" ? ["lc_finance"] : []),
+    // Consort managing the LC IS the lc_finance service (ADR-050): its steps
+    // (lc_generated, bol_submitted) stay service-gated exactly as before, so consort
+    // mode composes them by selling the service rather than via a new gate. A bank-LC
+    // referral implies the same — unless the customer explicitly runs their own LC,
+    // in which case we only collect the copy (lc_received_from_customer, lcModes-gated)
+    // and sell no LC legwork.
+    ...(customerSource === "bank_lc" && lcHandledBy !== "customer" ? ["lc_finance"] : []),
+    ...(lcHandledBy === "consort" ? ["lc_finance"] : []),
   ]),
 ];
 
@@ -159,4 +185,28 @@ export const inferPackageFromServices = (services = []) => {
 export const resolveCroMode = ({ servicePackage, croHandledBy } = {}) => {
   const allowed = allowedCroModes(servicePackage);
   return allowed.includes(croHandledBy) ? croHandledBy : defaultCroMode(servicePackage);
+};
+
+/**
+ * Normalise the LC mode (ADR-050), like `resolveCroMode` does for the CRO: coerce a
+ * mode the package cannot hold (the *_lc_mode_valid CHECKs) and apply two defaults
+ * that keep the column truthful on rows that never chose one:
+ *
+ *  - a bank-LC customer defaults to `consort` unless they explicitly run their own LC —
+ *    a bank referral is by definition an LC-financed trade (RULE-SVC-04);
+ *  - a row whose `services` already carry `lc_finance` reads as `consort` — before this
+ *    dimension existed, selling `lc_finance` was the only way to say "Consort runs the
+ *    LC", and the LC steps still compose off that service gate, so the label follows.
+ *
+ * Composition does NOT depend on this coercion: lc_generated/bol_submitted remain
+ * purely service-gated, so legacy selections reproduce byte-for-byte regardless.
+ */
+export const resolveLcMode = ({ servicePackage, lcHandledBy, services = [], customerSource } = {}) => {
+  const allowed = allowedLcModes(servicePackage);
+  let effective = allowed.includes(lcHandledBy) ? lcHandledBy : "not_applicable";
+  if (effective === "not_applicable" && allowed.includes("consort")) {
+    if (customerSource === "bank_lc") effective = "consort";
+    if ((services ?? []).includes("lc_finance")) effective = "consort";
+  }
+  return effective;
 };

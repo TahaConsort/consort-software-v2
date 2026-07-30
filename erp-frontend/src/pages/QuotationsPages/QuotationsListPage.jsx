@@ -29,7 +29,10 @@ const STATUS_STYLES = {
 const money = (n, ccy) => `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
 
 const QuotationsListPage = () => {
-  const { quotations, loading, error, statusFilter, setStatusFilter, fetchQuotations } = useQuotationStore();
+  const {
+    quotations, loading, error, filters, setFilter, fetchQuotations,
+    createQuotation, sendQuotation, approveQuotation, rejectQuotation, reviseQuotation,
+  } = useQuotationStore();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const navigate = useNavigate();
 
@@ -68,7 +71,7 @@ const QuotationsListPage = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={statusFilter || "all"} onValueChange={(v) => setStatusFilter(v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(QUOTATION_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
+          <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(QUOTATION_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
             <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
@@ -133,13 +136,13 @@ const QuotationsListPage = () => {
                 <td className="p-3 text-right whitespace-nowrap">
                   {q.status === "draft" && hasPermission("quotation.send") && (
                     <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1" disabled={busy}
-                      onClick={() => act(() => quotationService.sendQuotation(q.id), "Quotation sent")}>
+                      onClick={() => act(() => sendQuotation(q.id), "Quotation sent")}>
                       <Send className="w-3.5 h-3.5" /> Send
                     </Button>
                   )}
                   {q.status === "sent" && hasPermission("quotation.approve") && (
                     <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1 text-green-600 hover:bg-green-500/10" disabled={busy}
-                      onClick={() => act(() => quotationService.approveQuotation(q.id, q.rowVersion), "Approved", (r) => r?.data?.shipmentId && navigate(`/admin/shipments/${r.data.shipmentId}`))}>
+                      onClick={() => act(() => approveQuotation(q.id, q.rowVersion), "Approved", (r) => r?.data?.shipmentId && navigate(`/admin/shipments/${r.data.shipmentId}`))}>
                       <Check className="w-3.5 h-3.5" /> Approve
                     </Button>
                   )}
@@ -151,7 +154,7 @@ const QuotationsListPage = () => {
                   )}
                   {["rejected", "expired"].includes(q.status) && hasPermission("quotation.revise") && (
                     <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1" disabled={busy}
-                      onClick={() => act(() => quotationService.reviseQuotation(q.id), "Revision drafted")}>
+                      onClick={() => act(() => reviseQuotation(q.id), "Revision drafted")}>
                       <RotateCcw className="w-3.5 h-3.5" /> Revise
                     </Button>
                   )}
@@ -172,12 +175,12 @@ const QuotationsListPage = () => {
 
       {addOpen && (
         <CreateQuotationDialog busy={busy} onClose={() => setAddOpen(false)}
-          onSubmit={(payload) => act(() => quotationService.createQuotation(payload), "Quotation drafted")} />
+          onSubmit={(payload) => act(() => createQuotation(payload), "Quotation drafted")} />
       )}
       {detailFor && <QuotationDetailDialog quotation={detailFor} onClose={() => setDetailFor(null)} />}
       {rejectFor && (
         <RejectDialog busy={busy} quotation={rejectFor} onClose={() => setRejectFor(null)}
-          onSubmit={(reason) => act(() => quotationService.rejectQuotation(rejectFor.id, reason), "Quotation rejected")} />
+          onSubmit={(reason) => act(() => rejectQuotation(rejectFor.id, reason), "Quotation rejected")} />
       )}
     </div>
   );

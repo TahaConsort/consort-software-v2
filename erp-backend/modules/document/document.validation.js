@@ -4,9 +4,13 @@ import { z } from "zod";
 
 const OWNER_TYPES = ["shipment", "quotation", "query", "lead", "customer", "task", "chat_message"];
 
-// The closed document-type vocabulary. Gate-relevant types (RULE-SH-06) must be
-// deliberate choices, not free text — a typo'd or mislabelled docType would
-// either fail to satisfy a step gate or falsely satisfy one.
+// The document-type vocabulary lives in the `document_types` table since ADR-051
+// (admin-managed; uploads are checked against ACTIVE rows in the controller via
+// docTypes.cache.js). The list below is the FACTORY vocabulary: prisma/seed.js seeds
+// the table from it, and docTypeLabel() falls back to it for labels when a row
+// predates the table. Gate-relevant types (RULE-SH-06) must be deliberate choices,
+// not free text — a typo'd or mislabelled docType would either fail to satisfy a
+// step gate or falsely satisfy one; that guarantee now comes from the DB lookup.
 export const DOC_TYPES = [
   "gd",
   "bol",
@@ -76,10 +80,16 @@ export const docTypeLabel = (code) =>
 // Multipart body (parsed alongside the file). docType is the legal/document kind
 // that drives the RULE-SH-06 required-doc gate. otdStepId optionally groups the
 // file under a specific shipment step (proofs, step uploads).
+//
+// docType is format-checked here and EXISTENCE-checked in the controller against the
+// document_types table (ADR-051) — Zod is sync, the table lookup is not.
 export const uploadSchema = z.object({
   ownerType: z.enum(OWNER_TYPES),
   ownerId: z.string().min(1, "ownerId is required"),
-  docType: z.enum(DOC_TYPES).optional(),
+  docType: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]{1,49}$/, "Unknown document type")
+    .optional(),
   otdStepId: z.string().min(1).optional(),
 });
 

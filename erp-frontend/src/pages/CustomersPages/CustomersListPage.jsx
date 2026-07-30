@@ -17,7 +17,6 @@ import toast from "react-hot-toast";
 import { useCustomerStore } from "@/store/customerStore";
 import { useAuthStore } from "@/store/authStore";
 import { isManagement, hasAnyRole } from "@/lib/roles";
-import { createPortalUser } from "@/services/customerService";
 import { LeadSourceBadge } from "../LeadsPages/LeadComponents/leadBadges";
 
 const SkeletonRow = () => (
@@ -38,7 +37,11 @@ const CustomersListPage = () => {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
-  const [portalFor, setPortalFor] = useState(null); // customer | null
+  // An id, not the row object: the modal stays open after success to show the activation
+  // link, and a background refresh replaces the array underneath it. Resolving from the
+  // live list keeps what it renders current (the pattern FinanceListPage already uses).
+  const [portalForId, setPortalForId] = useState(null);
+  const portalFor = customers.find((c) => c.id === portalForId) ?? null;
 
   useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
 
@@ -137,7 +140,7 @@ const CustomersListPage = () => {
                         size="sm"
                         variant="ghost"
                         className="h-8 px-2.5 text-xs gap-1.5 hover:bg-primary/10 hover:text-primary"
-                        onClick={() => setPortalFor(c)}
+                        onClick={() => setPortalForId(c.id)}
                       >
                         <UserPlus className="w-3.5 h-3.5" /> Portal User
                       </Button>
@@ -163,13 +166,16 @@ const CustomersListPage = () => {
         </table>
       </div>
 
-      <PortalUserModal customer={portalFor} onClose={() => setPortalFor(null)} onSuccess={fetchCustomers} />
+      <PortalUserModal customer={portalFor} onClose={() => setPortalForId(null)} />
     </div>
   );
 };
 
 /* ── Provision portal user (WORKFLOW §1 "provision portal user") ── */
-const PortalUserModal = ({ customer, onClose, onSuccess }) => {
+const PortalUserModal = ({ customer, onClose }) => {
+  // Through the store: creating a portal user also creates a User row, so the employee
+  // list changes too, and the store publishes both topics.
+  const createPortalUser = useCustomerStore((s) => s.createPortalUser);
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [link, setLink] = useState(null);
@@ -187,7 +193,8 @@ const PortalUserModal = ({ customer, onClose, onSuccess }) => {
       } else {
         reset();
       }
-      onSuccess?.();
+      // No onSuccess callback needed: the store refetched the customer list and published
+      // `customers`/`employees` before this line ran.
     } catch (err) {
       toast.error(err?.message || "Failed to create portal user");
     } finally {

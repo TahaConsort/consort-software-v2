@@ -9,6 +9,18 @@ const sha256 = (v) => crypto.createHash("sha256").update(v).digest("hex");
 // Duplicate detection key (EDGE-LD-01): lower-cased, trimmed, single-spaced.
 export const normalizeName = (name) => name.trim().toLowerCase().replace(/\s+/g, " ");
 
+/**
+ * Announce a company/contact/customer change (ADR-020).
+ *
+ * Four screens share the customer list — Customers, and the target pickers on Queries,
+ * Visits and Outreach — and this module emitted nothing, so an edit here reached none of
+ * them until each remounted.
+ */
+const emitCustomerChanged = (tx, payload) =>
+  tx.outboxEvent.create({
+    data: { eventType: "customer.updated", payload, correlationId: crypto.randomUUID() },
+  });
+
 /* ─────────────────────────── Companies ─────────────────────────── */
 
 // GET /api/companies?q=
@@ -65,7 +77,11 @@ export const updateCompany = catchAsync(async (req, res, next) => {
   const data = { ...req.body };
   if (data.name) data.normalizedName = normalizeName(data.name);
 
-  const company = await prisma.company.update({ where: { id: existing.id }, data });
+  const company = await prisma.$transaction(async (tx) => {
+    const row = await tx.company.update({ where: { id: existing.id }, data });
+    await emitCustomerChanged(tx, { what: "company", companyId: row.id });
+    return row;
+  });
   res.json({ success: true, message: "Company updated", data: company });
 });
 
@@ -95,6 +111,7 @@ export const addContact = catchAsync(async (req, res, next) => {
   if (!company) return next(new AppError("Company not found", 404));
 
   const contact = await writeContact(company.id, null, req.body);
+  await emitCustomerChanged(prisma, { what: "contact", companyId: company.id, contactId: contact.id });
   res.status(201).json({ success: true, message: "Contact added", data: contact });
 });
 
@@ -104,6 +121,7 @@ export const updateContact = catchAsync(async (req, res, next) => {
   if (!existing) return next(new AppError("Contact not found", 404));
 
   const contact = await writeContact(existing.companyId, existing.id, req.body);
+  await emitCustomerChanged(prisma, { what: "contact", companyId: existing.companyId, contactId: contact.id });
   res.json({ success: true, message: "Contact updated", data: contact });
 });
 
@@ -209,7 +227,11 @@ export const updateCustomer = catchAsync(async (req, res, next) => {
     }
   }
 
-  const customer = await prisma.customer.update({ where: { id: existing.id }, data: req.body });
+  const customer = await prisma.$transaction(async (tx) => {
+    const row = await tx.customer.update({ where: { id: existing.id }, data: req.body });
+    await emitCustomerChanged(tx, { what: "customer", customerId: row.id });
+    return row;
+  });
   res.json({ success: true, message: "Customer updated", data: customer });
 });
 
@@ -238,6 +260,14 @@ export const createPortalUser = catchAsync(async (req, res, next) => {
         tokenHash: sha256(rawToken),
         purpose: "activation",
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+      },
+    });
+    // A portal user is a User row, so the user admin list changes as well.
+    await tx.outboxEvent.create({
+      data: {
+        eventType: "user.created",
+        payload: { userId: u.id, customerId: customer.id, role: "customer" },
+        correlationId: crypto.randomUUID(),
       },
     });
     return u;

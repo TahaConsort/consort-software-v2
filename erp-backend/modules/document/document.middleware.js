@@ -149,20 +149,10 @@ const customerInSalesScope = async (user, customerId) => {
   return !!cust;
 };
 
-/**
- * Doc types a portal customer may send IN. Everything else — and publishing or
- * deleting anything at all — stays internal (INV-10/§2.2).
- *
- * `cro` is the reason this list exists: a customer on the loading-point-to-port package
- * who supplies their own CRO has to be able to hand it over. The rest are their own
- * trade documents, which they are the natural source of.
- */
-export const CUSTOMER_UPLOADABLE_DOC_TYPES = [
-  "cro",
-  "commercial_invoice",
-  "packing_list",
-  "authority_letterhead",
-];
+// Which doc types a portal customer may send IN moved to the `customer_uploadable`
+// flag on document_types (ADR-051) — admin-managed, checked in the upload controller
+// via docTypes.cache.js. Everything else — and publishing or deleting anything at
+// all — stays internal (INV-10/§2.2).
 
 /**
  * Can this user act on documents of this owner? `forWrite` = upload/publish/delete.

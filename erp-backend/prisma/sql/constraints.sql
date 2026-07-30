@@ -57,6 +57,33 @@ ALTER TABLE shipments ADD CONSTRAINT shipments_cro_mode_valid CHECK (
   OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
 );
 
+-- Package ↔ LC-mode consistency (ADR-050). Only the export packages can trade under a
+-- Letter of Credit; unlike the CRO, both may also run WITHOUT one (not_applicable =
+-- "no-LC trade"), so the export side is unconstrained. A NULL service_package is a
+-- pre-package row and is exempt. Mirrors allowedLcModes() in utils/servicePackage.js;
+-- keep the two in step. ADD/EXCEPTION idiom: this definition has never changed.
+DO $$ BEGIN
+  ALTER TABLE queries ADD CONSTRAINT queries_lc_mode_valid CHECK (
+    service_package IS NULL
+    OR service_package NOT IN ('local_transport', 'port_to_consignee')
+    OR lc_handled_by = 'not_applicable'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE quotations ADD CONSTRAINT quotations_lc_mode_valid CHECK (
+    service_package IS NULL
+    OR service_package NOT IN ('local_transport', 'port_to_consignee')
+    OR lc_handled_by = 'not_applicable'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE shipments ADD CONSTRAINT shipments_lc_mode_valid CHECK (
+    service_package IS NULL
+    OR service_package NOT IN ('local_transport', 'port_to_consignee')
+    OR lc_handled_by = 'not_applicable'
+  );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- Outreach / Visit Plans target exactly one of lead, customer
 DO $$ BEGIN
   ALTER TABLE outreach ADD CONSTRAINT outreach_one_target
@@ -79,4 +106,13 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE invoice_lines ADD CONSTRAINT invoice_lines_amount_nonneg CHECK (amount >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ADR-051 — step codes are admin-minted strings since the OtdStepCode enum was dropped
+-- (prisma/sql/2026-07-step-code-to-text.sql). Guard the format at the source table; every
+-- other step_code column references or copies this one. Mirrors STEP_CODE_RE in
+-- modules/workflow/workflow.validation.js; keep the two in step.
+DO $$ BEGIN
+  ALTER TABLE otd_step_templates ADD CONSTRAINT otd_step_templates_code_format
+    CHECK (step_code ~ '^[a-z][a-z0-9_]{1,49}$');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

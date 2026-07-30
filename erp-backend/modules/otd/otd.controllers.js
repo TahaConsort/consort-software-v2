@@ -109,6 +109,11 @@ export const setStepAction = catchAsync(async (req, res, next) => {
       resourceId: shipment.id,
       diff: { stepCode: step.stepCode, actionCode: row.actionCode, title: row.title },
     });
+    // The tick changes the step's blocking count, which is exactly what the Complete
+    // button reads — so anyone else with this shipment open needs to see it.
+    await emitShipmentEvent(tx, "shipment.step.updated", {
+      shipmentId: shipment.id, stepCode: step.stepCode, actionCode: row.actionCode,
+    });
     return row;
   });
 
@@ -134,7 +139,15 @@ export const updateStepDetails = catchAsync(async (req, res, next) => {
   const data = {};
   if (req.body.notes !== undefined) data.notes = req.body.notes;
   if (req.body.formData !== undefined) data.formData = req.body.formData;
-  const updated = await prisma.otdStep.update({ where: { id: step.id }, data });
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.otdStep.update({ where: { id: step.id }, data });
+    // Handover notes are written for whoever picks the step up next, so their screen has
+    // to show them without being reloaded.
+    await emitShipmentEvent(tx, "shipment.step.updated", {
+      shipmentId: shipment.id, stepCode: step.stepCode,
+    });
+    return row;
+  });
   res.json({ success: true, message: "Step details saved", data: updated });
 });
 
@@ -147,12 +160,26 @@ export const completeStep = catchAsync(async (req, res, next) => {
   if (!shipment) return;
 
   // RULE-SH-07 — optimistic concurrency is MANDATORY on direct step completion.
+  //
+  // Both refusals now carry the CURRENT rowVersion. Without it the client had no way to
+  // recover except asking the user to reload, which is the behaviour being removed: the
+  // task-completion path bumps this same rowVersion with no If-Match of its own
+  // (task.controllers.js), so a colleague finishing a task could hand an innocent user a
+  // 412 on their very first click.
   const ifMatch = req.body.rowVersion ?? req.headers["if-match"];
   if (ifMatch === undefined) {
-    return next(new AppError("Your page needs a refresh before completing this step — reload and try again", 428));
+    return next(new AppError(
+      "Your page needs a refresh before completing this step — reload and try again",
+      428,
+      { rowVersion: shipment.rowVersion },
+    ));
   }
   if (Number(ifMatch) !== shipment.rowVersion) {
-    return next(new AppError("Someone else updated this shipment while you had it open — refresh and try again", 412));
+    return next(new AppError(
+      "Someone else updated this shipment while you had it open — refresh and try again",
+      412,
+      { rowVersion: shipment.rowVersion },
+    ));
   }
 
   const step = await prisma.otdStep.findFirst({
@@ -172,11 +199,16 @@ export const completeStep = catchAsync(async (req, res, next) => {
     }),
   );
 
-  const tpl = await prisma.otdStepTemplate.findUnique({ where: { stepCode: step.stepCode } });
+  const [tpl, fresh] = await Promise.all([
+    prisma.otdStepTemplate.findUnique({ where: { stepCode: step.stepCode } }),
+    // completeStepTx bumped rowVersion; hand it back so a second completion on the same
+    // page does not have to wait for a refetch to avoid a 412.
+    prisma.shipment.findUnique({ where: { id: shipment.id }, select: { rowVersion: true } }),
+  ]);
   res.json({
     success: true,
     message: `"${tpl?.title ?? step.stepCode}" completed`,
-    data: { status: newStatus },
+    data: { status: newStatus, rowVersion: fresh?.rowVersion ?? null },
   });
 });
 

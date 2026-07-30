@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   ArrowLeft, CheckCircle2, Circle, RotateCcw, Pause, Play, Ban, Lock, Loader2,
@@ -14,21 +14,22 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/authStore";
-import * as shipmentService from "@/services/shipmentService";
-import * as otdService from "@/services/otdService";
-import * as otcService from "@/services/otcService";
-import * as financeService from "@/services/financeService";
+import { useShipmentDetailStore } from "@/store/shipmentDetailStore";
+import { useDocumentStore } from "@/store/documentStore";
+import { useWorkflowStore } from "@/store/workflowStore";
 import * as documentService from "@/services/documentService";
 import * as vendorService from "@/services/vendorService";
-import { DOC_TYPE_LABELS, DOC_TYPE_OPTIONS } from "@/services/documentService";
+import { DOC_TYPE_OPTIONS } from "@/services/documentService";
 import { INVOICE_KIND_LABELS } from "@/services/financeService";
 import {
   SHIPMENT_STATUS_LABELS, OTC_MILESTONE_LABELS, INVOICE_STATUS_LABELS, labelForService,
-  CRO_HANDLING_SHORT, labelForPackage, paymentStateOf, PAYMENT_STATE_CLASS, DEFAULT_CURRENCY,
-  routeOf,
+  CRO_HANDLING_SHORT, LC_HANDLING_SHORT, labelForPackage, paymentStateOf, PAYMENT_STATE_CLASS,
+  DEFAULT_CURRENCY, routeOf,
 } from "@/lib/catalog";
-import { onSocket, joinRoom } from "@/lib/socket";
+import { joinRoom } from "@/lib/socket";
 import DocumentsPanel from "@/components/DocumentsPanel";
+
+const EMPTY = [];
 
 const prettyStep = (code) => code.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const money = (n, ccy) => `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
@@ -59,6 +60,7 @@ const STEP_HINTS = {
   vessel_booked: "Apply to the shipping line for a vessel slot.",
   cro_released: "Apply to the shipping line and obtain the Container Release Order.",
   cro_received_from_customer: "The customer is supplying the CRO — chase them for the copy and attach it.",
+  lc_received_from_customer: "The customer runs their own LC — chase them for the copy and attach it for compliance review.",
   // Package: Local Transport — inland trucking, no container and no port.
   transporter_assigned: "Book a transporter for the run and agree the rate.",
   vehicle_dispatched: "Send the vehicle to the customer's pickup point.",
@@ -93,83 +95,86 @@ const ShipmentDetailPage = () => {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const user = useAuthStore((s) => s.user);
 
-  const [shipment, setShipment] = useState(null);
-  const [checklist, setChecklist] = useState([]);
-  const [documents, setDocuments] = useState([]);
-  const [pnl, setPnl] = useState(null);
   const [vendors, setVendors] = useState([]);
   const [expandedId, setExpandedId] = useState(null); // which step's panel is open
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [busy, setBusy] = useState(false);
   const [dialog, setDialog] = useState(null); // { kind, payload }
 
   // Job P&L is management/finance reporting, not day-to-day step work.
   const canViewPnl = hasPermission("report.read");
 
-  const load = useCallback(async () => {
-    try {
-      const [res, docsRes, docListRes, pnlRes] = await Promise.all([
-        shipmentService.getShipment(id),
-        // Checklist + document list are advisory UX — a failure must not sink the page.
-        documentService.requiredDocs(id).catch(() => null),
-        documentService.listDocuments("shipment", id).catch(() => null),
-        canViewPnl ? shipmentService.getShipmentPnl(id).catch(() => null) : Promise.resolve(null),
-      ]);
-      setShipment(res.data);
-      // The endpoint answers { shipmentId, checklist } — take the array, or the
-      // stepper blows up trying to map an object.
-      setChecklist(docsRes?.data?.checklist ?? []);
-      setDocuments(docListRes?.data ?? []);
-      setPnl(pnlRes?.data ?? null);
-      setError(null);
-    } catch (err) {
-      setError(err?.message || "Failed to load shipment");
-    } finally {
-      setLoading(false);
-    }
-  }, [id, canViewPnl]);
+  // The shipment aggregate and every write against it (steps, milestones, exception
+  // lifecycle, invoices) live in the store, so each write can declare the topics it
+  // dirties and the rest of the app stops needing a reload. See shipmentDetailStore.
+  const detail = useShipmentDetailStore();
+  const { shipment, pnl, refreshing, error } = detail;
 
-  // Vendors for the payable-invoice dialog. Loaded once, best-effort.
+  // Documents are read from the store the panel below also uses. They used to be a
+  // second copy in this component's state, which is why attaching a required document
+  // in that panel left the Complete button disabled until the page was reloaded.
+  const docStore = useDocumentStore();
+  const docsAreMine = docStore.ownerType === "shipment" && docStore.ownerId === id;
+  const documents = docsAreMine ? docStore.documents : EMPTY;
+  const checklist = docsAreMine ? docStore.checklist : EMPTY;
+
+  // One page-wide "a write is in flight" flag. Uploads run through documentStore, so
+  // without folding it in, the step upload dialog's button would stay live mid-upload.
+  const busy = detail.busy || docStore.busy;
+
+  // Admin-managed docType vocabulary (ADR-051). Called with NO selector on purpose:
+  // labelForDocType is a store method whose identity never changes, so a component
+  // that selected only it would never re-render when the vocabulary hydrates and
+  // every label here would stay a raw code. The bare whole-store subscription is what
+  // makes these labels live.
+  const { labelForDocType, fetchDocTypes } = useWorkflowStore();
+
+  useEffect(() => { fetchDocTypes(); }, [fetchDocTypes]);
+
+  // Vendors for the payable-invoice dialog. Best-effort.
   useEffect(() => {
     if (!hasPermission("invoice.create")) return;
     vendorService.listVendors({ isActive: true }).then((r) => setVendors(r.data || [])).catch(() => {});
   }, [hasPermission]);
 
-  useEffect(() => { load(); }, [load]);
-
-  // Live: join the shipment room, refetch on any updated/stepCompleted hint (EDGE-T-05).
   useEffect(() => {
-    const leave = joinRoom("shipment", id);
-    const offs = [
-      onSocket("shipment:updated", (p) => { if (p?.shipmentId === id) load(); }),
-      onSocket("shipment:stepCompleted", (p) => { if (p?.shipmentId === id) load(); }),
-    ];
-    return () => { offs.forEach((off) => off()); leave(); };
-  }, [id, load]);
+    detail.fetch(id, { canViewPnl });
+    // The page kicks off the document read rather than leaving it to <DocumentsPanel>,
+    // which renders below the `if (!shipment) return null` guard: if the panel owned
+    // the first fetch, the stepper would paint one pass with an empty checklist —
+    // every required badge amber and Complete disabled — before correcting itself.
+    useDocumentStore.getState().fetch("shipment", id, { withRequired: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- store actions are stable
+  }, [id, canViewPnl]);
 
+  // Live tracking (EDGE-T-05). Joining the room is all this page needs to do: the
+  // relay's `data:changed` fan-out carries the `shipment:{id}` topic, and
+  // RealtimeBridge maps it onto both stores above. Nothing here has to know which
+  // event names exist, and one completion no longer triggers three full reloads.
+  useEffect(() => joinRoom("shipment", id), [id]);
+
+  /**
+   * Run a store mutation, toast, close the dialog. The store owns the refetch and the
+   * cross-screen invalidation, so this is only presentation.
+   */
   const act = async (fn, msg) => {
-    setBusy(true);
     try {
       const res = await fn();
       toast.success(msg || res?.message);
       setDialog(null);
-      await load();
     } catch (err) {
       toast.error(err?.message || "Action failed");
-    } finally {
-      setBusy(false);
     }
   };
 
-  if (loading) return <div className="flex items-center justify-center py-20 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>;
-  if (error) return (
+  // Spin until the first read lands. `loading` is false for the frame between mount
+  // and the fetch effect, and false again for every BACKGROUND refresh — which is the
+  // point: an auto-refresh must never replace the screen with a spinner.
+  if (!shipment && !error) return <div className="flex items-center justify-center py-20 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>;
+  if (error && !shipment) return (
     <div className="space-y-4">
       <Button variant="ghost" size="sm" className="gap-2" onClick={() => navigate("/admin/shipments")}><ArrowLeft className="w-4 h-4" /> Back</Button>
       <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive"><AlertCircle className="w-5 h-5" /><p className="text-sm font-medium">{error}</p></div>
     </div>
   );
-  if (!shipment) return null;
 
   const held = shipment.exceptionState === "on_hold";
   const cancelled = shipment.exceptionState === "cancelled";
@@ -203,6 +208,9 @@ const ShipmentDetailPage = () => {
           <div className="flex items-center gap-3">
             <h1 className="text-2xl font-semibold text-primary">{shipment.referenceNo}</h1>
             <Badge variant="outline" className="text-xs">{SHIPMENT_STATUS_LABELS[shipment.status]}</Badge>
+            {/* Auto-refresh in progress — a hint, never a barrier: the screen stays
+                usable and keeps the data it already has. */}
+            {refreshing && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" title="Refreshing" />}
             {held && <Badge variant="outline" className="text-xs gap-1 bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300"><Pause className="w-3 h-3" /> On Hold</Badge>}
             {cancelled && <Badge variant="outline" className="text-xs gap-1 bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300"><Ban className="w-3 h-3" /> Cancelled</Badge>}
           </div>
@@ -214,6 +222,9 @@ const ShipmentDetailPage = () => {
             )}
             {shipment.croHandledBy && shipment.croHandledBy !== "not_applicable" && (
               <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[shipment.croHandledBy]}</Badge>
+            )}
+            {shipment.lcHandledBy && shipment.lcHandledBy !== "not_applicable" && (
+              <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[shipment.lcHandledBy]}</Badge>
             )}
             {(shipment.services ?? []).map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
           </div>
@@ -263,7 +274,7 @@ const ShipmentDetailPage = () => {
             <Button variant="outline" size="sm" className="gap-2 text-destructive" onClick={() => setDialog({ kind: "cancel" })}><Ban className="w-4 h-4" /> Cancel</Button>
           )}
           {shipment.status === "settled" && hasPermission("shipment.close") && (
-            <Button size="sm" className="gap-2" onClick={() => act(() => shipmentService.closeShipment(id), "Shipment closed")} disabled={busy}><Lock className="w-4 h-4" /> Close</Button>
+            <Button size="sm" className="gap-2" onClick={() => act(() => detail.close(), "Shipment closed")} disabled={busy}><Lock className="w-4 h-4" /> Close</Button>
           )}
         </div>
       </div>
@@ -312,7 +323,7 @@ const ShipmentDetailPage = () => {
                   {done ? <CheckCircle2 className="w-5 h-5 text-green-500 shrink-0 mt-0.5" /> : <Circle className={`w-5 h-5 shrink-0 mt-0.5 ${isNext ? "text-primary" : "text-muted-foreground/40"}`} />}
                   <div className="flex-1 min-w-0">
                     <p className={`text-sm font-medium ${done ? "text-muted-foreground line-through" : ""}`}>
-                      {step.displayNo}. {prettyStep(step.stepCode)}
+                      {step.displayNo}. {step.title ?? prettyStep(step.stepCode)}
                     </p>
                     <p className="text-[11px] text-muted-foreground uppercase tracking-wide">
                       {step.ownerDepartment}{step.forced ? " · forced" : ""}
@@ -333,7 +344,7 @@ const ShipmentDetailPage = () => {
                             <span key={docType} className={`text-[10px] px-1.5 py-0.5 rounded-full border ${missing
                               ? "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300"
                               : "bg-green-50 text-green-700 border-green-300 dark:bg-green-950/30 dark:text-green-300"}`}>
-                              {DOC_TYPE_LABELS[docType] ?? docType}
+                              {labelForDocType(docType)}
                             </span>
                           );
                         })}
@@ -344,7 +355,7 @@ const ShipmentDetailPage = () => {
                     )}
                     {!done && missingDocs && (ownedByMe || isNext) && (
                       <p className="text-[11px] text-amber-600 dark:text-amber-400 mt-1">
-                        Attach: {docEntry.missing.map((d) => DOC_TYPE_LABELS[d] ?? d).join(", ")}
+                        Attach: {docEntry.missing.map((d) => labelForDocType(d)).join(", ")}
                       </p>
                     )}
                     {!done && openActions > 0 && (ownedByMe || isNext) && (
@@ -356,7 +367,7 @@ const ShipmentDetailPage = () => {
                   {!done && !held && !locked && hasPermission("shipment.step.complete") && (
                     isNext ? (
                       <Button size="sm" className="h-8 text-xs shrink-0" disabled={busy || blocked}
-                        onClick={() => act(() => otdService.completeStep(id, step.displayNo, { rowVersion: shipment.rowVersion }), "Step completed")}>
+                        onClick={() => act(() => detail.completeStep(step.displayNo), "Step completed")}>
                         Complete
                       </Button>
                     ) : canForce ? (
@@ -393,11 +404,12 @@ const ShipmentDetailPage = () => {
                       canUpload={hasPermission("document.upload") && !locked}
                       canTickActions={hasPermission("shipment.step.complete") && ownedByMe && !locked && !held && !done}
                       busy={busy}
+                      labelForDocType={labelForDocType}
                       onToggleAction={(a, next) => act(
-                        () => otdService.setStepAction(id, step.displayNo, a.actionCode, next),
+                        () => detail.setStepAction(step.displayNo, a.actionCode, next),
                         next ? `"${a.title}" marked done` : `"${a.title}" reopened`,
                       )}
-                      onSaveNotes={(notes) => act(() => otdService.updateStepDetails(id, step.displayNo, { notes }), "Step details saved")}
+                      onSaveNotes={(notes) => act(() => detail.updateStepDetails(step.displayNo, { notes }), "Step details saved")}
                       onUpload={(docType) => setDialog({ kind: "stepUpload", stepId: step.id, docType })}
                       onCreateInvoice={() => setDialog({ kind: "createInvoice", stepId: step.id, stepCode: step.stepCode })}
                       onDownload={(d) => documentService.downloadDocument(d.id, d.fileName)}
@@ -439,7 +451,7 @@ const ShipmentDetailPage = () => {
                       <div className="space-y-2">
                         {list.map((inv) => (
                           <InvoiceRow key={inv.id} inv={inv} locked={locked} busy={busy} hasPermission={hasPermission}
-                            onIssue={() => act(() => financeService.issueInvoice(inv.id), "Invoice issued")}
+                            onIssue={() => act(() => detail.issueInvoice(inv.id), "Invoice issued")}
                             onPay={() => setDialog({ kind: "payment", invoiceId: inv.id })}
                             onVoid={() => setDialog({ kind: "void", invoiceId: inv.id })} />
                         ))}
@@ -464,7 +476,7 @@ const ShipmentDetailPage = () => {
                     <span className={`flex-1 ${done ? "text-muted-foreground" : ""}`}>{m.milestoneNo}. {OTC_MILESTONE_LABELS[m.type]}</span>
                     {canComplete && (
                       <Button size="sm" variant="outline" className="h-7 text-[11px]" disabled={busy}
-                        onClick={() => act(() => otcService.completeMilestone(id, m.milestoneNo), "Milestone completed")}>Mark done</Button>
+                        onClick={() => act(() => detail.completeMilestone(m.milestoneNo), "Milestone completed")}>Mark done</Button>
                     )}
                   </li>
                 );
@@ -492,53 +504,57 @@ const ShipmentDetailPage = () => {
         </div>
       </div>
 
-      {/* Documents — legal docs gate OTD step completion (RULE-SH-06) */}
+      {/* Documents — legal docs gate OTD step completion (RULE-SH-06). This panel and
+          the stepper above now read the SAME store, so attaching a required document
+          here re-derives the step gating immediately.
+          Deliberately no `onChanged`: documentStore publishes the `shipment:{id}` topic,
+          which this page already owns — passing one too would refetch twice. */}
       <DocumentsPanel ownerType="shipment" ownerId={id} showRequired locked={locked} />
 
       {/* Dialogs */}
       {dialog?.kind === "hold" && (
         <HoldDialog busy={busy} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(() => shipmentService.holdShipment(id, payload), "Shipment held")} />
+          onSubmit={(payload) => act(() => detail.hold(payload), "Shipment held")} />
       )}
       {dialog?.kind === "resume" && (
         <ReasonDialog busy={busy} title="Resume shipment" label="Resolution notes" confirmText="Resume" onClose={() => setDialog(null)}
-          onSubmit={(notes) => act(() => shipmentService.resumeShipment(id, notes), "Shipment resumed")} />
+          onSubmit={(notes) => act(() => detail.resume(notes), "Shipment resumed")} />
       )}
       {dialog?.kind === "cancel" && (
         <ReasonDialog busy={busy} title="Cancel shipment" label="Cancellation reason" confirmText="Cancel Shipment" destructive onClose={() => setDialog(null)}
-          onSubmit={(reason) => act(() => shipmentService.cancelShipment(id, reason), "Shipment cancelled")} />
+          onSubmit={(reason) => act(() => detail.cancel(reason), "Shipment cancelled")} />
       )}
       {dialog?.kind === "force" && (
         <ForceCompleteDialog busy={busy} stepLabel={`${dialog.displayNo}. ${prettyStep(dialog.stepCode)}`} onClose={() => setDialog(null)}
-          onSubmit={(forceReason) => act(() => otdService.completeStep(id, dialog.displayNo, { rowVersion: shipment.rowVersion, forceReason }), "Step completed")} />
+          onSubmit={(forceReason) => act(() => detail.completeStep(dialog.displayNo, { forceReason }), "Step completed")} />
       )}
       {dialog?.kind === "schedule" && (
         <ScheduleDialog busy={busy} etd={shipment.etd} eta={shipment.eta} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(() => shipmentService.setSchedule(id, payload), "Schedule updated")} />
+          onSubmit={(payload) => act(() => detail.setSchedule(payload), "Schedule updated")} />
       )}
       {dialog?.kind === "reopen" && (
         <ReasonDialog busy={busy} title={`Reopen step ${dialog.displayNo}`} label="Reopen reason" confirmText="Reopen" onClose={() => setDialog(null)}
-          onSubmit={(reason) => act(() => otdService.reopenStep(id, dialog.displayNo, reason), "Step reopened")} />
+          onSubmit={(reason) => act(() => detail.reopenStep(dialog.displayNo, reason), "Step reopened")} />
       )}
       {dialog?.kind === "void" && (
         <ReasonDialog busy={busy} title="Void invoice" label="Void reason" confirmText="Void" destructive onClose={() => setDialog(null)}
-          onSubmit={(reason) => act(() => financeService.voidInvoice(dialog.invoiceId, reason), "Invoice voided")} />
+          onSubmit={(reason) => act(() => detail.voidInvoice(dialog.invoiceId, reason), "Invoice voided")} />
       )}
       {dialog?.kind === "payment" && (
         <PaymentDialog busy={busy} onClose={() => setDialog(null)}
-          onSubmit={(payload) => act(() => financeService.recordPayment(dialog.invoiceId, payload), "Payment recorded")} />
+          onSubmit={(payload) => act(() => detail.recordPayment(dialog.invoiceId, payload), "Payment recorded")} />
       )}
       {dialog?.kind === "stepUpload" && (
         <StepUploadDialog busy={busy} presetDocType={dialog.docType} onClose={() => setDialog(null)}
           onSubmit={({ file, docType }) => act(
-            () => documentService.uploadDocument({ file, ownerType: "shipment", ownerId: id, docType, otdStepId: dialog.stepId }),
+            () => useDocumentStore.getState().upload({ file, docType, otdStepId: dialog.stepId, ownerType: "shipment", ownerId: id }),
             "File uploaded",
           )} />
       )}
       {dialog?.kind === "createInvoice" && (
         <CreateInvoiceDialog busy={busy} defaultCurrency={(shipment.invoices?.[0]?.currency) || DEFAULT_CURRENCY} vendors={vendors} onClose={() => setDialog(null)}
           onSubmit={(payload) => act(
-            () => financeService.createInvoice({ ...payload, shipmentId: id, otdStepId: dialog.stepId }),
+            () => detail.createInvoice({ ...payload, otdStepId: dialog.stepId }),
             "Invoice drafted",
           )} />
       )}
@@ -851,8 +867,19 @@ const InvoiceRow = ({ inv, locked, busy, hasPermission, onIssue, onPay, onVoid }
 };
 
 /* ── The per-step expandable panel: details/form, required docs, proofs, billing. ── */
-const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, canEditNotes, canUpload, canTickActions, busy, onSaveNotes, onToggleAction, onUpload, onCreateInvoice, onDownload }) => {
-  const [notes, setNotes] = useState(step.notes ?? "");
+const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, canEditNotes, canUpload, canTickActions, busy, labelForDocType, onSaveNotes, onToggleAction, onUpload, onCreateInvoice, onDownload }) => {
+  // This panel is reconciled by position and never remounts, so a `useState`
+  // initializer alone would strand the textarea on the value it had when the step was
+  // first expanded — and every background refresh would then look like lost work.
+  // React's adjust-state-on-prop-change pattern: adopt the server's text when the
+  // field is untouched, keep the user's when it isn't.
+  const serverNotes = step.notes ?? "";
+  const [notes, setNotes] = useState(serverNotes);
+  const [baseline, setBaseline] = useState(serverNotes);
+  if (baseline !== serverNotes) {
+    setBaseline(serverNotes);
+    if (notes === baseline) setNotes(serverNotes);
+  }
   const route = routeOf(shipment);
   const proofs = stepDocs.filter((d) => d.docType === "proof");
   const actions = step.actions ?? [];
@@ -867,7 +894,9 @@ const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, 
       {/* 1. Form / details */}
       <section className="space-y-2">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> Details</h4>
-        <p className="text-muted-foreground">{STEP_HINTS[step.stepCode] ?? prettyStep(step.stepCode)}</p>
+        {/* Server hint first (otd_step_templates.hint, ADR-051 — covers admin-created
+            steps); the static map only backstops rows composed before hints existed. */}
+        <p className="text-muted-foreground">{step.hint ?? STEP_HINTS[step.stepCode] ?? prettyStep(step.stepCode)}</p>
         <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
           {route && <span>Route: <b className="text-foreground">{route}</b></span>}
           {shipment.incoterm && <span>Incoterm: <b className="text-foreground">{shipment.incoterm}</b></span>}
@@ -944,7 +973,7 @@ const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, 
             {required.map((dt) => (
               <li key={dt} className="flex items-center justify-between gap-2">
                 <span className={missing.has(dt) ? "text-amber-600 dark:text-amber-400" : "text-green-600 dark:text-green-400"}>
-                  {missing.has(dt) ? "○" : "✓"} {DOC_TYPE_LABELS[dt] ?? dt}
+                  {missing.has(dt) ? "○" : "✓"} {labelForDocType(dt)}
                 </span>
                 {missing.has(dt) && canUpload && (
                   <Button size="sm" variant="outline" className="h-7 text-[11px] gap-1" disabled={busy} onClick={() => onUpload(dt)}><Upload className="w-3 h-3" /> Upload</Button>
@@ -1019,6 +1048,16 @@ const StepPanel = ({ step, shipment, docEntry, stepDocs, stepInvoices, canBill, 
 const StepUploadDialog = ({ busy, presetDocType, onClose, onSubmit }) => {
   const [file, setFile] = useState(null);
   const [docType, setDocType] = useState(presetDocType || "proof");
+  // The admin-managed vocabulary (ADR-051), not the static list. `docTypes` must be
+  // subscribed to so the picker re-renders once it hydrates.
+  const { docTypes, labelForDocType, docTypeOptions } = useWorkflowStore();
+  const base = docTypes.length ? docTypeOptions(false) : DOC_TYPE_OPTIONS;
+  // A preset that isn't in the vocabulary (an admin-created code, or anything before
+  // hydration) would leave the Select with a value and no matching item — rendering
+  // EMPTY, so the user cannot see what they are about to upload.
+  const options = base.some((o) => o.value === docType)
+    ? base
+    : [...base, { value: docType, label: labelForDocType(docType) }];
   return (
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
       <DialogContent className="sm:max-w-md">
@@ -1028,10 +1067,10 @@ const StepUploadDialog = ({ busy, presetDocType, onClose, onSubmit }) => {
           <div className="space-y-1.5"><Label htmlFor="su-file">File</Label>
             <Input id="su-file" type="file" onChange={(e) => setFile(e.target.files?.[0] ?? null)} autoFocus /></div>
           <div className="space-y-1.5"><Label>Type</Label>
-            <Select value={docType} onValueChange={setDocType} items={DOC_TYPE_OPTIONS}>
+            <Select value={docType} onValueChange={setDocType} items={options}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                {DOC_TYPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                {options.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </div>

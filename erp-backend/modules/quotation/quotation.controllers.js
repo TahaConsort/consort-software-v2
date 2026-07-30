@@ -123,7 +123,7 @@ export const createQuotation = catchAsync(async (req, res, next) => {
   try {
     const quotation = await prisma.$transaction(async (tx) => {
       const referenceNo = await allocateRef(tx, "quotation");
-      return tx.quotation.create({
+      const q = await tx.quotation.create({
         data: {
           referenceNo,
           queryId: query.id,
@@ -132,6 +132,7 @@ export const createQuotation = catchAsync(async (req, res, next) => {
           services: query.services,
           servicePackage: query.servicePackage,
           croHandledBy: query.croHandledBy,
+          lcHandledBy: query.lcHandledBy,
           currency: req.body.currency ?? DEFAULT_CURRENCY,
           fxRate: req.body.fxRate ?? undefined,
           validityDate: req.body.validityDate ?? undefined,
@@ -141,6 +142,10 @@ export const createQuotation = catchAsync(async (req, res, next) => {
         },
         include: { chargeLines: { orderBy: { sortOrder: "asc" } } },
       });
+      await emitEvent(tx, "quotation.created", {
+        quotationId: q.id, referenceNo: q.referenceNo, queryId: q.queryId,
+      });
+      return q;
     });
     const [hydrated] = await hydrate([quotation]);
     res.status(201).json({ success: true, message: "Quotation drafted", data: hydrated });
@@ -175,11 +180,15 @@ export const updateQuotation = catchAsync(async (req, res, next) => {
       });
       data.totalAmount = totalOf(lines);
     }
-    return tx.quotation.update({
+    const u = await tx.quotation.update({
       where: { id: quotation.id },
       data: { ...data, rowVersion: { increment: 1 } },
       include: { chargeLines: { orderBy: { sortOrder: "asc" } } },
     });
+    await emitEvent(tx, "quotation.updated", {
+      quotationId: u.id, referenceNo: u.referenceNo, queryId: u.queryId,
+    });
+    return u;
   });
 
   const [hydrated] = await hydrate([updated]);
@@ -230,10 +239,18 @@ export const approveQuotation = catchAsync(async (req, res, next) => {
   // tabs (RULE-QT-08, EDGE-QT-01).
   const ifMatch = req.body.rowVersion ?? req.headers["if-match"];
   if (ifMatch === undefined) {
-    return next(new AppError("rowVersion (If-Match) is required to approve (RULE-QT-08)", 428));
+    return next(new AppError(
+      "rowVersion (If-Match) is required to approve (RULE-QT-08)",
+      428,
+      { rowVersion: quotation.rowVersion },
+    ));
   }
   if (Number(ifMatch) !== quotation.rowVersion) {
-    return next(new AppError("Quotation changed since you loaded it — reload and retry", 412));
+    return next(new AppError(
+      "Quotation changed since you loaded it — reload and retry",
+      412,
+      { rowVersion: quotation.rowVersion },
+    ));
   }
 
   const customer = await prisma.customer.findUnique({ where: { id: quotation.query.customerId } });
@@ -357,7 +374,7 @@ export const reviseQuotation = catchAsync(async (req, res, next) => {
 
   const revision = await prisma.$transaction(async (tx) => {
     const referenceNo = await allocateRef(tx, "quotation");
-    return tx.quotation.create({
+    const rev = await tx.quotation.create({
       data: {
         referenceNo,
         queryId: parent.queryId,
@@ -367,6 +384,7 @@ export const reviseQuotation = catchAsync(async (req, res, next) => {
         services: parent.services,
         servicePackage: parent.servicePackage,
         croHandledBy: parent.croHandledBy,
+        lcHandledBy: parent.lcHandledBy,
         currency: parent.currency,
         fxRate: parent.fxRate ?? undefined,
         totalAmount: parent.totalAmount,
@@ -387,6 +405,10 @@ export const reviseQuotation = catchAsync(async (req, res, next) => {
       },
       include: { chargeLines: { orderBy: { sortOrder: "asc" } } },
     });
+    await emitEvent(tx, "quotation.created", {
+      quotationId: rev.id, referenceNo: rev.referenceNo, queryId: rev.queryId, revision: true,
+    });
+    return rev;
   });
 
   const [hydrated] = await hydrate([revision]);

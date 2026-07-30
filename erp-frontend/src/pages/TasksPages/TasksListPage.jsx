@@ -7,7 +7,6 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import toast from "react-hot-toast";
 import { useTaskStore } from "@/store/taskStore";
 import { useAuthStore } from "@/store/authStore";
-import * as taskService from "@/services/taskService";
 import { TASK_STATUS_LABELS } from "@/lib/catalog";
 
 const STATUS_STYLE = {
@@ -24,17 +23,18 @@ const overdue = (t) => t.dueDate && new Date(t.dueDate) < new Date() && ["open",
 const compact = (n) => Number(n ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
 
 const TasksListPage = () => {
-  const { tasks, loading, error, statusFilter, setStatusFilter, fetchTasks } = useTaskStore();
+  const { tasks, loading, error, busy, filters, setFilter, fetchTasks, claimTask, completeTask } = useTaskStore();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const navigate = useNavigate();
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
+  // The store refetches and publishes: completing a step-linked task advances the
+  // shipment (RULE-TK-02), so the shipment screens and the dashboard hear about it too.
   const act = async (fn, msg) => {
     try {
       const res = await fn();
       toast.success(msg || res?.message);
-      fetchTasks();
     } catch (err) {
       toast.error(err?.message || "Couldn't update the task");
     }
@@ -53,7 +53,7 @@ const TasksListPage = () => {
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <Select value={statusFilter || "all"} onValueChange={(v) => setStatusFilter(v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(TASK_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
+          <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(TASK_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
             <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
@@ -109,12 +109,12 @@ const TasksListPage = () => {
                 <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => navigate(`/admin/shipments/${t.shipmentId}`)}>Open</Button>
               )}
               {!t.assigneeId && ["queued", "open"].includes(t.status) && hasPermission("task.update") && (
-                <Button size="sm" variant="outline" className="h-8 text-xs gap-1" onClick={() => act(() => taskService.claimTask(t.id), "Task claimed")}>
+                <Button size="sm" variant="outline" className="h-8 text-xs gap-1" disabled={busy} onClick={() => act(() => claimTask(t.id), "Task claimed")}>
                   <Hand className="w-3.5 h-3.5" /> Claim
                 </Button>
               )}
               {["open", "in_progress"].includes(t.status) && hasPermission("task.complete") && (
-                <Button size="sm" className="h-8 text-xs gap-1" onClick={() => act(() => taskService.completeTask(t.id), "Task completed")}>
+                <Button size="sm" className="h-8 text-xs gap-1" disabled={busy} onClick={() => act(() => completeTask(t.id), "Task completed")}>
                   <CheckCircle2 className="w-3.5 h-3.5" /> Complete
                 </Button>
               )}

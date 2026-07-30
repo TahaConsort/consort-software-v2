@@ -6,17 +6,13 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/authStore";
 import { useDocumentStore } from "@/store/documentStore";
-import { DOC_TYPE_OPTIONS, DOC_TYPE_LABELS, downloadDocument } from "@/services/documentService";
+import { useWorkflowStore } from "@/store/workflowStore";
+import { DOC_TYPE_OPTIONS, downloadDocument } from "@/services/documentService";
 
 const prettyType = (code) => code?.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const kb = (n) => (n > 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
-/**
- * Doc types a portal customer may send IN — mirrors CUSTOMER_UPLOADABLE_DOC_TYPES in
- * erp-backend/modules/document/document.middleware.js, which is the real gate. Kept in
- * sync by convention; the server rejects anything else with a 403.
- */
-const PORTAL_UPLOADABLE_DOC_TYPES = ["cro", "commercial_invoice", "packing_list", "authority_letterhead"];
+const EMPTY = [];
 
 /**
  * Reusable documents panel (CRM_MASTER §5.13). Internal mode shows the RULE-SH-06
@@ -28,21 +24,46 @@ const PORTAL_UPLOADABLE_DOC_TYPES = ["cro", "commercial_invoice", "packing_list"
  * `locked` freezes the paperwork of a finished order (RULE-SH-12) — publishing
  * stays available, since revealing a document to the customer changes nothing
  * about what happened.
+ *
+ * `onChanged` fires after every successful mutation, for a parent that keeps state
+ * this panel cannot reach through the topic bus — the customer portal's dashboard
+ * cards, for instance. A parent that owns the `shipment:{id}` topic must NOT pass it:
+ * documentStore already publishes that topic, so it would refetch twice.
  */
-const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = false, locked = false, allowUpload = false }) => {
+const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = false, locked = false, allowUpload = false, onChanged }) => {
   const hasPermission = useAuthStore((s) => s.hasPermission);
-  const { documents, checklist, loading, busy, fetch, upload, publish, remove } = useDocumentStore();
+  const docStore = useDocumentStore();
+  const { loading, refreshing, busy, fetch, upload, publish, remove } = docStore;
+  // The store is one singleton serving this panel and the portal dialog. Rendering
+  // its rows without checking the owner is how shipment A's filenames ended up under
+  // shipment B's header; keep the guard even though only one panel mounts today.
+  const mine = docStore.ownerType === ownerType && docStore.ownerId === ownerId;
+  const documents = mine ? docStore.documents : EMPTY;
+  const checklist = mine ? docStore.checklist : EMPTY;
+
+  // Subscribing to `docTypes` is required, not incidental: labelForDocType is a store
+  // method with a stable identity, so selecting it alone would never re-render this
+  // panel when the vocabulary hydrates and every label would stay a raw code.
+  const { docTypes, fetchDocTypes, labelForDocType, docTypeOptions: optionsFor } = useWorkflowStore();
   // Portal uploads default to the CRO — the reason a customer is uploading at all.
   const [docType, setDocType] = useState(portal ? "cro" : "other");
   const fileRef = useRef(null);
 
   useEffect(() => {
-    if (ownerType && ownerId) fetch(ownerType, ownerId, { withRequired: showRequired });
+    // `ifAbsent` so a parent that already loaded this owner (the shipment page needs
+    // the checklist before this panel even renders) doesn't pay for a second request.
+    if (ownerType && ownerId) fetch(ownerType, ownerId, { withRequired: showRequired, ifAbsent: true });
   }, [ownerType, ownerId, showRequired, fetch]);
+  useEffect(() => { fetchDocTypes(); }, [fetchDocTypes]);
 
-  const docTypeOptions = portal
-    ? DOC_TYPE_OPTIONS.filter((o) => PORTAL_UPLOADABLE_DOC_TYPES.includes(o.value))
-    : DOC_TYPE_OPTIONS;
+  // Admin-managed vocabulary (ADR-051), static list as pre-hydration fallback. The
+  // portal filter is the customerUploadable flag — the same gate the server enforces
+  // (the fallback allowlist mirrors the factory seed for the moment before hydration).
+  const FALLBACK_PORTAL_TYPES = ["cro", "lc", "commercial_invoice", "packing_list", "authority_letterhead"];
+  const serverOptions = optionsFor(portal);
+  const docTypeOptions = docTypes.length
+    ? serverOptions
+    : (portal ? DOC_TYPE_OPTIONS.filter((o) => FALLBACK_PORTAL_TYPES.includes(o.value)) : DOC_TYPE_OPTIONS);
 
   const canUpload = !locked && hasPermission("document.upload") && (!portal || allowUpload);
   const canPublish = !portal && hasPermission("document.publish");
@@ -53,18 +74,20 @@ const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = fal
     const file = fileRef.current?.files?.[0];
     if (!file) return toast.error("Choose a file first");
     try {
-      await upload({ file, docType });
+      const res = await upload({ file, docType, ownerType, ownerId });
       toast.success("Document uploaded");
       if (fileRef.current) fileRef.current.value = "";
+      onChanged?.({ action: "upload", document: res?.data });
     } catch (err) {
       toast.error(err?.message || "Couldn't upload the document");
     }
   };
 
-  const act = async (fn, msg) => {
+  const act = async (fn, msg, action) => {
     try {
       const res = await fn();
       toast.success(msg || res?.message);
+      onChanged?.({ action, document: res?.data });
     } catch (err) {
       toast.error(err?.message || "Couldn't update the document");
     }
@@ -92,7 +115,7 @@ const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = fal
                   return (
                     <Badge key={t} variant="outline"
                       className={`text-[10px] ${missing ? "border-amber-400 text-amber-700 dark:text-amber-300" : "border-green-400 text-green-700 dark:text-green-300"}`}>
-                      {missing ? "⚠ " : "✓ "}{DOC_TYPE_LABELS[t] ?? t}
+                      {missing ? "⚠ " : "✓ "}{labelForDocType(t)}
                     </Badge>
                   );
                 })}
@@ -130,19 +153,22 @@ const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = fal
         </form>
       )}
 
-      {/* List */}
-      {loading && <div className="flex justify-center py-6 text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>}
+      {/* List. The spinner is for the FIRST load only — a background refresh must not
+          replace content the user is reading, it just dims the list for a moment. */}
+      {loading && documents.length === 0 && (
+        <div className="flex justify-center py-6 text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>
+      )}
       {!loading && documents.length === 0 && (
         <p className="text-sm text-muted-foreground">{portal ? "No documents shared yet." : "No documents attached."}</p>
       )}
-      <ul className="divide-y">
+      <ul className={`divide-y transition-opacity ${refreshing ? "opacity-60" : ""}`}>
         {documents.map((d) => (
           <li key={d.id} className="py-2.5 flex items-center gap-3">
             <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
             <div className="min-w-0 flex-1">
               <p className="text-sm font-medium truncate">{d.fileName}</p>
               <div className="flex items-center gap-1.5 mt-0.5">
-                {d.docType && <Badge variant="secondary" className="text-[10px]">{DOC_TYPE_LABELS[d.docType] ?? d.docType}</Badge>}
+                {d.docType && <Badge variant="secondary" className="text-[10px]">{labelForDocType(d.docType)}</Badge>}
                 <span className="text-[10px] text-muted-foreground">{kb(d.sizeBytes)}</span>
                 {d.isPublished && <Badge variant="outline" className="text-[10px] border-green-400 text-green-700 dark:text-green-300 gap-0.5"><Globe className="w-2.5 h-2.5" /> Portal</Badge>}
               </div>
@@ -153,13 +179,13 @@ const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = fal
               </Button>
               {canPublish && !d.isPublished && (
                 <Button size="sm" variant="ghost" className="h-8 text-xs gap-1" disabled={busy}
-                  onClick={() => act(() => publish(d.id), "Published to portal")}>
+                  onClick={() => act(() => publish(d.id), "Published to portal", "publish")}>
                   <Globe className="w-3.5 h-3.5" /> Publish
                 </Button>
               )}
               {canDelete && (
                 <Button size="sm" variant="ghost" className="h-8 text-xs text-destructive" disabled={busy}
-                  onClick={() => act(() => remove(d.id), "Document deleted")}>
+                  onClick={() => act(() => remove(d.id), "Document deleted", "remove")}>
                   <Trash2 className="w-3.5 h-3.5" />
                 </Button>
               )}

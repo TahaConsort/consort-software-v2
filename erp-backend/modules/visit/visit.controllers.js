@@ -197,9 +197,13 @@ export const cancelVisit = catchAsync(async (req, res, next) => {
   if (!visit || !visitInScope(req, visit)) return next(new AppError("Visit not found", 404));
   if (visit.status !== "planned") return next(new AppError("Only a planned visit can be cancelled", 409));
 
-  const updated = await prisma.visitPlan.update({
-    where: { id: visit.id },
-    data: { status: "cancelled", cancelReason: req.body.reason },
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.visitPlan.update({
+      where: { id: visit.id },
+      data: { status: "cancelled", cancelReason: req.body.reason },
+    });
+    await emitEvent(tx, "visit.cancelled", { visitId: u.id, assignedToId: u.assignedToId });
+    return u;
   });
 
   const [hydrated] = await hydrateVisits([updated]);

@@ -1,10 +1,18 @@
 export class AppError extends Error {
-  constructor(message, statusCode) {
+  /**
+   * @param details optional machine-readable fields merged into the response body, for
+   *   refusals a client can act on rather than only display. The optimistic-concurrency
+   *   gates use it to return the CURRENT `rowVersion` on a 412/428, which lets the client
+   *   refetch and retry once by itself instead of telling the user to reload the page.
+   *   Only ever put data the caller is already entitled to see here.
+   */
+  constructor(message, statusCode, details) {
     super(message);
 
     this.statusCode = statusCode;
     this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
     this.isOperational = true;
+    this.details = details ?? null;
 
     Error.captureStackTrace(this, this.constructor);
   }
@@ -37,5 +45,7 @@ export const globalErrorHandler = (err, req, res, next) => {
     success: false,
     status,
     message,
+    // Only for operational errors: a 500's internals must never reach the client.
+    ...(isOperational && err.details ? err.details : {}),
   });
 };

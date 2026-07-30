@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
@@ -60,9 +61,12 @@ export const updatePosting = catchAsync(async (req, res, next) => {
   const existing = await prisma.loadBoardPosting.findUnique({ where: { id: req.params.id } });
   if (!existing) return next(new AppError("Posting not found", 404));
 
-  const updated = await prisma.loadBoardPosting.update({
-    where: { id: existing.id },
-    data: req.body,
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.loadBoardPosting.update({ where: { id: existing.id }, data: req.body });
+    await tx.outboxEvent.create({
+      data: { eventType: "loadboard.changed", payload: { postingId: row.id }, correlationId: crypto.randomUUID() },
+    });
+    return row;
   });
   res.json({ success: true, message: "Posting updated", data: serializePosting(updated) });
 });
@@ -72,9 +76,11 @@ export const deactivatePosting = catchAsync(async (req, res, next) => {
   const existing = await prisma.loadBoardPosting.findUnique({ where: { id: req.params.id } });
   if (!existing) return next(new AppError("Posting not found", 404));
 
-  await prisma.loadBoardPosting.update({
-    where: { id: existing.id },
-    data: { isActive: false },
+  await prisma.$transaction(async (tx) => {
+    await tx.loadBoardPosting.update({ where: { id: existing.id }, data: { isActive: false } });
+    await tx.outboxEvent.create({
+      data: { eventType: "loadboard.changed", payload: { postingId: existing.id }, correlationId: crypto.randomUUID() },
+    });
   });
   res.json({ success: true, message: "Posting removed from the board" });
 });

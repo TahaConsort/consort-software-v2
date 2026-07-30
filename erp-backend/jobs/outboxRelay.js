@@ -2,6 +2,7 @@ import crypto from "crypto";
 import prisma from "../config/prisma.js";
 import { emitToUser, emitToRooms } from "../realtime/io.js";
 import { isPermittedOutOfOrder } from "../utils/composition.js";
+import { fanOutFor } from "../utils/eventTopics.js";
 
 /**
  * Outbox relay + Action Engine (ADR-020/021, WORKFLOW §6/§9/§10, RULE-AE).
@@ -609,12 +610,37 @@ export const drainOutboxOnce = async () => {
     try {
       const handler = resolveHandler(event.eventType);
       if (handler) await handler(event.payload, event);
+      else {
+        // Previously silent: an event with no handler was marked dispatched and vanished
+        // without a trace, so a new eventType could look wired up while doing nothing.
+        console.warn(`Outbox: no handler for "${event.eventType}" (event ${event.id})`);
+      }
+
+      // The generic invalidation fan-out (ADR-007). One place, table-driven: the handlers
+      // above do notifications and Action-Engine work, and 29 of 37 pushed nothing to any
+      // room — which is why every list screen in the app needed a manual reload to see
+      // another user's changes. `data:changed` carries topic names only, never entity data.
+      const fan = fanOutFor(event.eventType, event.payload ?? {});
+      if (fan) emitToRooms(fan.rooms, "data:changed", { topics: fan.topics, event: event.eventType });
+      else if (handler) {
+        console.warn(`Outbox: "${event.eventType}" has no invalidation row (utils/eventTopics.js) — no client will re-read`);
+      }
+
       await prisma.outboxEvent.update({ where: { id: event.id }, data: { dispatchedAt: new Date() } });
     } catch (err) {
+      const attempts = event.attempts + 1;
       await prisma.outboxEvent.update({
         where: { id: event.id },
         data: { attempts: { increment: 1 }, lastError: String(err?.message ?? err).slice(0, 500) },
       });
+      // At MAX_ATTEMPTS the row drops out of the query above forever, and reapOutbox only
+      // deletes DISPATCHED rows — so it sits in the table permanently. Say so once, loudly,
+      // instead of leaving it to be discovered as a "stuck" counter on the admin console.
+      if (attempts >= MAX_ATTEMPTS) {
+        console.error(
+          `Outbox: "${event.eventType}" (event ${event.id}) exhausted ${MAX_ATTEMPTS} attempts and will NOT be retried: ${String(err?.message ?? err).slice(0, 200)}`,
+        );
+      }
     }
   }
 

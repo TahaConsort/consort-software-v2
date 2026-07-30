@@ -46,6 +46,18 @@ export const requiredDocs = async (shipmentId) => {
   return res.data;
 };
 
+/**
+ * The admin-managed docType vocabulary (ADR-051) — [{ code, label, customerUploadable }].
+ * This route deliberately carries no extra permission: the vocabulary is needed
+ * wherever an upload button or a docType label renders, portal included. Compare
+ * workflowService.listDocTypes, which is the management CRUD view of the same table
+ * and requires `workflow.manage`.
+ */
+export const listDocTypes = async () => {
+  const res = await api.get("/documents/types");
+  return res.data;
+};
+
 export const uploadDocument = async ({ file, ownerType, ownerId, docType, otdStepId }) => {
   const form = new FormData();
   form.append("file", file);

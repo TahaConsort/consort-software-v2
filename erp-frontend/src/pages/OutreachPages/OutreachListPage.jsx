@@ -30,9 +30,8 @@ import {
 } from "@/components/ui/select";
 import toast from "react-hot-toast";
 import { useOutreachStore } from "@/store/outreachStore";
-import { useLeadStore } from "@/store/leadStore";
+import { useReferenceStore } from "@/store/referenceStore";
 import { useCustomerStore } from "@/store/customerStore";
-import * as outreachService from "@/services/outreachService";
 import {
   OUTREACH_TYPE_LABELS,
   OUTREACH_OUTCOME_LABELS,
@@ -60,27 +59,26 @@ const OUTCOME_STYLES = {
  */
 const OutreachListPage = () => {
   const {
-    outreach, followUps, followUpCounts, loading, error,
-    targetFilter, setTargetFilter, fetchOutreach, fetchFollowUps,
+    outreach, followUps, followUpCounts, loading, error, busy,
+    filters, setFilter, fetchOutreach, createOutreach,
   } = useOutreachStore();
   const [addOpen, setAddOpen] = useState(false);
-  const [busy, setBusy] = useState(false);
 
-  useEffect(() => { fetchOutreach(); fetchFollowUps(); }, [fetchOutreach, fetchFollowUps]);
+  // The log and the follow-ups feed arrive in one read now, so there is nothing to
+  // sequence here and no half-refreshed state to reason about.
+  useEffect(() => { fetchOutreach(); }, [fetchOutreach]);
 
-  const refresh = () => { fetchOutreach(); fetchFollowUps(); };
+  const refresh = () => fetchOutreach();
 
   const submit = async (payload) => {
-    setBusy(true);
     try {
-      const res = await outreachService.createOutreach(payload);
+      // Through the store: logging a touch can advance a lead new → contacted, and the
+      // Leads list has to hear about that.
+      const res = await createOutreach(payload);
       toast.success(res?.message || "Outreach logged");
       setAddOpen(false);
-      refresh();
     } catch (err) {
       toast.error(err?.message || "Failed to log outreach");
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -99,7 +97,7 @@ const OutreachListPage = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Select value={targetFilter || "all"} onValueChange={(v) => setTargetFilter(v === "all" ? "" : v)} items={[{ value: "all", label: "All targets" }, { value: "lead", label: "Leads" }, { value: "customer", label: "Customers" }]}>
+          <Select value={filters.target || "all"} onValueChange={(v) => setFilter("target", v === "all" ? "" : v)} items={[{ value: "all", label: "All targets" }, { value: "lead", label: "Leads" }, { value: "customer", label: "Customers" }]}>
             <SelectTrigger className="w-32 h-9"><SelectValue placeholder="Target" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All targets</SelectItem>
@@ -233,7 +231,10 @@ const OutreachListPage = () => {
 
 /* ── Log outreach — target a lead (pipeline) or a customer (retention) ── */
 const LogOutreachDialog = ({ busy, onClose, onSubmit }) => {
-  const { leads, fetchLeads } = useLeadStore();
+  // referenceStore, NOT useLeadStore: that store applies the Leads PAGE's filters, so
+  // setting that page's filter to e.g. "lost" silently emptied this dropdown, and no
+  // amount of reloading fixed it because the filter was the cause.
+  const { leads, fetch: fetchReference } = useReferenceStore();
   const { customers, fetchCustomers } = useCustomerStore();
   const [form, setForm] = useState({
     targetType: "lead",
@@ -245,7 +246,7 @@ const LogOutreachDialog = ({ busy, onClose, onSubmit }) => {
     followUpAt: "",
   });
 
-  useEffect(() => { fetchLeads(); fetchCustomers(); }, [fetchLeads, fetchCustomers]);
+  useEffect(() => { fetchReference("leads"); fetchCustomers(); }, [fetchReference, fetchCustomers]);
 
   const openLeads = leads.filter((l) => ["new", "contacted", "qualified"].includes(l.status));
   const activeCustomers = customers.filter((c) => c.isActive);

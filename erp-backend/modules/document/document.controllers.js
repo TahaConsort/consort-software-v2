@@ -3,7 +3,7 @@ import crypto from "crypto";
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
-import { CUSTOMER_UPLOADABLE_DOC_TYPES, ownerInScope } from "./document.middleware.js";
+import { ownerInScope } from "./document.middleware.js";
 import {
   absPathFor,
   checksumFile,
@@ -12,6 +12,7 @@ import {
   requiredDocTypesByStep,
   isStepMandatoryDoc,
 } from "./document.service.js";
+import { getDocTypes, isValidDocType, isCustomerUploadable, customerUploadableCodes } from "./docTypes.cache.js";
 import { lockReason } from "../shipment/shipment.service.js";
 
 /**
@@ -23,6 +24,49 @@ const shipmentLockReason = async (ownerType, ownerId, action) => {
   if (ownerType !== "shipment") return null;
   const shipment = await prisma.shipment.findUnique({ where: { id: ownerId } });
   return lockReason(shipment, action);
+};
+
+/**
+ * Announce a document change (ADR-020 — inside the caller's transaction, so nothing is
+ * emitted for a write that rolled back).
+ *
+ * This module emitted no events at all, which was a real gap rather than an omission: a
+ * `document` step sub-action's `satisfied` and the RULE-SH-06 miss set are both DERIVED
+ * server-side from the files on record at read time. So attaching a document silently
+ * changes whether a step can be completed, and with no event, nobody else's open stepper
+ * could know — the Complete button stayed disabled until they reloaded the page.
+ *
+ * INV-10 on the audience: the customer room is included only when the change is theirs to
+ * see — a publish, or their own upload. An internal-only attachment is not portal news,
+ * and nudging the portal to refetch something it cannot see is a side channel, not a
+ * feature.
+ */
+const emitDocumentsChanged = async (tx, doc, { change, actorRole }) => {
+  const payload = {
+    ownerType: doc.ownerType,
+    ownerId: doc.ownerId,
+    change,
+    docType: doc.docType ?? null,
+    documentId: doc.id,
+    shipmentId: doc.ownerType === "shipment" ? doc.ownerId : null,
+    customerId: null,
+  };
+
+  if (doc.ownerType === "shipment" && (change === "publish" || actorRole === "customer")) {
+    const shipment = await tx.shipment.findUnique({
+      where: { id: doc.ownerId },
+      select: { customerId: true },
+    });
+    payload.customerId = shipment?.customerId ?? null;
+  }
+
+  await tx.outboxEvent.create({
+    data: {
+      eventType: "shipment.documents.changed",
+      payload,
+      correlationId: crypto.randomUUID(),
+    },
+  });
 };
 
 /**
@@ -60,6 +104,19 @@ const publicShape = (d) => ({
   createdAt: d.createdAt,
 });
 
+/* ── GET /api/documents/types ── the active docType vocabulary (ADR-051) */
+// Every authenticated caller may read it: pickers and label maps need it everywhere
+// the upload button exists, portal included.
+export const listDocTypes = catchAsync(async (req, res) => {
+  const rows = await getDocTypes();
+  res.json({
+    success: true,
+    data: rows
+      .filter((t) => t.active)
+      .map((t) => ({ code: t.code, label: t.label, customerUploadable: t.customerUploadable })),
+  });
+});
+
 /* ── POST /api/documents ── (multipart: file + ownerType + ownerId + docType) */
 export const uploadDocument = catchAsync(async (req, res, next) => {
   if (!req.file) return next(new AppError("No file received (field name must be 'file')", 400));
@@ -72,28 +129,41 @@ export const uploadDocument = catchAsync(async (req, res, next) => {
     return next(new AppError("Owner not found", 404));
   }
 
-  // A portal customer may only send IN specific doc types, and may only hand over a CRO
-  // on a shipment where THEY are the agreed CRO source. Enforced here rather than in
+  // The docType must exist and be active in the document_types vocabulary (ADR-051) —
+  // Zod only format-checks it, because the table lookup is async.
+  if (docType && !(await isValidDocType(docType))) {
+    safeUnlink(req.file.path);
+    return next(new AppError("Unknown document type", 422));
+  }
+
+  // A portal customer may only send IN the customer-uploadable doc types (a flag on
+  // document_types since ADR-051), and may only hand over a CRO/LC on a shipment where
+  // THEY are the agreed source of that document. Enforced here rather than in
   // `ownerInScope` because `req.body.docType` does not exist until multer has parsed the
   // multipart body.
   if (req.user.role === "customer") {
-    if (!docType || !CUSTOMER_UPLOADABLE_DOC_TYPES.includes(docType)) {
+    if (!docType || !(await isCustomerUploadable(docType))) {
       safeUnlink(req.file.path);
+      const allowedCodes = await customerUploadableCodes();
       return next(
         new AppError(
-          `You can only upload: ${CUSTOMER_UPLOADABLE_DOC_TYPES.join(", ")}. Anything else is issued by Consort.`,
+          `You can only upload: ${allowedCodes.join(", ")}. Anything else is issued by Consort.`,
           403,
         ),
       );
     }
-    if (docType === "cro") {
+    if (docType === "cro" || docType === "lc") {
       const shipment = await prisma.shipment.findUnique({
         where: { id: ownerId },
-        select: { croHandledBy: true },
+        select: { croHandledBy: true, lcHandledBy: true },
       });
-      if (shipment?.croHandledBy !== "customer") {
+      if (docType === "cro" && shipment?.croHandledBy !== "customer") {
         safeUnlink(req.file.path);
         return next(new AppError("Consort is arranging the CRO for this shipment", 409));
+      }
+      if (docType === "lc" && shipment?.lcHandledBy !== "customer") {
+        safeUnlink(req.file.path);
+        return next(new AppError("Consort is managing the LC for this shipment", 409));
       }
     }
   }
@@ -150,6 +220,7 @@ export const uploadDocument = catchAsync(async (req, res, next) => {
       },
     });
     await audit(tx, req.user.id, "document.upload", doc, { ownerType, ownerId, docType: docType ?? null, fileName: doc.fileName });
+    await emitDocumentsChanged(tx, doc, { change: "upload", actorRole: req.user.role });
     return doc;
   });
 
@@ -212,6 +283,7 @@ export const publishDocument = catchAsync(async (req, res, next) => {
       data: { isPublished: true, publishedById: req.user.id, publishedAt: new Date() },
     });
     await audit(tx, req.user.id, "document.publish", u, { fileName: u.fileName });
+    await emitDocumentsChanged(tx, u, { change: "publish", actorRole: req.user.role });
     return u;
   });
 
@@ -240,6 +312,7 @@ export const deleteDocument = catchAsync(async (req, res, next) => {
   await prisma.$transaction(async (tx) => {
     await tx.document.update({ where: { id: doc.id }, data: { deletedAt: new Date() } });
     await audit(tx, req.user.id, "document.delete", doc, { reason: req.body?.reason ?? null });
+    await emitDocumentsChanged(tx, doc, { change: "remove", actorRole: req.user.role });
   });
 
   res.json({ success: true, message: "Document deleted" });

@@ -64,7 +64,7 @@ export const createInvoice = catchAsync(async (req, res, next) => {
 
   const created = await prisma.$transaction(async (tx) => {
     const referenceNo = await allocateRef(tx, "invoice");
-    return tx.invoice.create({
+    const invoice = await tx.invoice.create({
       data: {
         referenceNo,
         shipmentId,
@@ -81,6 +81,13 @@ export const createInvoice = catchAsync(async (req, res, next) => {
       },
       include: { lines: { orderBy: { sortOrder: "asc" } }, payments: true },
     });
+    await emitEvent(tx, "invoice.created", {
+      invoiceId: invoice.id,
+      referenceNo: invoice.referenceNo,
+      shipmentId: invoice.shipmentId,
+      kind: invoice.kind,
+    });
+    return invoice;
   });
 
   res.status(201).json({ success: true, message: `${created.kind === "payable" ? "Payable" : "Receivable"} invoice ${created.referenceNo} drafted`, data: created });
@@ -243,9 +250,18 @@ export const voidInvoice = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: invoice.shipmentId } });
   assertInvoiceWritable(shipment, invoice.kind, "void its invoices"); // RULE-SH-12 (payables stay open on settled)
 
-  const updated = await prisma.invoice.update({
-    where: { id: invoice.id },
-    data: { status: "void", voidedById: req.user.id, voidedAt: new Date(), voidReason: req.body.reason },
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.invoice.update({
+      where: { id: invoice.id },
+      data: { status: "void", voidedById: req.user.id, voidedAt: new Date(), voidReason: req.body.reason },
+    });
+    await emitEvent(tx, "invoice.voided", {
+      invoiceId: u.id,
+      referenceNo: u.referenceNo,
+      shipmentId: u.shipmentId,
+      kind: u.kind,
+    });
+    return u;
   });
   res.json({ success: true, message: "Invoice voided", data: updated });
 });

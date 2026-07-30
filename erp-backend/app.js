@@ -29,6 +29,7 @@ import loadboardRoutes from "./modules/loadboard/loadboard.routes.js";
 import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
+import workflowRoutes from "./modules/workflow/workflow.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
 import { AppError } from "./utils/AppError.js";
 
@@ -111,6 +112,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/action-engine", actionRoutes);
 app.use("/api/reports", reportRoutes);
 app.use("/api/audit", auditRoutes);
+app.use("/api/workflow", workflowRoutes); // Management-only catalog admin (ADR-051)
 
 // Intake channels & public storefront (CRM_MASTER §5.20/§5.21)
 app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calc + inquiry

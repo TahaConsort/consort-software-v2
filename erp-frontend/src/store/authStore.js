@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { resetAllStores } from "@/lib/createResourceStore";
 
 /**
  * Auth store (CRM_MASTER §5.1, ADR-009).
@@ -8,6 +9,11 @@ import { persist } from "zustand/middleware";
  * localStorage payload can't be replayed. On reload the token is gone and the
  * axios layer silently re-mints it from the HttpOnly refresh cookie via
  * POST /auth/refresh. `user` + `permissions` persist so guards render instantly.
+ *
+ * Identity changes wipe every other store (`resetAllStores`). Every data store is
+ * a module singleton, so without this the next user inherits the previous one's
+ * leads, customers, invoices, documents and chat messages — a stale-data trap and
+ * a cross-account leak whose only cure was a browser reload.
  */
 export const useAuthStore = create(
   persist(
@@ -18,19 +24,26 @@ export const useAuthStore = create(
       isAuthenticated: false,
 
       // Full login / refresh result.
-      setAuth: ({ user, accessToken, permissions }) =>
+      setAuth: ({ user, accessToken, permissions }) => {
+        // A silent refresh normally returns the same person; if it doesn't, every
+        // other store is holding someone else's rows.
+        const previousId = get().user?.id;
+        if (user?.id && previousId && user.id !== previousId) resetAllStores();
         set({
           user: user ?? get().user,
           token: accessToken ?? null,
           permissions: permissions ?? get().permissions,
           isAuthenticated: true,
-        }),
+        });
+      },
 
       // Rotate just the access token (silent refresh).
       setToken: (accessToken) => set({ token: accessToken }),
 
-      logout: () =>
-        set({ user: null, token: null, permissions: [], isAuthenticated: false }),
+      logout: () => {
+        set({ user: null, token: null, permissions: [], isAuthenticated: false });
+        resetAllStores();
+      },
 
       hasPermission: (perm) => get().permissions?.includes(perm) ?? false,
 

@@ -2,6 +2,7 @@ import express from "express";
 import {
   uploadDocument,
   listDocuments,
+  listDocTypes,
   downloadDocument,
   publishDocument,
   deleteDocument,
@@ -21,6 +22,9 @@ const router = express.Router();
 
 router.use(protect, requireDocumentAccess);
 
+// No extra permission: the vocabulary is needed wherever an upload button renders,
+// portal included (labels + pickers). Static-list replacement, not data (ADR-051).
+router.get("/types", listDocTypes);
 router.get("/required/:shipmentId", requirePermission("document.read"), requiredDocsForShipment);
 router.get("/", requirePermission("document.read"), validateQuery(listQuerySchema), listDocuments);
 router.get("/:id/download", requirePermission("document.read"), downloadDocument);

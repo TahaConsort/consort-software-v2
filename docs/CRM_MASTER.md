@@ -132,7 +132,14 @@ Consort is an à-la-carte logistics partner. Every query/quote records a **set o
 | Port Handling / Terminal | `port_handling` | Operations / Transport | Container release order (CRO), terminal handover, vessel loading position |
 | LC / Trade Finance | `lc_finance` | Finance | SWIFT/LC advice, document submission to bank, escrow-backed final settlement |
 
-`lc_finance` is implied for any shipment whose acquisition channel is **Bank LC** (§5.4) and may also be added explicitly. **The selected services compose the shipment's OTD step template (§5.9).** A local-transport-only order therefore has no Compliance or Customs role, no bank/BOL steps, and runs the short standard-local path; adding sea freight, customs and LC extends it up to the full 14-step international path. The catalog is enum-based in Phase 1; adding a service is a schema + template change, not runtime configuration.
+`lc_finance` is implied for any shipment whose acquisition channel is **Bank LC** (§5.4) or whose LC mode is Consort-managed (below), and may also be added explicitly. **The selected services compose the shipment's OTD step template (§5.9).** A local-transport-only order therefore has no Compliance or Customs role, no bank/BOL steps, and runs the short standard-local path; adding sea freight, customs and LC extends it up to the full international path.
+
+**Intake sub-options (ADR-046/049/050).** The customer picks one of **four service packages** (Local Transport, Loading Point → Port, International, Port → Consignee), which presets the service set and decides the fields the form asks for. Two per-shipment questions ride on the export packages:
+- **CRO** — who obtains the Container Release Order (`customer` / `consort`); a choice on Loading Point → Port, fixed elsewhere.
+- **LC (ADR-050)** — who manages the Letter of Credit: *No LC* (open-account), *Customer provides the LC* (we chase and file the copy — the `lc_received_from_customer` step, Compliance-owned), or *Consort manages the LC* (sells `lc_finance`, composing the SWIFT/LC-advice and bank-submission steps). Asked on both export packages.
+- **Downstream toggle** — International only: "add destination delivery" unions `destination_services`, composing the destination-agent steps (DO & gate pass, pickup, empty return).
+
+**The catalog is runtime configuration since ADR-051**: steps, per-step checklists, gates, hints and the document-type vocabulary are managed by non-developers in the **Workflow admin panel** (`/admin/workflow`, Management-only, `workflow.manage`). Edits shape new shipments only (INV-14); used steps deactivate rather than delete; every step write re-syncs its Action-Engine task template in the same transaction. Only genuinely code-coupled vocabularies (service codes, packages, statuses, departments) remain enums.
 
 ### 5.7 Quotation
 Itemised charge lines with server-computed totals. `ops_exec` drafts, `ops_manager` sends — four-eyes on outbound pricing. Revisions are new versions linked to their parent. Expiry is automatic. Approval by customer, ASM or Management, never by the owning BDO.

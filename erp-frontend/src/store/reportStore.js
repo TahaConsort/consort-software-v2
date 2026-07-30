@@ -1,30 +1,46 @@
-import { create } from "zustand";
 import * as reportService from "@/services/reportService";
+import { createResourceStore } from "@/lib/createResourceStore";
+import { TOPICS } from "@/lib/topics";
 
 /**
- * Report store (CRM_MASTER §5.18). Holds the currently-viewed report's rows +
- * summary. Server owns all aggregation and scope; the store just fetches.
+ * Report store (CRM_MASTER §5.18) — the currently-viewed report's rows and summary.
+ * The server owns all aggregation and scope; this only fetches.
+ *
+ * `activeKey` is part of the read identity, which fixes the skew where switching tabs
+ * quickly showed report B's header above report A's rows: the key change blanks the rows
+ * up front and the losing response is dropped.
+ *
+ * `download` gets a `busy` flag it never had — a double-click used to download twice, and
+ * a failed CSV was silent.
  */
-export const useReportStore = create((set, get) => ({
-  activeKey: "leads",
-  rows: [],
-  summary: null,
-  loading: false,
-  error: null,
-  filters: {}, // { from, to }
+export const useReportStore = createResourceStore({
+  name: "reports",
+  topics: [TOPICS.REPORTS],
 
-  setFilters: (filters) => set({ filters }),
+  state: { activeKey: "leads", rows: [], summary: null },
+  filters: { from: "", to: "" },
+  // The date range is applied with an explicit action on this screen too.
+  refetchOnFilterChange: false,
 
-  fetch: async (key) => {
-    const activeKey = key ?? get().activeKey;
-    set({ loading: true, error: null, activeKey });
-    try {
-      const res = await reportService.getReport(activeKey, get().filters);
-      set({ rows: res.data ?? [], summary: res.summary ?? null, loading: false });
-    } catch (err) {
-      set({ error: err?.message || "Failed to load report", rows: [], summary: null, loading: false });
-    }
+  keyOf: ([key], state) => key ?? state.activeKey,
+  clearOnKeyChange: { rows: [], summary: null },
+
+  load: async ({ args, get, filters }) => {
+    const activeKey = args[0] ?? get().activeKey;
+    const res = await reportService.getReport(activeKey, filters);
+    return { activeKey, rows: res.data ?? [], summary: res.summary ?? null };
   },
 
-  download: (key) => reportService.downloadReport(key ?? get().activeKey, get().filters),
-}));
+  actions: ({ set, get, mutate }) => ({
+    /** Set the date range and read once. */
+    setFilters: (filters) => {
+      set({ filters: { ...get().filters, ...filters } });
+      return get().fetch(get().activeKey);
+    },
+
+    download: (key) =>
+      mutate(() => reportService.downloadReport(key ?? get().activeKey, get().filters), {
+        refetch: false,
+      }),
+  }),
+});

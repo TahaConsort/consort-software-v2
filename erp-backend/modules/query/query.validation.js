@@ -1,7 +1,9 @@
 import { z } from "zod";
 import {
   allowedCroModes,
+  allowedLcModes,
   CRO_MODES,
+  LC_MODES,
   SERVICE_CODES,
   SERVICE_PACKAGES,
   packageUsesDeliveryAddress,
@@ -30,6 +32,9 @@ const baseQueryFields = {
   customerId: z.string().min(1).optional(),
   servicePackage: z.enum(SERVICE_PACKAGES),
   croHandledBy: z.enum(CRO_MODES).optional(),
+  // ADR-050 — who manages the Letter of Credit. Optional: the resolver defaults it
+  // (bank-LC customers → consort; everyone else → no LC).
+  lcHandledBy: z.enum(LC_MODES).optional(),
   // Additive Ops overrides on top of the package preset — never the whole selection.
   services: z.array(z.enum(SERVICE_CODES)).optional(),
   originPort: z.string().optional(),
@@ -65,6 +70,13 @@ const refineCoherence = (schema) =>
         v.croHandledBy === undefined ||
         allowedCroModes(v.servicePackage).includes(v.croHandledBy),
       { path: ["croHandledBy"], message: "This CRO option is not available for the selected service" },
+    )
+    .refine(
+      (v) =>
+        v.servicePackage === undefined ||
+        v.lcHandledBy === undefined ||
+        allowedLcModes(v.servicePackage).includes(v.lcHandledBy),
+      { path: ["lcHandledBy"], message: "An LC option is only available on export services" },
     )
     .refine((v) => v.servicePackage !== "local_transport" || !v.originPort, {
       path: ["originPort"],

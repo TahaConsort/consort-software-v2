@@ -31,10 +31,9 @@ import {
 } from "@/components/ui/select";
 import toast from "react-hot-toast";
 import { useVisitStore } from "@/store/visitStore";
-import { useLeadStore } from "@/store/leadStore";
+import { useReferenceStore } from "@/store/referenceStore";
 import { useCustomerStore } from "@/store/customerStore";
 import { useAuthStore } from "@/store/authStore";
-import * as visitService from "@/services/visitService";
 import { VISIT_STATUS_LABELS } from "@/lib/catalog";
 import { OUTREACH_OUTCOME_LABELS } from "../LeadsPages/LeadComponents/leadBadges";
 
@@ -53,24 +52,25 @@ const STATUS_STYLES = {
  * machine (RULE-VP-02); a no-show escalates BDO → ASM (RULE-VP-04).
  */
 const VisitsListPage = () => {
-  const { visits, loading, error, statusFilter, setStatusFilter, fetchVisits } = useVisitStore();
+  const {
+    visits, loading, error, busy, filters, setFilter, fetchVisits,
+    createVisit, completeVisit, noShowVisit, cancelVisit, rescheduleVisit,
+  } = useVisitStore();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const [dialog, setDialog] = useState(null); // { kind, visit } | 'add' | null
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => { fetchVisits(); }, [fetchVisits]);
 
+  // The store owns the refetch and the cross-list invalidation: completing or missing a
+  // visit writes an outreach touch and can advance the lead (RULE-VP-02), so the Outreach
+  // and Leads screens have to hear about it too.
   const act = async (fn, msg) => {
-    setBusy(true);
     try {
       const res = await fn();
       toast.success(msg || res?.message);
       setDialog(null);
-      fetchVisits();
     } catch (err) {
       toast.error(err?.message || "Couldn't update the visit");
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -89,7 +89,7 @@ const VisitsListPage = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Select value={statusFilter || "all"} onValueChange={(v) => setStatusFilter(v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(VISIT_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
+          <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(VISIT_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
             <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
@@ -162,7 +162,7 @@ const VisitsListPage = () => {
                         <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1 hover:bg-primary/10 hover:text-primary" onClick={() => setDialog({ kind: "complete", visit: v })}>
                           <CheckCircle2 className="w-3.5 h-3.5" /> Complete
                         </Button>
-                        <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1" onClick={() => act(() => visitService.noShowVisit(v.id), "Marked no-show")}>
+                        <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1" onClick={() => act(() => noShowVisit(v.id), "Marked no-show")}>
                           <UserX className="w-3.5 h-3.5" /> No-show
                         </Button>
                         <Button size="sm" variant="ghost" className="h-8 px-2 text-xs gap-1 hover:bg-destructive/10 hover:text-destructive" onClick={() => setDialog({ kind: "cancel", visit: v })}>
@@ -195,21 +195,24 @@ const VisitsListPage = () => {
       </div>
 
       {/* Dialogs */}
-      {dialog?.kind === "add" && <AddVisitDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(payload) => act(() => visitService.createVisit(payload), "Visit planned")} />}
-      {dialog?.kind === "complete" && <CompleteDialog busy={busy} visit={dialog.visit} onClose={() => setDialog(null)} onSubmit={(payload) => act(() => visitService.completeVisit(dialog.visit.id, payload), "Visit completed")} />}
-      {dialog?.kind === "cancel" && <CancelDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(reason) => act(() => visitService.cancelVisit(dialog.visit.id, reason), "Visit cancelled")} />}
-      {dialog?.kind === "reschedule" && <RescheduleDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(plannedAt) => act(() => visitService.rescheduleVisit(dialog.visit.id, plannedAt), "Rescheduled")} />}
+      {dialog?.kind === "add" && <AddVisitDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(payload) => act(() => createVisit(payload), "Visit planned")} />}
+      {dialog?.kind === "complete" && <CompleteDialog busy={busy} visit={dialog.visit} onClose={() => setDialog(null)} onSubmit={(payload) => act(() => completeVisit(dialog.visit.id, payload), "Visit completed")} />}
+      {dialog?.kind === "cancel" && <CancelDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(reason) => act(() => cancelVisit(dialog.visit.id, reason), "Visit cancelled")} />}
+      {dialog?.kind === "reschedule" && <RescheduleDialog busy={busy} onClose={() => setDialog(null)} onSubmit={(plannedAt) => act(() => rescheduleVisit(dialog.visit.id, plannedAt), "Rescheduled")} />}
     </div>
   );
 };
 
 /* ── Plan a visit — target one of lead / customer (DATABASE §5 CHECK) ── */
 const AddVisitDialog = ({ busy, onClose, onSubmit }) => {
-  const { leads, fetchLeads } = useLeadStore();
+  // referenceStore, NOT useLeadStore: that store applies the Leads PAGE's filters, so
+  // whatever the user last filtered by there silently emptied this dropdown, and
+  // reloading never helped because the filter was the cause.
+  const { leads, fetch: fetchReference } = useReferenceStore();
   const { customers, fetchCustomers } = useCustomerStore();
   const [form, setForm] = useState({ targetType: "lead", targetId: "", purpose: "", plannedAt: "", location: "" });
 
-  useEffect(() => { fetchLeads(); fetchCustomers(); }, [fetchLeads, fetchCustomers]);
+  useEffect(() => { fetchReference("leads"); fetchCustomers(); }, [fetchReference, fetchCustomers]);
 
   const openLeads = leads.filter((l) => ["new", "contacted", "qualified"].includes(l.status));
 

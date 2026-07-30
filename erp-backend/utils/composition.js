@@ -10,8 +10,8 @@
 /**
  * True if the template belongs on a shipment with this selection.
  *
- * Three gates, evaluated package → CRO mode → service. A gate whose column is EMPTY
- * does not constrain; a gate whose column is SET must match:
+ * Four gates, evaluated package → CRO mode → LC mode → service. A gate whose column is
+ * EMPTY does not constrain; a gate whose column is SET must match:
  *
  *  1. package  — a template listing `packages` applies ONLY to those packages.
  *                Combined with `always: true` this reads "always, on these packages".
@@ -21,11 +21,16 @@
  *                `inferPackageFromServices` in utils/servicePackage.js.
  *  2. CRO mode — picks exactly one of the two mutually exclusive CRO template rows
  *                (`cro_received_from_customer` vs `cro_released`).
- *  3. service  — the original ADR-040 rule, unchanged.
+ *  3. LC mode  — ADR-050. Only `lc_received_from_customer` carries this gate in the
+ *                seeded catalog: Consort-managed LC composes its steps via the
+ *                `lc_finance` SERVICE gate (unchanged since ADR-040), which is what
+ *                keeps every pre-LC-dimension selection reproducing byte-for-byte.
+ *  4. service  — the original ADR-040 rule, unchanged.
  */
-const gatesPass = (tpl, { services, servicePackage, croHandledBy }) => {
+const gatesPass = (tpl, { services, servicePackage, croHandledBy, lcHandledBy }) => {
   if (tpl.packages?.length && !tpl.packages.includes(servicePackage)) return false;
   if (tpl.croModes?.length && !tpl.croModes.includes(croHandledBy)) return false;
+  if (tpl.lcModes?.length && !tpl.lcModes.includes(lcHandledBy)) return false;
   return true;
 };
 
@@ -40,12 +45,16 @@ const templateApplies = (tpl, selection) => {
 /**
  * Compose the OTD path for a selection.
  * @param templates all OtdStepTemplate rows
- * @param selection { services, servicePackage, croHandledBy } — `servicePackage: null`
- *                  means a pre-package shipment and disables the package gate.
+ * @param selection { services, servicePackage, croHandledBy, lcHandledBy } —
+ *                  `servicePackage: null` means a pre-package shipment and disables
+ *                  the package gate.
  * @returns array of { canonicalNo, displayNo, stepCode, title, ownerDepartment,
  *                     derivedStatus, requiredDocTypes } in canonical order.
  */
-export const composeOtdPath = (templates, { services = [], servicePackage, croHandledBy = "not_applicable" } = {}) => {
+export const composeOtdPath = (
+  templates,
+  { services = [], servicePackage, croHandledBy = "not_applicable", lcHandledBy = "not_applicable" } = {}
+) => {
   if (!servicePackage) {
     // Composing without a package would silently drop every package-gated step and
     // produce a half-path. Callers resolve one first (inferPackageFromServices covers
@@ -53,7 +62,7 @@ export const composeOtdPath = (templates, { services = [], servicePackage, croHa
     throw new Error("composeOtdPath requires a servicePackage — resolve one before composing.");
   }
   const composed = templates
-    .filter((t) => templateApplies(t, { services, servicePackage, croHandledBy }))
+    .filter((t) => templateApplies(t, { services, servicePackage, croHandledBy, lcHandledBy }))
     .sort((a, b) => a.canonicalNo - b.canonicalNo);
 
   return composed.map((t, i) => ({
@@ -80,10 +89,14 @@ export const composeOtdPath = (templates, { services = [], servicePackage, croHa
  * @param stepCode        the step to build the checklist for
  * @returns array of { actionCode, title, kind, docType, sortOrder, required }, ordered
  */
-export const composeStepActions = (actionTemplates, stepCode, { services = [], servicePackage, croHandledBy = "not_applicable" } = {}) =>
+export const composeStepActions = (
+  actionTemplates,
+  stepCode,
+  { services = [], servicePackage, croHandledBy = "not_applicable", lcHandledBy = "not_applicable" } = {}
+) =>
   actionTemplates
     .filter((a) => a.stepCode === stepCode)
-    .filter((a) => gatesPass(a, { services, servicePackage, croHandledBy }))
+    .filter((a) => gatesPass(a, { services, servicePackage, croHandledBy, lcHandledBy }))
     .filter((a) => !a.services?.length || a.services.some((s) => services.includes(s)))
     .sort((a, b) => a.sortOrder - b.sortOrder)
     .map((a) => ({
@@ -97,14 +110,19 @@ export const composeStepActions = (actionTemplates, stepCode, { services = [], s
 
 /**
  * The permitted out-of-order step pairs (RULE-SH-03): an LC advice and a vessel slot
- * booking are negotiated in parallel, so either may complete first.
+ * booking are negotiated in parallel, so either may complete first. The customer-LC
+ * variant (ADR-050) gets the same exemption — chasing the customer's LC copy and
+ * booking the vessel run concurrently exactly like the consort-LC pair.
  *
  * Keyed on STEP CODE, not canonical number. This was previously a hardcoded
  * `[3, 4].includes(canonicalNo)` duplicated in shipment.service.js and
  * jobs/outboxRelay.js — which silently relocates the exemption onto whatever steps
  * happen to land on 3 and 4 the moment the catalog is renumbered.
  */
-export const OUT_OF_ORDER_PAIRS = [["lc_generated", "vessel_booked"]];
+export const OUT_OF_ORDER_PAIRS = [
+  ["lc_generated", "vessel_booked"],
+  ["lc_received_from_customer", "vessel_booked"],
+];
 
 export const isPermittedOutOfOrder = (aCode, bCode) =>
   aCode !== bCode && OUT_OF_ORDER_PAIRS.some((p) => p.includes(aCode) && p.includes(bCode));

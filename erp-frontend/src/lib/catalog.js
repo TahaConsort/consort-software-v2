@@ -87,6 +87,24 @@ export const CRO_HANDLING_SHORT = {
 
 export const labelForCroMode = (code) => CRO_HANDLING_LABELS[code] ?? code ?? "—";
 
+// Who manages the Letter of Credit (ADR-050) — the second sub-option on the export
+// packages, independent of the CRO. `not_applicable` doubles as "no-LC trade".
+export const LC_HANDLING_LABELS = {
+  not_applicable: "No LC",
+  customer: "Customer provides the LC",
+  consort: "Consort manages the LC",
+};
+
+// Shorter forms for table cells and badges. Unlike the CRO map, no-LC renders a word
+// rather than "—": on an export job "no LC" is a real choice, not a non-question.
+export const LC_HANDLING_SHORT = {
+  not_applicable: "No LC",
+  customer: "LC by customer",
+  consort: "LC by Consort",
+};
+
+export const labelForLcMode = (code) => LC_HANDLING_LABELS[code] ?? code ?? "—";
+
 /**
  * Which service codes each package presets. Mirrors PACKAGE_SERVICES in
  * erp-backend/utils/servicePackage.js, which is authoritative — the server always
@@ -103,6 +121,10 @@ export const PACKAGE_PRESET_SERVICES = {
 export const packageUsesPorts = (pkg) => !!pkg && pkg !== "local_transport";
 export const packageUsesDestinationPort = (pkg) => pkg === "international";
 export const packageHasCroChoice = (pkg) => pkg === "loading_point_to_port";
+// The LC question is asked on BOTH export packages (mirrors allowedLcModes, ADR-050);
+// international additionally offers the destination-delivery add-on toggle.
+export const packageHasLcChoice = (pkg) => pkg === "loading_point_to_port" || pkg === "international";
+export const packageHasDownstreamToggle = (pkg) => pkg === "international";
 
 /**
  * Which door fields a package asks for. Import delivery is the first package to want a

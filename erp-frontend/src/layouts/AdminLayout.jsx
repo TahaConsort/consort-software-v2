@@ -13,10 +13,13 @@ const AdminLayout = () => {
   const unreadCount = useNotificationStore((s) => s.unreadCount)
   const fetchNotifications = useNotificationStore((s) => s.fetchNotifications)
 
-  // Keep the top-bar badge fresh (REST is complete without sockets — WORKFLOW §7.3).
+  // The single owner of the notification read for the whole admin shell (AdminSidebar used
+  // to run an identical interval against the same store). `notification:new` pushes live
+  // via RealtimeBridge and the bus revalidates on focus and reconnect, so this interval is
+  // just a slow floor for a badge nobody wants to miss.
   useEffect(() => {
     fetchNotifications()
-    const t = setInterval(fetchNotifications, 60_000)
+    const t = setInterval(() => fetchNotifications({ background: true }), 60_000)
     return () => clearInterval(t)
   }, [fetchNotifications])
 

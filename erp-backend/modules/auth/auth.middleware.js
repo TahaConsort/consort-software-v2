@@ -36,6 +36,8 @@ const MANAGEMENT_PERMS = [
   "inquiry.read", "inquiry.convert", "lc.read", "lc.convert", "loadboard.manage",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
+  // Workflow catalog admin (ADR-051) — steps, checklists, document types
+  "workflow.manage",
 ];
 
 export const PERMISSIONS_BY_ROLE = {

@@ -128,6 +128,7 @@ export const reassignTask = catchAsync(async (req, res, next) => {
       data: { assigneeId: target.id, status: task.status === "queued" ? "open" : task.status, rowVersion: { increment: 1 } },
     });
     await emitEvent(tx, "task.assigned", { taskId: u.id, assigneeId: target.id, previousAssigneeId, reassigned: true });
+    await emitEvent(tx, "task.reassigned", { taskId: u.id, assigneeId: target.id, previousAssigneeId });
     await auditTask(tx, req.user.id, "task.reassign", u.id, { from: previousAssigneeId, to: target.id });
     return u;
   });
@@ -153,7 +154,10 @@ export const completeTask = catchAsync(async (req, res, next) => {
     if (!step) return next(new AppError("Step not found", 404));
     if (step.status === "done") {
       // Step already advanced elsewhere — just close the task.
-      await prisma.task.update({ where: { id: task.id }, data: { status: "done", completedById: req.user.id, completedAt: new Date() } });
+      await prisma.$transaction(async (tx) => {
+        await tx.task.update({ where: { id: task.id }, data: { status: "done", completedById: req.user.id, completedAt: new Date() } });
+        await emitEvent(tx, "task.completed", { taskId: task.id, shipmentId: task.shipmentId ?? null });
+      });
       return res.json({ success: true, message: "Task completed" });
     }
 
@@ -174,9 +178,12 @@ export const completeTask = catchAsync(async (req, res, next) => {
   }
 
   // Ad-hoc / pre-check task → simply complete it.
-  await prisma.task.update({
-    where: { id: task.id },
-    data: { status: "done", completedById: req.user.id, completedAt: new Date(), rowVersion: { increment: 1 } },
+  await prisma.$transaction(async (tx) => {
+    await tx.task.update({
+      where: { id: task.id },
+      data: { status: "done", completedById: req.user.id, completedAt: new Date(), rowVersion: { increment: 1 } },
+    });
+    await emitEvent(tx, "task.completed", { taskId: task.id, shipmentId: task.shipmentId ?? null });
   });
   res.json({ success: true, message: "Task completed" });
 });

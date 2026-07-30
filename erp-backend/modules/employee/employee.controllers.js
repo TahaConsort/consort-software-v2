@@ -146,6 +146,13 @@ export const createEmployee = catchAsync(async (req, res, next) => {
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
+    await tx.outboxEvent.create({
+      data: {
+        eventType: "user.created",
+        payload: { employeeId: emp.id },
+        correlationId: crypto.randomUUID(),
+      },
+    });
     return tx.employee.findUnique({ where: { id: emp.id }, include: EMPLOYEE_INCLUDE });
   });
 
@@ -247,6 +254,13 @@ export const updateEmployee = catchAsync(async (req, res, next) => {
         },
       });
     }
+    await tx.outboxEvent.create({
+      data: {
+        eventType: "user.updated",
+        payload: { employeeId: id },
+        correlationId: crypto.randomUUID(),
+      },
+    });
   });
 
   const updated = await prisma.employee.findUnique({ where: { id }, include: EMPLOYEE_INCLUDE });

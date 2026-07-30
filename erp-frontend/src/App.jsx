@@ -50,6 +50,7 @@ import StorefrontPage from "./pages/PublicPages/StorefrontPage";
 import InquiriesListPage from "./pages/InquiryPages/InquiriesListPage";
 import LcInboxPage from "./pages/LcPages/LcInboxPage";
 import LoadBoardManagePage from "./pages/LoadBoardPages/LoadBoardManagePage";
+import WorkflowManagePage from "./pages/WorkflowPages/WorkflowManagePage";
 
 // Role groups (Management passes every gate via RoleGuard, ADR-044).
 const INTERNAL = ["hr", "asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
@@ -107,11 +108,13 @@ const App = () => {
                 <Route path="reports" element={<ReportsListPage />} />
               </Route>
 
-              {/* Management-only — settings + Action Engine (§5.12) + Audit (§5.19) */}
+              {/* Management-only — settings + Action Engine (§5.12) + Audit (§5.19) +
+                  Workflow catalog admin (ADR-051) */}
               <Route element={<RoleGuard allowedRoles={[]} />}>
                 <Route path="settings" element={<AdminSettingsPage />} />
                 <Route path="action-engine" element={<ActionEngineListPage />} />
                 <Route path="audit" element={<AuditListPage />} />
+                <Route path="workflow" element={<WorkflowManagePage />} />
               </Route>
 
               {/* Sales workspace */}

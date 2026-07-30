@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Landmark, Loader2, ArrowRight, Ban, Eye, Check } from "lucide-react";
 import toast from "react-hot-toast";
+import { useTopicRefresh } from "@/lib/useTopicRefresh";
+import { invalidate } from "@/lib/invalidationBus";
+import { TOPICS } from "@/lib/topics";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,38 +37,52 @@ export default function LcInboxPage() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canConvert = hasPermission("lc.convert");
 
-  const [referrals, setReferrals] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [referrals, setReferrals] = useState(null);
   const [filter, setFilter] = useState("received");
+  // Which filter the rows in state belong to. Adjusted during render (React's documented
+  // adjust-state-on-prop-change pattern) so switching filters blanks the previous result
+  // set immediately, without a setState inside an effect.
+  const [loadedFilter, setLoadedFilter] = useState(filter);
+  if (loadedFilter !== filter) {
+    setLoadedFilter(filter);
+    setReferrals(null);
+  }
+  // Derived, so a BACKGROUND refresh never replaces the list with a spinner.
+  const loading = referrals === null;
   const [busy, setBusy] = useState(false);
   const [detail, setDetail] = useState(null);
   const [convertTarget, setConvertTarget] = useState(null);
   const [rejectTarget, setRejectTarget] = useState(null);
   const [rejectReason, setRejectReason] = useState("");
 
-  const load = async () => {
-    setLoading(true);
+  // `isCurrent` is the stale guard: switching the filter quickly could otherwise leave
+  // the losing response on screen, which reads as a stuck list.
+  const load = useCallback(async ({ isCurrent } = {}) => {
+    const ok = isCurrent ?? (() => true);
     try {
       const res = await listReferrals(filter === "all" ? undefined : filter);
-      setReferrals(res.data || []);
+      if (ok()) setReferrals(res.data || []);
     } catch (err) {
-      toast.error(err?.message || "Could not load LC referrals");
-    } finally {
-      setLoading(false);
+      if (ok()) toast.error(err?.message || "Could not load LC referrals");
     }
-  };
-
-  useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter]);
+
+  // This inbox exists to show work that arrives from OUTSIDE the app, so it is the last
+  // screen that should need a manual reload — yet it had no live path at all.
+  const { run: reload } = useTopicRefresh([TOPICS.LC_REFERRALS, TOPICS.QUERIES, TOPICS.CUSTOMERS], load);
+
+  useEffect(() => { reload(); }, [filter, reload]);
 
   const act = async (fn, msg) => {
     setBusy(true);
     try {
       const res = await fn();
       toast.success(msg || res?.message);
-      await load();
+      await reload();
+      // Converting a referral mints a customer and a query, so those screens must re-read.
+      // This page's own topic is deliberately absent: reload() above already covers it,
+      // and publishing it would schedule a second, redundant request.
+      invalidate(TOPICS.QUERIES, TOPICS.CUSTOMERS, TOPICS.LEADS, TOPICS.DASHBOARD);
       return res;
     } catch (err) {
       toast.error(err?.message || "Couldn't update the referral");

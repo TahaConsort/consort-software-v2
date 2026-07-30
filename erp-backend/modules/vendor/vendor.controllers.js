@@ -1,7 +1,14 @@
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
+import crypto from "crypto";
 import { allocateRef } from "../../utils/referenceNumber.js";
+
+/** Vendors feed the payable-invoice pickers on the Finance and shipment screens. */
+const emitVendorChanged = (tx, vendorId) =>
+  tx.outboxEvent.create({
+    data: { eventType: "vendor.changed", payload: { vendorId }, correlationId: crypto.randomUUID() },
+  });
 
 /**
  * Vendor master — CRUD (freight-forwarding OTC upgrade). Read is broad
@@ -54,6 +61,7 @@ export const createVendor = catchAsync(async (req, res) => {
       },
     });
   });
+  await emitVendorChanged(prisma, vendor.id);
   res.status(201).json({ success: true, message: "Vendor created", data: vendor });
 });
 
@@ -70,7 +78,11 @@ export const updateVendor = catchAsync(async (req, res, next) => {
     if (data[k] === "") data[k] = null;
   }
 
-  const updated = await prisma.vendor.update({ where: { id: existing.id }, data });
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.vendor.update({ where: { id: existing.id }, data });
+    await emitVendorChanged(tx, row.id);
+    return row;
+  });
   res.json({ success: true, message: "Vendor updated", data: updated });
 });
 
@@ -78,6 +90,9 @@ export const updateVendor = catchAsync(async (req, res, next) => {
 export const deactivateVendor = catchAsync(async (req, res, next) => {
   const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
   if (!existing) return next(new AppError("Vendor not found", 404));
-  await prisma.vendor.update({ where: { id: existing.id }, data: { isActive: false } });
+  await prisma.$transaction(async (tx) => {
+    await tx.vendor.update({ where: { id: existing.id }, data: { isActive: false } });
+    await emitVendorChanged(tx, existing.id);
+  });
   res.json({ success: true, message: "Vendor deactivated" });
 });

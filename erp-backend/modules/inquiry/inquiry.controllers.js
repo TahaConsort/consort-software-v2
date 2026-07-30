@@ -46,9 +46,13 @@ export const updateInquiryStatus = catchAsync(async (req, res, next) => {
     return next(new AppError("A converted inquiry cannot change status", 409));
   }
 
-  const updated = await prisma.publicInquiry.update({
-    where: { id: inquiry.id },
-    data: { status: req.body.status, reviewedById: req.user.id },
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.publicInquiry.update({
+      where: { id: inquiry.id },
+      data: { status: req.body.status, reviewedById: req.user.id },
+    });
+    await emitEvent(tx, "inquiry.updated", { inquiryId: row.id, referenceNo: row.referenceNo, status: row.status });
+    return row;
   });
   res.json({ success: true, message: `Inquiry marked ${req.body.status}`, data: serialize(updated) });
 });

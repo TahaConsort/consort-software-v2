@@ -18,6 +18,7 @@ import bcrypt from "bcrypt";
 import { pathToFileURL } from "url";
 import prisma from "../config/prisma.js";
 import { DEFAULT_CURRENCY } from "../utils/currency.js";
+import { deriveTaskTemplateData } from "../utils/taskTemplates.js";
 
 const DEPARTMENTS = [
   { code: "management", name: "Management" },
@@ -32,11 +33,15 @@ const DEPARTMENTS = [
 // The DB form of WORKFLOW §4a.1 / DATABASE §8 — the composition source of truth
 // (ADR-001/040). utils/composition.js reads this table and never re-encodes the mapping.
 //
-// GATES, evaluated package → CRO mode → service, each EMPTY-MEANS-DON'T-GATE:
+// GATES, evaluated package → CRO mode → LC mode → service, each EMPTY-MEANS-DON'T-GATE:
 //   packages  restrict to those service packages ("always: true" + packages reads
 //             "always, on these packages"). A shipment with servicePackage = null was
 //             composed before packages existed and skips this gate entirely.
 //   croModes  select exactly one of the two mutually exclusive CRO rows (50 vs 55).
+//   lcModes   ADR-050. Only row 35 (lc_received_from_customer) carries it: the
+//             Consort-managed LC steps (30/130) compose via the lc_finance SERVICE
+//             gate exactly as before ADR-050, which is what keeps pre-LC selections
+//             reproducing byte-for-byte. Rows omit the key when empty (defaults []).
 //   services  the original ADR-040 rule.
 //
 // Canonical numbers are stable reporting keys and are RE-SPACED to multiples of 10 so
@@ -95,9 +100,17 @@ const OTD_STEP_TEMPLATES = [
     ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "in_transit" },
 
-  // ── Trade finance / vessel booking (the permitted out-of-order pair) ───────────
+  // ── Trade finance / vessel booking (the permitted out-of-order pairs) ──────────
+  // Two mutually exclusive LC rows, selected by lcHandledBy (ADR-050) the way croModes
+  // selects rows 50/55. Row 30 composes when Consort SELLS the LC legwork (lc_finance —
+  // added by resolveServices for lcHandledBy=consort and for bank-LC customers); row 35
+  // composes when the customer runs their own LC and we only chase the copy. A no-LC
+  // trade composes neither.
   { canonicalNo: 30, stepCode: "lc_generated", title: "SWIFT / LC Advice",
     ownerDepartment: "compliance", always: false, packages: [], croModes: [], services: ["lc_finance"],
+    requiredDocTypes: ["lc"], dueOffsetHours: 48, derivedStatus: "lc_generated" },
+  { canonicalNo: 35, stepCode: "lc_received_from_customer", title: "LC Copy Received from Customer",
+    ownerDepartment: "compliance", always: true, packages: ALL_PORT_PACKAGES, croModes: [], lcModes: ["customer"], services: [],
     requiredDocTypes: ["lc"], dueOffsetHours: 48, derivedStatus: "lc_generated" },
   { canonicalNo: 40, stepCode: "vessel_booked", title: "Vessel Slot Booking (Shipping Line)",
     ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["sea_freight"],
@@ -201,6 +214,81 @@ const OTD_STEP_TEMPLATES = [
     ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
     requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
 ];
+
+// ── Step hints (ADR-051) ──────────────────────────────────────────────────────
+// One plain-language line per step on what completing it actually means — merged onto
+// the template rows at seed time (otd_step_templates.hint) and served with the hydrated
+// steps. Ported from the frontend's old hardcoded STEP_HINTS map so admin-created steps
+// and seeded steps read from the same column.
+const STEP_HINTS = {
+  order_lock: "Attach the signed Rate Confirmation (RC) — the order locks against it and nothing downstream moves until it is on file.",
+  order_confirmed: "Collect the customer's document pack and confirm the order — work the checklist below.",
+  transporter_assigned: "Book a transporter for the run and agree the rate.",
+  vehicle_dispatched: "Send the vehicle to the customer's pickup point.",
+  goods_loaded: "Goods loaded at the pickup point; capture proof of loading.",
+  in_transit: "Vehicle is on the road to the delivery point.",
+  lc_generated: "Letter of Credit raised/received for this trade.",
+  lc_received_from_customer: "The customer runs their own LC — chase them for the copy and attach it for compliance review.",
+  vessel_booked: "Apply to the shipping line for a vessel slot.",
+  cro_received_from_customer: "The customer is supplying the CRO — chase them for the copy and attach it.",
+  cro_released: "Apply to the shipping line and obtain the Container Release Order.",
+  empty_container_pickup: "Pick up the empty container from the yard (pay LOLO); capture the pickup EIR.",
+  cargo_pickup: "Stuff the container at the customer premises and apply the shipper's seal.",
+  inland_transit: "Move the container from origin to the port.",
+  customs_clearance: "File the GD, pay duty, get the cargo examined and sealed — work the checklist below.",
+  customs_entry: "File the customs entry / GD declaration.",
+  inspected_sealed: "Cargo inspected and the customs seal applied.",
+  port_handover: "Gate the container in at the terminal; capture the gate-in EIR.",
+  bol_issued: "Bill of Lading issued by the shipping line.",
+  bol_submitted: "BOL submitted to the bank / counterparty.",
+  telex_released: "Telex release / BL surrender confirmed.",
+  destination_do: "Destination agent obtains the Delivery Order & gate pass.",
+  destination_pickup: "Destination agent picks up the container; capture the pickup EIR.",
+  import_container_pickup: "Take the delivery order and gate pass to the terminal, collect the container and capture the pickup EIR.",
+  delivered: "Cargo delivered to the consignee (POD).",
+  local_delivered: "Goods delivered to the delivery address; collect the POD.",
+  port_job_completed: "Cargo handed over at the port — the job is complete.",
+  import_empty_return: "Return the empty container to the yard or dry port; capture the empty-return EIR. This is the last step of the job.",
+  empty_return: "Return the empty container to the yard; capture the empty-return EIR.",
+};
+
+// ── Document-type vocabulary (ADR-051) ────────────────────────────────────────
+// The factory contents of `document_types` — codes/labels lifted from the old closed
+// DOC_TYPES Zod list. UPSERTED (never deleted) so admin-added types survive every
+// seed run, factory reset included. `customerUploadable` replaces the old hardcoded
+// portal allowlist; `lc` is on it for the customer-managed LC flow (ADR-050).
+const CUSTOMER_UPLOADABLE = ["cro", "lc", "commercial_invoice", "packing_list", "authority_letterhead"];
+const DOCUMENT_TYPES = [
+  { code: "gd", label: "GD / Customs Declaration" },
+  { code: "bol", label: "Bill of Lading (BOL)" },
+  { code: "pod", label: "Proof of Delivery (POD)" },
+  { code: "invoice", label: "Invoice" },
+  { code: "packing_list", label: "Packing List" },
+  { code: "commercial_invoice", label: "Commercial Invoice" },
+  { code: "sales_tax_invoice", label: "Sales Tax Invoice" },
+  { code: "certificate_of_origin", label: "Certificate of Origin" },
+  { code: "authority_letterhead", label: "Authority Letterhead" },
+  { code: "undertaking", label: "Undertaking" },
+  { code: "quotation", label: "Quotation" },
+  { code: "rate_confirmation", label: "Rate Confirmation (RC)" },
+  { code: "lc", label: "Letter of Credit / SWIFT Advice" },
+  { code: "cro", label: "Container Release Order (CRO)" },
+  { code: "inspection_cert", label: "Inspection & Seal Certificate" },
+  { code: "bank_receipt", label: "Bank Submission Receipt" },
+  { code: "telex", label: "Telex Release Confirmation" },
+  { code: "eir_out", label: "EIR — Empty Container Pickup" },
+  { code: "eir_in", label: "EIR — Port Gate-In" },
+  { code: "eir_pickup", label: "EIR — Destination Pickup" },
+  { code: "eir_empty_return", label: "EIR — Empty Return" },
+  { code: "delivery_order", label: "Delivery Order (DO)" },
+  { code: "gate_pass", label: "Gate Pass" },
+  { code: "proof", label: "Proof / Evidence" },
+  { code: "other", label: "Other" },
+].map((t, i) => ({
+  ...t,
+  customerUploadable: CUSTOMER_UPLOADABLE.includes(t.code),
+  sortOrder: (i + 1) * 10,
+}));
 
 // ── Sub-action catalog (ADR-048) ──────────────────────────────────────────────
 // The checklist that hangs under a main step. Gated exactly like the step catalog
@@ -493,15 +581,8 @@ export async function seedAccounts() {
   console.log(`✓ ${ACCOUNTS.length} accounts (all active, password: ${SEED_PASSWORD}); every employee reports to CEO`);
 }
 
-// Task-queue wording that reads better than the generic "Complete: <title>" — the
-// customer-CRO step is a chase, not a filing.
-const TASK_TITLE_OVERRIDES = {
-  cro_received_from_customer: "Obtain CRO copy from customer",
-  // `empty_return` and `import_empty_return` share a title; the task board shows both
-  // to Transport and Operations respectively, so say which job each one belongs to.
-  import_container_pickup: "Collect the container from the terminal",
-  import_empty_return: "Return the empty container to the yard",
-};
+// Task titles derive in utils/taskTemplates.js (deriveTaskTemplateData) — shared with
+// the Workflow admin module (ADR-051) so a seed run and an admin edit can never drift.
 
 /**
  * Seed the step catalog, its derived task templates and the charge catalog — and
@@ -524,37 +605,35 @@ export async function seedTemplates() {
   // re-spaced, so an upsert-in-place would collide on canonical_no against the
   // previous catalog. Wrapping it means no request ever observes a missing template
   // (missingRequiredDocs and recomputeStatus both look templates up by stepCode).
+  // Document vocabulary FIRST (upserts — admin-added types survive), because the step
+  // catalog's requiredDocTypes reference it.
+  for (const t of DOCUMENT_TYPES) {
+    await prisma.documentType.upsert({
+      where: { code: t.code },
+      update: { label: t.label, customerUploadable: t.customerUploadable, sortOrder: t.sortOrder },
+      create: t,
+    });
+  }
+  console.log(`✓ ${DOCUMENT_TYPES.length} document types (upserted — admin-added types untouched)`);
+
   await prisma.$transaction(async (tx) => {
     // Sub-actions FK to the step catalog, so they clear first and rebuild last.
     await tx.otdStepActionTemplate.deleteMany();
     await tx.otdStepTemplate.deleteMany();
     for (const t of OTD_STEP_TEMPLATES) {
-      await tx.otdStepTemplate.create({ data: t });
+      await tx.otdStepTemplate.create({ data: { ...t, hint: STEP_HINTS[t.stepCode] ?? null } });
     }
     await tx.otdStepActionTemplate.createMany({ data: OTD_STEP_ACTION_TEMPLATES });
 
     // Task templates: one per composable step (eventCode 'otd.step' marks the
     // Action-Engine step chain; the engine matches by stepCode). Superseded steps get
     // no template — nothing composes them, so nothing can ever raise their task.
+    // Derivation shared with the Workflow admin (utils/taskTemplates.js, ADR-051).
     await tx.taskTemplate.deleteMany({ where: { eventCode: "otd.step" } });
     await tx.taskTemplate.createMany({
-      data: OTD_STEP_TEMPLATES.filter((t) => t.active !== false).map((t) => ({
-        eventCode: "otd.step",
-        stepCode: t.stepCode,
-        title: TASK_TITLE_OVERRIDES[t.stepCode] ?? `Complete: ${t.title}`,
-        description: `Submit/confirm "${t.title}" to advance the shipment.`,
-        department: t.ownerDepartment,
-        dueOffsetHours: t.dueOffsetHours,
-        // The doc gate for a step whose pack lives in sub-actions is the union of
-        // both sources — mirror it here so the task card lists the same files.
-        requiredDocTypes: [
-          ...new Set([
-            ...t.requiredDocTypes,
-            ...OTD_STEP_ACTION_TEMPLATES.filter((a) => a.stepCode === t.stepCode && a.kind === "document" && a.required)
-              .map((a) => a.docType),
-          ]),
-        ],
-      })),
+      data: OTD_STEP_TEMPLATES.filter((t) => t.active !== false).map((t) =>
+        deriveTaskTemplateData(t, OTD_STEP_ACTION_TEMPLATES),
+      ),
     });
   });
   console.log(`✓ ${OTD_STEP_TEMPLATES.length} otd_step_templates (+${OTD_STEP_ACTION_TEMPLATES.length} sub-actions) + task_templates`);
@@ -643,11 +722,28 @@ if (isEntryPoint) {
   // already holds real work. Bare `node prisma/seed.js` WIPES 40+ tables — and is
   // refused outright by assertWipeAllowed() unless the DB is local and empty, or
   // --force-wipe is passed.
-  //   --templates-only  step/task/charge catalogs (upsert/replace-in-place)
-  //   --accounts-only   role logins, reporting tree, department heads (all upserts)
-  //   --force-wipe      override the guard and clear everything (irreversible)
+  //   --templates-only --factory-reset  step/task/charge catalogs (REPLACES the step
+  //                                     catalog with the factory rows — see guard below;
+  //                                     document types are upserts and always survive)
+  //   --accounts-only                   role logins, reporting tree, dept heads (upserts)
+  //   --force-wipe                      override the guard and clear everything
   const templatesOnly = process.argv.includes("--templates-only");
   const accountsOnly = process.argv.includes("--accounts-only");
+
+  // Since ADR-051 the step catalog is edited LIVE in the Workflow admin panel, so a
+  // template reseed is no longer harmless: it REPLACES every step/sub-action row with
+  // the factory catalog, destroying admin edits and admin-created steps. Demand an
+  // explicit second flag so nobody runs the pre-ADR-051 muscle-memory command into a
+  // catalog someone curated by hand.
+  if (templatesOnly && !process.argv.includes("--factory-reset")) {
+    console.error(
+      "--templates-only REPLACES the step catalog with the factory rows, destroying any\n" +
+      "changes made in the Workflow admin panel (edited gates, hints, admin-created steps).\n" +
+      "If that is what you mean, re-run with:  node prisma/seed.js --templates-only --factory-reset\n" +
+      "(Document types are upserted, never deleted — admin-added types survive either way.)",
+    );
+    process.exit(1);
+  }
 
   const run = templatesOnly && accountsOnly
     ? seedTemplates().then(seedAccounts)

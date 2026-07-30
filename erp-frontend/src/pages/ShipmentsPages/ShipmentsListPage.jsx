@@ -15,7 +15,7 @@ const STATUS_STYLE = (s) =>
     : "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300";
 
 const ShipmentsListPage = () => {
-  const { shipments, loading, error, statusFilter, exceptionFilter, setFilter, fetchShipments } = useShipmentStore();
+  const { shipments, loading, error, filters, setFilter, fetchShipments } = useShipmentStore();
   const navigate = useNavigate();
 
   useEffect(() => { fetchShipments(); }, [fetchShipments]);
@@ -33,7 +33,7 @@ const ShipmentsListPage = () => {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <Select value={exceptionFilter || "all"} onValueChange={(v) => setFilter("exceptionFilter", v === "all" ? "" : v)} items={[{ value: "all", label: "All states" }, { value: "none", label: "Active" }, { value: "on_hold", label: "On Hold" }, { value: "cancelled", label: "Cancelled" }]}>
+          <Select value={filters.exceptionState || "all"} onValueChange={(v) => setFilter("exceptionState", v === "all" ? "" : v)} items={[{ value: "all", label: "All states" }, { value: "none", label: "Active" }, { value: "on_hold", label: "On Hold" }, { value: "cancelled", label: "Cancelled" }]}>
             <SelectTrigger className="w-32 h-9"><SelectValue placeholder="State" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All states</SelectItem>

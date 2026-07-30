@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify:state": "node scripts/verifyStateLayer.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

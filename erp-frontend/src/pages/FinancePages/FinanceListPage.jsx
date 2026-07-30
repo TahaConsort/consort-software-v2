@@ -18,8 +18,7 @@ import {
   paymentStateOf, overdueDaysOf, DEFAULT_CURRENCY,
 } from "@/lib/catalog";
 import { INVOICE_KIND_LABELS } from "@/services/financeService";
-import * as shipmentService from "@/services/shipmentService";
-import * as vendorService from "@/services/vendorService";
+import { useReferenceStore } from "@/store/referenceStore";
 
 /**
  * Finance workspace (CRM_MASTER §5.11, §5.17). Accounts raises invoices, issues
@@ -39,12 +38,14 @@ const FinanceListPage = () => {
   const navigate = useNavigate();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const {
-    invoices, allOfKind, loading, busy, error, statusFilter, setFilter,
-    kindFilter, setKindFilter, fetchInvoices, issueInvoice, recordPayment, voidInvoice, createInvoice,
+    invoices, allOfKind, loading, busy, error, filters, setFilter,
+    setKindFilter, fetchInvoices, issueInvoice, recordPayment, voidInvoice, createInvoice,
   } = useFinanceStore();
   const [dialog, setDialog] = useState(null); // { kind, invoiceId }
-  const [vendors, setVendors] = useState([]);
-  const [shipments, setShipments] = useState([]);
+
+  // Picker data from referenceStore, so a shipment or vendor created since this tab
+  // opened is actually selectable. These were fetch-once-per-mount with no invalidation.
+  const { shipments: allShipments, vendors, fetch: fetchReference } = useReferenceStore();
 
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
 
@@ -52,11 +53,11 @@ const FinanceListPage = () => {
   // Best-effort: the button still works if either list fails, it just offers less.
   useEffect(() => {
     if (!hasPermission("invoice.create")) return;
-    shipmentService.listShipments()
-      .then((r) => setShipments((r.data || []).filter((s) => !["closed", "cancelled"].includes(s.status))))
-      .catch(() => {});
-    vendorService.listVendors({ isActive: true }).then((r) => setVendors(r.data || [])).catch(() => {});
-  }, [hasPermission]);
+    fetchReference("shipments", "vendors");
+  }, [hasPermission, fetchReference]);
+
+  // A closed or cancelled order cannot take a new invoice.
+  const shipments = allShipments.filter((sh) => !["closed", "cancelled"].includes(sh.status));
 
   const act = async (fn, msg) => {
     try {
@@ -83,8 +84,8 @@ const FinanceListPage = () => {
     { invoiced: 0, collected: 0, outstanding: 0, overdue: 0, overdueCount: 0 },
   );
   const ccy = live[0]?.currency;
-  const receivable = kindFilter === "receivable";
-  const filterLabel = PAYMENT_STATE_FILTERS.find((f) => f.value === statusFilter)?.label;
+  const receivable = filters.kind === "receivable";
+  const filterLabel = PAYMENT_STATE_FILTERS.find((f) => f.value === filters.paymentState)?.label;
 
   return (
     <div className="space-y-6">
@@ -100,7 +101,7 @@ const FinanceListPage = () => {
             </Button>
           )}
           <div className="w-40">
-            <Select value={statusFilter || ""} onValueChange={(v) => setFilter(v === "__all" ? "" : v)}
+            <Select value={filters.paymentState || ""} onValueChange={(v) => setFilter("paymentState", v === "__all" ? "" : v)}
               items={PAYMENT_STATE_FILTERS.map((f) => ({ value: f.value || "__all", label: f.label }))}>
               <SelectTrigger><SelectValue placeholder="All invoices" /></SelectTrigger>
               <SelectContent>
@@ -118,7 +119,7 @@ const FinanceListPage = () => {
           { value: "payable", label: "Payables (we owe)" },
         ].map((tab) => (
           <button key={tab.value} type="button"
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${kindFilter === tab.value ? "bg-white dark:bg-zinc-900 shadow-sm font-medium" : "text-muted-foreground"}`}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${filters.kind === tab.value ? "bg-white dark:bg-zinc-900 shadow-sm font-medium" : "text-muted-foreground"}`}
             onClick={() => setKindFilter(tab.value)}>
             {tab.label}
           </button>
@@ -148,8 +149,8 @@ const FinanceListPage = () => {
               ? `No ${receivable ? "receivable" : "payable"} invoices yet.`
               : `No ${filterLabel?.toLowerCase()} invoices in this ledger.`}
           </p>
-          {allOfKind.length > 0 && statusFilter && (
-            <Button size="sm" variant="outline" className="gap-2" onClick={() => setFilter("")}>
+          {allOfKind.length > 0 && filters.paymentState && (
+            <Button size="sm" variant="outline" className="gap-2" onClick={() => setFilter("paymentState", "")}>
               <FilterX className="w-3.5 h-3.5" /> Clear filter
             </Button>
           )}
@@ -178,7 +179,7 @@ const FinanceListPage = () => {
           onSubmit={(reason) => act(() => voidInvoice(dialog.invoiceId, reason), "Invoice voided")} />
       )}
       {dialog?.kind === "create" && (
-        <CreateInvoiceDialog busy={busy} shipments={shipments} vendors={vendors} defaultKind={kindFilter}
+        <CreateInvoiceDialog busy={busy} shipments={shipments} vendors={vendors} defaultKind={filters.kind}
           onClose={() => setDialog(null)}
           onSubmit={(payload) => act(() => createInvoice(payload), "Invoice drafted")} />
       )}

@@ -4,8 +4,10 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { composeOtdPath, composeStepActions, departmentsOnPath } from "../../utils/composition.js";
 import {
   allowedCroModes,
+  allowedLcModes,
   CRO_HANDLING_LABELS,
   inferPackageFromServices,
+  LC_HANDLING_LABELS,
   PACKAGE_SERVICES,
   packageUsesDeliveryAddress,
   packageUsesDestinationPort,
@@ -13,6 +15,7 @@ import {
   packageUsesPickupAddress,
   packageUsesPorts,
   resolveCroMode,
+  resolveLcMode,
   resolveServices,
   SERVICE_PACKAGE_DESCRIPTIONS,
   SERVICE_PACKAGE_LABELS,
@@ -52,7 +55,7 @@ export const getReference = catchAsync(async (req, res) => {
   res.json({ success: true, data: { ports, containerTypes } });
 });
 
-/* ── POST /api/services/compose  { servicePackage, croHandledBy?, services? } ── */
+/* ── POST /api/services/compose  { servicePackage, croHandledBy?, lcHandledBy?, services? } ── */
 // Previews the OTD path a shipment with this package would run — the same composition
 // it gets at quote approval. Powers the "your shipment will run N steps" preview on the
 // enquiry form, so the customer sees what they are buying before they commit.
@@ -63,12 +66,18 @@ export const composePreview = catchAsync(async (req, res, next) => {
   }
 
   // Accepts a package (the modern shape) or a bare service list (older callers), for
-  // which a package is inferred rather than composing a half-path.
+  // which a package is inferred rather than composing a half-path. The LC mode resolves
+  // before the services because consort mode sells lc_finance (ADR-050).
   const servicePackage = req.body.servicePackage ?? inferPackageFromServices(req.body.services ?? []);
   const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: req.body.croHandledBy });
-  const services = resolveServices({ servicePackage, services: req.body.services });
+  const lcHandledBy = resolveLcMode({
+    servicePackage,
+    lcHandledBy: req.body.lcHandledBy,
+    services: req.body.services,
+  });
+  const services = resolveServices({ servicePackage, services: req.body.services, lcHandledBy });
 
-  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy });
+  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy, lcHandledBy });
 
   // Fold each step's checklist into the preview. Without this the preview would
   // under-report badly: `order_confirmed` keeps its document pack in sub-actions, so its
@@ -76,7 +85,7 @@ export const composePreview = catchAsync(async (req, res, next) => {
   // all for the step that asks for the most (ADR-048).
   const actionTemplates = await prisma.otdStepActionTemplate.findMany();
   const steps = path.map((s) => {
-    const actions = composeStepActions(actionTemplates, s.stepCode, { services, servicePackage, croHandledBy });
+    const actions = composeStepActions(actionTemplates, s.stepCode, { services, servicePackage, croHandledBy, lcHandledBy });
     return {
       ...s,
       actions,
@@ -92,6 +101,8 @@ export const composePreview = catchAsync(async (req, res, next) => {
       servicePackage,
       servicePackageLabel: SERVICE_PACKAGE_LABELS[servicePackage],
       croHandledBy,
+      lcHandledBy,
+      lcHandledByLabel: LC_HANDLING_LABELS[lcHandledBy],
       services,
       steps,
       stepCount: steps.length,
@@ -112,6 +123,7 @@ export const getPackages = catchAsync(async (req, res) => {
       description: SERVICE_PACKAGE_DESCRIPTIONS[code],
       services: PACKAGE_SERVICES[code],
       croModes: allowedCroModes(code).map((m) => ({ code: m, label: CRO_HANDLING_LABELS[m] })),
+      lcModes: allowedLcModes(code).map((m) => ({ code: m, label: LC_HANDLING_LABELS[m] })), // ADR-050
       usesPorts: packageUsesPorts(code),
       usesDestinationPort: packageUsesDestinationPort(code),
       // Which door fields the intake form should ask for. port_to_consignee is the

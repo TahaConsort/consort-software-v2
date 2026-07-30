@@ -270,6 +270,12 @@ export const setSchedule = catchAsync(async (req, res, next) => {
       resourceId: shipment.id,
       diff: { etd: data.etd ?? shipment.etd, eta: data.eta ?? shipment.eta },
     });
+    await emitShipmentEvent(tx, "shipment.scheduled", {
+      shipmentId: shipment.id,
+      customerId: shipment.customerId ?? null,
+      etd: u.etd,
+      eta: u.eta,
+    });
     return u;
   });
 

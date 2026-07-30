@@ -1,25 +1,44 @@
-import { create } from "zustand";
 import * as queryService from "@/services/queryService";
+import { createResourceStore } from "@/lib/createResourceStore";
+import { TOPICS } from "@/lib/topics";
 
-/** Query store (CRM_MASTER §5.6) — list + status filter. */
-export const useQueryStore = create((set, get) => ({
-  queries: [],
-  loading: false,
-  error: null,
-  statusFilter: "",
+/**
+ * Query store (CRM_MASTER §5.6) — the Ops intake queue, with a status filter.
+ *
+ * Queries are born in three places besides this screen — inquiry conversion, LC-referral
+ * conversion, and the customer portal — and none of them could reach this list before,
+ * so new work simply did not appear until someone reloaded. They all publish `queries`
+ * now, and so does quotation approval, which moves a query to `quoted`/`won`.
+ */
+export const useQueryStore = createResourceStore({
+  name: "queries",
+  topics: [TOPICS.QUERIES],
 
-  setStatusFilter: (status) => {
-    set({ statusFilter: status });
-    get().fetchQueries();
+  state: { queries: [] },
+  filters: { status: "" },
+
+  load: async ({ filters }) => {
+    const res = await queryService.listQueries(filters.status || undefined);
+    return { queries: res.data ?? [] };
   },
 
-  fetchQueries: async () => {
-    set({ loading: true, error: null });
-    try {
-      const res = await queryService.listQueries(get().statusFilter || undefined);
-      set({ queries: res.data ?? [], loading: false });
-    } catch (err) {
-      set({ error: err?.message || "Failed to fetch queries", loading: false });
-    }
-  },
-}));
+  actions: ({ get, mutate }) => ({
+    fetchQueries: () => get().fetch(),
+
+    createQuery: (payload) =>
+      mutate(() => queryService.createQuery(payload), {
+        invalidates: [TOPICS.QUERIES, TOPICS.DASHBOARD],
+      }),
+
+    updateQuery: (id, payload) =>
+      mutate(() => queryService.updateQuery(id, payload), {
+        invalidates: [TOPICS.QUERIES, TOPICS.DASHBOARD],
+      }),
+
+    cancelQuery: (id, reason) =>
+      mutate(() => queryService.cancelQuery(id, reason), {
+        // Cancelling a query invalidates any quotation raised from it.
+        invalidates: [TOPICS.QUERIES, TOPICS.QUOTATIONS, TOPICS.DASHBOARD],
+      }),
+  }),
+});

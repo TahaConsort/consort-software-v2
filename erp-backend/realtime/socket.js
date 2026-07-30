@@ -10,6 +10,25 @@ import {
 } from "../modules/chat/chat.service.js";
 
 /**
+ * May this socket listen to a shipment's invalidation hints?
+ *
+ * Mirrors the REST scope rule: a customer sees only their own shipments, and internal
+ * staff see all of them. Kept local rather than imported from the shipment module because
+ * that scope check hangs off an Express `req`, and duplicating one findUnique is cheaper
+ * than reshaping it.
+ */
+const canSeeShipment = async (user, shipmentId) => {
+  if (!shipmentId) return false;
+  if (user.role !== "customer") return true;
+  if (!user.customerId) return false;
+  const shipment = await prisma.shipment.findUnique({
+    where: { id: shipmentId },
+    select: { customerId: true },
+  });
+  return shipment?.customerId === user.customerId;
+};
+
+/**
  * Socket.IO gateway (ADR-007, WORKFLOW §7) — inter-department real-time.
  *
  * Rooms are assigned SERVER-SIDE from the verified token (user:{id}, role:{role},
@@ -92,9 +111,13 @@ export const initSocket = async (httpServer) => {
         if (type === "channel" && (await isMember(id, user.id))) {
           socket.join(`channel:${id}`);
           socket.emit("room:joined", { type, id });
-        } else if (type === "shipment") {
-          // Shipment rooms are broadcast-only invalidation hints; membership is
-          // re-checked on the REST fetch that follows, so joining is permissive.
+        } else if (type === "shipment" && (await canSeeShipment(user, id))) {
+          // Scope-checked with the same predicate the REST layer uses. This used to admit
+          // ANY authenticated socket to shipment:{any-uuid}, justified as "broadcast-only
+          // hints, re-checked on the REST fetch". That reasoning does not hold: the
+          // payloads are not bare ids — `shipment:stepCompleted` carries stepCode,
+          // displayNo and newStatus — so a joiner who obtained a shipment id learned a
+          // competitor's live operational progress without ever passing a scope check.
           socket.join(`shipment:${id}`);
           socket.emit("room:joined", { type, id });
         } else if (type === "customer" && user.customerId === id) {
@@ -110,8 +133,13 @@ export const initSocket = async (httpServer) => {
       }
     });
 
+    // Only the rooms a client is allowed to ASK for can be left. Unrestricted string
+    // interpolation let a client leave its own server-assigned `user:{id}` room and quietly
+    // opt out of notification delivery.
     socket.on("room:leave", ({ type, id } = {}) => {
-      if (type && id) socket.leave(`${type}:${id}`);
+      if (!type || !id) return;
+      if (!["channel", "shipment", "customer"].includes(type)) return;
+      socket.leave(`${type}:${id}`);
     });
 
     // chat:send over the socket — persists + broadcasts via the same path as REST.

@@ -375,4 +375,51 @@ Consequences:
 
 ---
 
-*ADR-001 through ADR-039 codify the resolutions the other documents already cite; ADR-040 through ADR-045 record the service-driven business logic (service catalog, composed OTD template, acquisition channels, Visit Plans, `cfo`, deactivate-and-reassign); ADR-046/047 layer the sold service packages above that catalog and scope the customer's inbound upload; ADR-048 adds the sub-action checklist beneath a step; ADR-049 adds the import delivery leg as a fourth package.*
+## ADR-050 — LC management is a per-shipment dimension beside the CRO, not a service
+
+**Status:** Accepted.
+
+**Context.** The business asks, on both export packages (Loading Point → Port and International), *who manages the Letter of Credit* — the customer runs it with their bank and we only collect a copy, or Consort manages it end-to-end. The existing machinery could not say this: `lc_finance` (ADR-041) expresses that we SELL the LC legwork, and it was auto-injected only for bank-LC-sourced customers (RULE-SVC-04). "Customer runs their own LC but we still need the copy on file" had no representation at all, and "no LC on this trade" was indistinguishable from "nobody asked".
+
+**Decision.** A new `LcHandling` enum (`not_applicable`, `customer`, `consort`) mirrors `CroHandling`: `lc_handled_by` lands on Query → Quotation → Shipment (snapshotted forward, frozen at approval, INV-14), and both template tables gain an `lc_modes LcHandling[]` gate, evaluated package → CRO → **LC** → service. Unlike the CRO, `not_applicable` stays selectable on the export packages — open-account exports are real — so the CHECK constraints (`*_lc_mode_valid`) only force `not_applicable` on the two non-export packages.
+
+The load-bearing subtlety: **the Consort-managed steps are NOT lc-modes-gated.** `lc_generated` (30) and `bol_submitted` (130) keep their original `lc_finance` service gate, and `consort` mode simply sells that service (`resolveServices` unions `lc_finance` when `lcHandledBy = "consort"`). Only the new row 35, `lc_received_from_customer` (compliance, `packages` both export, `lcModes ["customer"]`, requires the `lc` doc, derives `lc_generated`), carries the new gate. Gating 30/130 on `lcModes ["consort"]` — the obvious symmetric design — would have broken the one guarantee this migration made: a bank-LC customer's `local_transport` job carries `lc_finance` (RULE-SVC-04 injects it on every package) and composed 30/130 through the service gate alone; an lc-modes gate would have silently dropped those steps, since a non-export package can never hold `consort`. The compose-matrix snapshot (scripts/composeMatrixSnapshot.js) proves every pre-ADR-050 selection reproduces byte-for-byte.
+
+`resolveLcMode` (utils/servicePackage.js) normalises the column the way `resolveCroMode` does, plus two defaults that keep it truthful: a bank-LC customer reads `consort` unless they explicitly chose `customer`, and a row whose frozen `services` already carry `lc_finance` reads `consort` — before this dimension existed, selling `lc_finance` was the only way to say "Consort runs the LC". Composition does not depend on either coercion; they exist so the badge on a legacy shipment says what is actually happening.
+
+The International package also gains an explicit **Downstream toggle** at intake (internal form + portal wizard): it unions `destination_services`, composing the destination-agent steps (150/160/180) exactly as an Ops add-on always has. No schema, no new gate — a UI affordance over ADR-040 machinery.
+
+**Consequences.**
+- Row 35 joins `OUT_OF_ORDER_PAIRS` with `vessel_booked`, same as row 30 — chasing the customer's LC copy and booking the vessel run in parallel.
+- Customer-managed LC pulls **Compliance** onto the LP→Port path (someone must vet the LC terms) — a deliberate ownership choice, flagged for UAT.
+- The `lc` docType becomes customer-uploadable, and the upload controller mirrors the CRO-mode check: a portal customer may hand in an `lc` only when `lc_handled_by = "customer"` (extends ADR-047 gate 2).
+- A bank-LC customer explicitly choosing `customer` suppresses the RULE-SVC-04 `lc_finance` injection — we are not selling LC legwork on a trade the customer is running.
+
+**Forbids.** Gating `lc_generated`/`bol_submitted` on `lc_modes`; a fourth way to spell the LC vocabulary (it lives in `utils/servicePackage.js`); asking the LC question on `local_transport` or `port_to_consignee`.
+
+---
+
+## ADR-051 — The step and document catalog is admin-managed; step codes are strings
+
+**Status:** Accepted.
+
+**Context.** ADR-040/046/048 made composition fully data-driven, but the DATA was developer-only: the catalog was writable solely by `prisma/seed.js`, `OtdStepCode` was a Prisma enum (a brand-new step meant a schema change), the docType vocabulary was a Zod list mirrored by hand in the frontend, and step hints were a hardcoded frontend map. The business needs non-developers to add, gate, re-order, deactivate and document steps per service package.
+
+**Decision.** Four moves, one principle — the catalog becomes data all the way down:
+
+1. **`OtdStepCode` enum → `text`** on all five columns (`otd_step_templates.step_code`, `otd_step_action_templates.step_code`, `otd_steps.step_code`, `task_templates.step_code`, `charge_types.default_step_code`), one transaction (`prisma/sql/2026-07-step-code-to-text.sql`) that drops the template FK, converts both sides, re-adds it, and drops the type. Format is guarded by `otd_step_templates_code_format` (`^[a-z][a-z0-9_]{1,49}$`) and the workflow module's Zod. `ShipmentStatus`, `DepartmentCode`, `ServiceCode`, `ServicePackage`, `CroHandling`, `LcHandling` stay enums — they are code-coupled (locking, scoping, gating, UI routing); admin-created steps pick from them.
+2. **`document_types` table** replaces the Zod `DOC_TYPES` closed list and the `CUSTOMER_UPLOADABLE_DOC_TYPES` allowlist (its `customer_uploadable` flag). Uploads validate against ACTIVE rows via a 60s-TTL cache (`docTypes.cache.js`, invalidated on admin writes); the frontend hydrates the vocabulary from `GET /api/documents/types` (static maps remain as pre-hydration fallback only).
+3. **`modules/workflow/`** (`/api/workflow`, Management + `workflow.manage`): CRUD over steps, whole-checklist replacement, doc-type CRUD, `/meta` for admin selects, `/validate` composing every package × CRO × LC combo and reporting empty paths, paths that never derive `delivered`, dangling docTypes, and never-composed steps. Every mutation audits. Guardrails: `step_code` is **immutable** (historical `otd_steps` resolve by code forever); a step referenced by any shipment or charge type **deactivates, never deletes** (409); the step's `otd.step` TaskTemplate is upserted **in the same transaction** as every step write, via `utils/taskTemplates.js` — one derivation shared with the seed, so the Action Engine can always chain the task (RULE-AE-07). `otd_step_templates` gains `hint` (the old frontend STEP_HINTS map, now served with hydrated steps so admin-created steps carry their own guidance).
+4. **The seed is demoted to factory settings.** `--templates-only` now refuses without `--factory-reset`, because a reseed REPLACES a catalog that admins may have curated. Document types are upserted, never deleted — admin-added types survive even a factory reset.
+
+**Consequences.**
+- Template edits shape **new shipments only** (INV-14) — stated in the admin UI banner and in every mutation's response message.
+- **Rollback window:** the enum can be recreated only while every stored code is one of the 28 legacy labels — i.e. until the first admin-created step. The reverse SQL is documented in the migration file's header.
+- Composition, status recompute and the doc gate needed **zero changes** for this ADR — they always read the tables; only the write path was frozen.
+- `GET /api/services/compose` remains the one preview surface; the admin panel's Preview tab drives it with package/CRO/LC pickers.
+
+**Forbids.** Renaming a step code; hard-deleting a used step or a referenced doc type; writing task templates for steps anywhere but `deriveTaskTemplateData`; a reseed that silently clobbers admin edits; re-introducing a hardcoded docType or step list in either codebase.
+
+---
+
+*ADR-001 through ADR-039 codify the resolutions the other documents already cite; ADR-040 through ADR-045 record the service-driven business logic (service catalog, composed OTD template, acquisition channels, Visit Plans, `cfo`, deactivate-and-reassign); ADR-046/047 layer the sold service packages above that catalog and scope the customer's inbound upload; ADR-048 adds the sub-action checklist beneath a step; ADR-049 adds the import delivery leg as a fourth package; ADR-050 adds the LC-management dimension beside the CRO; ADR-051 hands the whole catalog to the Workflow admin panel.*

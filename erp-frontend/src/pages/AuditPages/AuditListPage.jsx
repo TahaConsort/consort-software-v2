@@ -14,16 +14,15 @@ const ANY = "__any__";
  * action and date; expand a row to see the field-level diff (INV-15).
  */
 const AuditListPage = () => {
-  const { logs, meta, facets, filters, loading, error, setFilter, fetch, fetchFacets } = useAuditStore();
+  const { logs, meta, facets, filters, loading, error, setFilter, clearFilters, fetch, fetchFacets } = useAuditStore();
   const [expanded, setExpanded] = useState(null);
 
   useEffect(() => { fetchFacets(); fetch(1); }, [fetchFacets, fetch]);
 
   const apply = () => fetch(1);
-  const clear = () => {
-    ["resourceType", "action", "actorId", "from", "to"].forEach((k) => setFilter(k, ""));
-    setTimeout(() => fetch(1), 0);
-  };
+  // clearFilters resets the whole set and reads once. The previous version set five
+  // filters individually and then used a setTimeout(…, 0) to read after they had landed.
+  const clear = () => clearFilters();
 
   return (
     <div className="space-y-6">

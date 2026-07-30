@@ -9,7 +9,7 @@ import {
   isPermittedOutOfOrder,
   OTC_MILESTONES,
 } from "../../utils/composition.js";
-import { inferPackageFromServices, resolveCroMode } from "../../utils/servicePackage.js";
+import { inferPackageFromServices, resolveCroMode, resolveLcMode } from "../../utils/servicePackage.js";
 import { missingRequiredDocs } from "../document/document.service.js";
 import { docTypeLabel } from "../document/document.validation.js";
 import { renderQuotationPdf } from "../../utils/quotationPdf.js";
@@ -61,13 +61,17 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
   const services = quotation.services;
   const servicePackage = quotation.servicePackage ?? inferPackageFromServices(services);
   const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: quotation.croHandledBy });
+  // A quotation sent before ADR-050 has lcHandledBy at its column default; the resolver
+  // reads `lc_finance` in its frozen services as "Consort runs the LC" so the label
+  // matches the steps that compose.
+  const lcHandledBy = resolveLcMode({ servicePackage, lcHandledBy: quotation.lcHandledBy, services });
 
   // Compose the OTD path from the seeded templates (single source — ADR-001).
   const templates = await tx.otdStepTemplate.findMany();
   if (templates.length === 0) {
     throw new Error("OTD step templates are not seeded — run `node prisma/seed.js` before approving quotes.");
   }
-  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy });
+  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy, lcHandledBy });
 
   // quotation → approved (RULE-QT-07); query → shipment_created.
   await tx.quotation.update({
@@ -93,6 +97,7 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       services,
       servicePackage,
       croHandledBy,
+      lcHandledBy,
       status: "booking",
       originPort: query.originPort ?? null,
       destinationPort: query.destinationPort ?? null,
@@ -121,7 +126,7 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
   const stepRows = await tx.otdStep.findMany({ where: { shipmentId: shipment.id }, select: { id: true, stepCode: true } });
   const actionTemplates = await tx.otdStepActionTemplate.findMany();
   const actionData = stepRows.flatMap((row) =>
-    composeStepActions(actionTemplates, row.stepCode, { services, servicePackage, croHandledBy })
+    composeStepActions(actionTemplates, row.stepCode, { services, servicePackage, croHandledBy, lcHandledBy })
       .map((a) => ({ otdStepId: row.id, ...a })),
   );
   if (actionData.length) await tx.otdStepAction.createMany({ data: actionData });
@@ -419,7 +424,7 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
  */
 export const withStepActions = async (client, shipmentId, steps) => {
   if (!steps.length) return steps;
-  const [actions, docs] = await Promise.all([
+  const [actions, docs, templates] = await Promise.all([
     client.otdStepAction.findMany({
       where: { otdStepId: { in: steps.map((s) => s.id) } },
       orderBy: { sortOrder: "asc" },
@@ -428,8 +433,20 @@ export const withStepActions = async (client, shipmentId, steps) => {
       where: { ownerType: "shipment", ownerId: shipmentId, deletedAt: null },
       select: { docType: true, id: true, fileName: true },
     }),
+    // OtdStep persists neither title nor hint — both resolve from the template by
+    // stepCode at read time (ADR-051), so admin edits show on every shipment view.
+    client.otdStepTemplate.findMany({
+      where: { stepCode: { in: [...new Set(steps.map((s) => s.stepCode))] } },
+      select: { stepCode: true, title: true, hint: true },
+    }),
   ]);
-  if (!actions.length) return steps.map((s) => ({ ...s, actions: [], actionSummary: null }));
+  const tplByCode = new Map(templates.map((t) => [t.stepCode, t]));
+  const decorate = (s) => ({
+    ...s,
+    title: tplByCode.get(s.stepCode)?.title ?? null,
+    hint: tplByCode.get(s.stepCode)?.hint ?? null,
+  });
+  if (!actions.length) return steps.map((s) => ({ ...decorate(s), actions: [], actionSummary: null }));
 
   const docByType = new Map();
   for (const d of docs) if (d.docType && !docByType.has(d.docType)) docByType.set(d.docType, d);
@@ -461,7 +478,7 @@ export const withStepActions = async (client, shipmentId, steps) => {
     const list = byStep.get(s.id) ?? [];
     const required = list.filter((a) => a.required);
     return {
-      ...s,
+      ...decorate(s),
       actions: list,
       actionSummary: list.length
         ? { total: list.length, done: list.filter((a) => a.satisfied).length, blocking: required.filter((a) => !a.satisfied).length }

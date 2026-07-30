@@ -91,7 +91,16 @@ api.interceptors.response.use(
       error.message ??
       "";
 
-    return Promise.reject({ message: friendlyError(status, raw), rawMessage: raw, status });
+    // `data` carries the response body through, so a caller can act on structured
+    // detail instead of parsing prose. The optimistic-concurrency handlers use it: a
+    // 412/428 returns the CURRENT rowVersion, which lets the client refetch and retry
+    // once by itself rather than telling the user to reload the page.
+    return Promise.reject({
+      message: friendlyError(status, raw),
+      rawMessage: raw,
+      status,
+      data: error.response?.data ?? null,
+    });
   }
 );
 

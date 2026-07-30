@@ -23,14 +23,17 @@ import {
 } from "@/components/ui/select";
 import toast from "react-hot-toast";
 import { useQueryStore } from "@/store/queryStore";
+import { useQuotationStore } from "@/store/quotationStore";
+// Read-only: DecideQuoteDialog looks up the one live quote for a query. All quotation
+// WRITES go through useQuotationStore so they invalidate the screens they affect.
+import * as quotationService from "@/services/quotationService";
 import { useCustomerStore } from "@/store/customerStore";
 import { useAuthStore } from "@/store/authStore";
-import * as queryService from "@/services/queryService";
-import * as quotationService from "@/services/quotationService";
 import * as serviceCatalogService from "@/services/serviceCatalogService";
 import {
   SERVICE_OPTIONS, labelForService, QUERY_STATUS_LABELS,
   SERVICE_PACKAGE_OPTIONS, PACKAGE_PRESET_SERVICES, CRO_HANDLING_LABELS, CRO_HANDLING_SHORT,
+  LC_HANDLING_LABELS, LC_HANDLING_SHORT, packageHasLcChoice, packageHasDownstreamToggle,
   labelForPackage, packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
   packageUsesDeliveryAddress, packageUsesImportTerms, routeOf, DEFAULT_CURRENCY,
 } from "@/lib/catalog";
@@ -56,7 +59,8 @@ const money = (n, ccy) =>
  * later compose the shipment's OTD path (CRM_MASTER §5.6/§5.6a, ADR-040/041).
  */
 const QueriesListPage = () => {
-  const { queries, loading, error, statusFilter, setStatusFilter, fetchQueries } = useQueryStore();
+  const { queries, loading, error, busy, filters, setFilter, fetchQueries, createQuery, cancelQuery } = useQueryStore();
+  const { createQuotation, sendQuotation, approveQuotation, rejectQuotation } = useQuotationStore();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const location = useLocation();
   const navigate = useNavigate();
@@ -66,12 +70,14 @@ const QueriesListPage = () => {
   const [cancelFor, setCancelFor] = useState(null);
   const [quoteFor, setQuoteFor] = useState(null);
   const [decideFor, setDecideFor] = useState(null);
-  const [busy, setBusy] = useState(false);
 
   useEffect(() => { fetchQueries(); }, [fetchQueries]);
 
+  // The stores own the refetch and the cross-screen invalidation. Approving here creates
+  // a shipment and composes its OTD path (RULE-QT-07), which is why this used to be one of
+  // the worst reload traps in the app: the Quotations list still read `sent` and the
+  // Shipments list had no new shipment.
   const act = async (fn, msg) => {
-    setBusy(true);
     try {
       const res = await fn();
       toast.success(msg || res?.message);
@@ -79,11 +85,8 @@ const QueriesListPage = () => {
       setCancelFor(null);
       setQuoteFor(null);
       setDecideFor(null);
-      fetchQueries();
     } catch (err) {
       toast.error(err?.message || "Couldn't update the query");
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -94,9 +97,9 @@ const QueriesListPage = () => {
    */
   const giveQuote = (payload, alsoSend) =>
     act(async () => {
-      const res = await quotationService.createQuotation(payload);
+      const res = await createQuotation(payload);
       if (!alsoSend) return { message: "Quotation drafted — an Ops Manager sends it to the customer" };
-      await quotationService.sendQuotation(res.data.id);
+      await sendQuotation(res.data.id);
       return { message: `${res.data.referenceNo} sent to the customer` };
     });
 
@@ -115,7 +118,7 @@ const QueriesListPage = () => {
         </div>
 
         <div className="flex items-center gap-2">
-          <Select value={statusFilter || "all"} onValueChange={(v) => setStatusFilter(v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(QUERY_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
+          <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(QUERY_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
             <SelectTrigger className="w-40 h-9"><SelectValue placeholder="Status" /></SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All statuses</SelectItem>
@@ -247,7 +250,7 @@ const QueriesListPage = () => {
           busy={busy}
           presetCustomerId={location.state?.customerId}
           onClose={() => { setAddOpen(false); navigate(location.pathname, { replace: true, state: null }); }}
-          onSubmit={(payload) => act(() => queryService.createQuery(payload), "Query created")}
+          onSubmit={(payload) => act(() => createQuery(payload), "Query created")}
         />
       )}
       {quoteFor && (
@@ -266,12 +269,12 @@ const QueriesListPage = () => {
           onClose={() => setDecideFor(null)}
           onApprove={(quote) =>
             act(
-              () => quotationService.approveQuotation(quote.id, quote.rowVersion),
+              () => approveQuotation(quote.id, quote.rowVersion),
               `Quote ${quote.referenceNo} approved — the shipment is being created`,
             )
           }
           onReject={(quote, reason) =>
-            act(() => quotationService.rejectQuotation(quote.id, reason), "Quote rejected — Ops can revise it")
+            act(() => rejectQuotation(quote.id, reason), "Quote rejected — Ops can revise it")
           }
         />
       )}
@@ -280,7 +283,7 @@ const QueriesListPage = () => {
           busy={busy}
           query={cancelFor}
           onClose={() => setCancelFor(null)}
-          onSubmit={(reason) => act(() => queryService.cancelQuery(cancelFor.id, reason), "Query cancelled")}
+          onSubmit={(reason) => act(() => cancelQuery(cancelFor.id, reason), "Query cancelled")}
         />
       )}
     </div>
@@ -295,6 +298,7 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
     customerId: presetCustomerId ?? "",
     servicePackage: "",
     croHandledBy: "consort",
+    lcHandledBy: "not_applicable",
     // Additive extras ON TOP of the package preset — Ops fine-tune, not the whole set.
     extraServices: [],
     originPort: "",
@@ -329,6 +333,10 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
       ...p,
       servicePackage: code,
       croHandledBy: packageHasCroChoice(code) || code === "international" ? "consort" : "not_applicable",
+      // A bank-LC customer's trade is LC-financed by definition, so default their LC
+      // to Consort-managed (the server coerces the same way — RULE-SVC-04/ADR-050).
+      lcHandledBy:
+        packageHasLcChoice(code) && selectedCustomer?.source === "bank_lc" ? "consort" : "not_applicable",
       // Clear the fields the new package cannot carry.
       ...(code === "local_transport" ? { originPort: "", destinationPort: "", incoterm: "" } : {}),
       ...(code === "loading_point_to_port" ? { destinationPort: "" } : {}),
@@ -355,6 +363,7 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
       customerId: form.customerId,
       servicePackage: pkg,
       croHandledBy: form.croHandledBy,
+      lcHandledBy: packageHasLcChoice(pkg) ? form.lcHandledBy : undefined,
       services: form.extraServices.length ? form.extraServices : undefined,
       originPort: usesPorts ? form.originPort || undefined : undefined,
       destinationPort: needsDestPort ? form.destinationPort || undefined : undefined,
@@ -440,12 +449,68 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
             </div>
           )}
 
-          {/* Additive extras on top of the package preset (ADR-041 catalog) */}
+          {/* LC sub-option (ADR-050) — both export packages ask who manages the LC */}
+          {packageHasLcChoice(pkg) && (
+            <div className="space-y-1.5">
+              <Label>Letter of Credit</Label>
+              <Select value={form.lcHandledBy} onValueChange={(v) => setForm((p) => ({ ...p, lcHandledBy: v }))}
+                items={[
+                  { value: "not_applicable", label: LC_HANDLING_LABELS.not_applicable },
+                  { value: "customer", label: LC_HANDLING_LABELS.customer },
+                  { value: "consort", label: LC_HANDLING_LABELS.consort },
+                ]}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="not_applicable">{LC_HANDLING_LABELS.not_applicable}</SelectItem>
+                  <SelectItem value="customer">{LC_HANDLING_LABELS.customer}</SelectItem>
+                  <SelectItem value="consort">{LC_HANDLING_LABELS.consort}</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                {form.lcHandledBy === "customer"
+                  ? "The customer runs the LC with their bank — we'll chase them for the LC copy."
+                  : form.lcHandledBy === "consort"
+                    ? "We manage the LC end-to-end — LC / Trade Finance is added to the services."
+                    : "Open-account trade — no LC steps will be composed."}
+              </p>
+              {selectedCustomer?.source === "bank_lc" && form.lcHandledBy === "not_applicable" && (
+                <p className="text-xs text-amber-600">
+                  Bank-LC customer — the server will default this to Consort-managed unless the customer provides the LC.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Downstream add-on (ADR-050) — international only: the destination agent's
+              DO / pickup / empty-return leg, driven by the destination_services code */}
+          {packageHasDownstreamToggle(pkg) && (
+            <label className="flex items-start gap-2 text-sm cursor-pointer border rounded-lg p-3">
+              <Checkbox
+                checked={form.extraServices.includes("destination_services")}
+                onCheckedChange={() => toggleService("destination_services")}
+              />
+              <span>
+                Add destination delivery (Downstream)
+                <span className="block text-xs text-muted-foreground font-normal">
+                  Our destination agent obtains the delivery order & gate pass, picks the container up,
+                  delivers to the consignee and returns the empty.
+                </span>
+              </span>
+            </label>
+          )}
+
+          {/* Additive extras on top of the package preset (ADR-041 catalog). The
+              destination add-on has its own toggle above on international, so it is
+              filtered out here rather than rendered twice. */}
           {pkg && (
             <div className="space-y-1.5">
               <Label>Add-on services <span className="text-muted-foreground font-normal">(optional)</span></Label>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 border rounded-lg p-3">
-                {SERVICE_OPTIONS.filter((s) => !presetServices.includes(s.value)).map((s) => (
+                {SERVICE_OPTIONS.filter(
+                  (s) =>
+                    !presetServices.includes(s.value) &&
+                    !(packageHasDownstreamToggle(pkg) && s.value === "destination_services"),
+                ).map((s) => (
                   <label key={s.value} className="flex items-center gap-2 text-sm cursor-pointer">
                     <Checkbox
                       checked={form.extraServices.includes(s.value)}
@@ -667,6 +732,9 @@ const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
               {query.croHandledBy && query.croHandledBy !== "not_applicable" && (
                 <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[query.croHandledBy]}</Badge>
               )}
+              {query.lcHandledBy && query.lcHandledBy !== "not_applicable" && (
+                <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[query.lcHandledBy]}</Badge>
+              )}
               {(query.services ?? []).map((s) => (
                 <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
               ))}
@@ -868,7 +936,7 @@ const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
                     <X className="w-4 h-4" /> Reject
                   </Button>
                   <Button type="button" className="gap-2" disabled={busy || expired} onClick={() => onApprove(quote)}>
-                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Approve
+                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Approve by customer
                   </Button>
                 </>
               ) : (

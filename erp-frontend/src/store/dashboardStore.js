@@ -1,19 +1,31 @@
-import { create } from "zustand";
 import * as dashboardService from "@/services/dashboardService";
+import { createResourceStore } from "@/lib/createResourceStore";
+import { TOPICS } from "@/lib/topics";
 
-/** Dashboard store (§5.17) — the role-aware payload. */
-export const useDashboardStore = create((set) => ({
-  data: null,
-  loading: false,
-  error: null,
+/**
+ * Dashboard store (§5.17) — the role-aware payload.
+ *
+ * One call refreshes an entire screen, and almost every mutation in the app moves a
+ * number on it, so nearly every store publishes `dashboard`. That is only affordable
+ * because of the bus's liveness rule: when nobody is looking at a dashboard the
+ * invalidation is recorded and consumed on next mount instead of issuing a request.
+ *
+ * It also used to raise `loading` on every refetch while leaving `data` in place, and the
+ * customer portal passes `fetchDashboard` as its `onChanged` — so every action a customer
+ * took flashed the whole dashboard back to a skeleton. `refreshing` replaces that.
+ */
+export const useDashboardStore = createResourceStore({
+  name: "dashboard",
+  topics: [TOPICS.DASHBOARD],
 
-  fetchDashboard: async () => {
-    set({ loading: true, error: null });
-    try {
-      const res = await dashboardService.getDashboard();
-      set({ data: res.data ?? null, loading: false });
-    } catch (err) {
-      set({ error: err?.message || "Failed to load dashboard", loading: false });
-    }
+  state: { data: null },
+
+  load: async () => {
+    const res = await dashboardService.getDashboard();
+    return { data: res.data ?? null };
   },
-}));
+
+  actions: ({ get }) => ({
+    fetchDashboard: (opts = {}) => get().fetch(opts),
+  }),
+});

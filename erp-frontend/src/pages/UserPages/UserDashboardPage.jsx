@@ -15,16 +15,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/authStore";
 import { useDashboardStore } from "@/store/dashboardStore";
+import { useQuotationStore } from "@/store/quotationStore";
 import { useTheme } from "@/context/ThemeContext";
 import {
   QUERY_STATUS_LABELS, QUOTATION_STATUS_LABELS,
   paymentStateOf, overdueDaysOf, PAYMENT_STATE_CLASS, DEFAULT_CURRENCY,
-  SERVICE_PACKAGE_OPTIONS, CRO_HANDLING_SHORT, labelForPackage,
+  SERVICE_PACKAGE_OPTIONS, CRO_HANDLING_SHORT, LC_HANDLING_SHORT, labelForPackage,
   packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
+  packageHasLcChoice, packageHasDownstreamToggle,
   packageUsesDeliveryAddress, packageUsesImportTerms, routeOf,
 } from "@/lib/catalog";
 import DocumentsPanel from "@/components/DocumentsPanel";
-import { onSocket, joinRoom } from "@/lib/socket";
+import { joinRoom } from "@/lib/socket";
+import { useTopicRefresh } from "@/lib/useTopicRefresh";
+import { TOPICS } from "@/lib/topics";
 import * as queryService from "@/services/queryService";
 import * as quotationService from "@/services/quotationService";
 import * as financeService from "@/services/financeService";
@@ -44,24 +48,29 @@ const UserDashboardPage = () => {
   const { theme, toggleTheme } = useTheme();
   const { data, loading, fetchDashboard } = useDashboardStore();
   const [tab, setTab] = useState("shipments");
-  const [docShipment, setDocShipment] = useState(null);
+  // An id, not the row object. `allowUpload` and `locked` below are DERIVED from this
+  // shipment, so a frozen snapshot meant that after a background refresh settled the
+  // order the customer still saw an upload form the server would 409.
+  const [docShipmentId, setDocShipmentId] = useState(null);
 
   useEffect(() => { fetchDashboard(); }, [fetchDashboard]);
 
-  // Live tracking: join our customer room; shipment events are refetch hints.
+  // Live tracking: join our customer room. Refreshing is RealtimeBridge's job now — the
+  // relay's `data:changed` carries the topics and the bus routes them, so one step
+  // completion no longer triggers two full dashboard reloads, and the Requests tab (which
+  // the old handlers never touched) refreshes too.
   useEffect(() => {
-    const leave = user?.customerId ? joinRoom("customer", user.customerId) : () => {};
-    const offs = [
-      onSocket("shipment:updated", () => fetchDashboard()),
-      onSocket("shipment:stepCompleted", () => fetchDashboard()),
-    ];
-    return () => { offs.forEach((off) => off()); leave(); };
-  }, [user?.customerId, fetchDashboard]);
+    if (!user?.customerId) return undefined;
+    return joinRoom("customer", user.customerId);
+  }, [user?.customerId]);
 
   const handleLogout = () => { useAuthStore.getState().logout(); navigate("/"); };
 
   const k = data?.kind === "customer" ? data.kpis : null;
   const shipments = data?.kind === "customer" ? data.shipments : [];
+  // Resolved from the live list every render, so the documents dialog's upload gate and
+  // lock state follow the shipment rather than a snapshot taken when it opened.
+  const docShipment = shipments.find((s) => s.id === docShipmentId) ?? null;
 
   const TABS = [
     { key: "shipments", label: "Shipments", icon: Ship },
@@ -127,7 +136,7 @@ const UserDashboardPage = () => {
                 {shipments.length === 0 && (
                   <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-8 text-center text-muted-foreground text-sm">No shipments yet.</div>
                 )}
-                {shipments.map((s) => <ShipmentCard key={s.id} shipment={s} onDocuments={() => setDocShipment(s)} />)}
+                {shipments.map((s) => <ShipmentCard key={s.id} shipment={s} onDocuments={() => setDocShipmentId(s.id)} />)}
               </div>
             )}
 
@@ -137,17 +146,22 @@ const UserDashboardPage = () => {
         )}
       </main>
 
-      <Dialog open={!!docShipment} onOpenChange={(v) => !v && setDocShipment(null)}>
+      <Dialog open={!!docShipment} onOpenChange={(v) => !v && setDocShipmentId(null)}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader><DialogTitle>Documents · {docShipment?.referenceNo}</DialogTitle></DialogHeader>
           {docShipment && (
             <DocumentsPanel
+              // A customer uploading their own CRO changes what the shipment is waiting on, so
+              // the cards behind this dialog have to re-read. documentStore publishes
+              // `shipment:{id}`, which no portal store owns — hence an explicit callback.
+              onChanged={() => fetchDashboard({ background: true })}
               ownerType="shipment"
               ownerId={docShipment.id}
               portal
-              // A customer supplying their own CRO has to be able to hand it over. The
-              // server still enforces the docType allowlist and the CRO-mode check.
-              allowUpload={docShipment.croHandledBy === "customer"}
+              // A customer supplying their own CRO — or their own LC (ADR-050) — has to
+              // be able to hand it over. The server still enforces the docType allowlist
+              // and the CRO-mode check.
+              allowUpload={docShipment.croHandledBy === "customer" || docShipment.lcHandledBy === "customer"}
               locked={["settled", "closed"].includes(docShipment.status) || docShipment.exceptionState === "cancelled"}
             />
           )}
@@ -176,6 +190,10 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
   const awaitingCro =
     s.croHandledBy === "customer" &&
     (s.otdSteps ?? []).some((st) => st.stepCode === "cro_received_from_customer" && st.status !== "done");
+  // Same chase for a customer-managed LC (ADR-050).
+  const awaitingLc =
+    s.lcHandledBy === "customer" &&
+    (s.otdSteps ?? []).some((st) => st.stepCode === "lc_received_from_customer" && st.status !== "done");
 
   return (
     <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4 space-y-3">
@@ -195,6 +213,9 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
             {s.croHandledBy && s.croHandledBy !== "not_applicable" && (
               <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[s.croHandledBy]}</Badge>
             )}
+            {s.lcHandledBy && s.lcHandledBy !== "not_applicable" && (
+              <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[s.lcHandledBy]}</Badge>
+            )}
           </div>
         </div>
         <Button size="sm" variant="ghost" className="h-8 text-xs gap-1 shrink-0" onClick={onDocuments}>
@@ -210,6 +231,18 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
           </p>
           <Button size="sm" variant="outline" className="h-7 text-xs gap-1 mt-2" onClick={onDocuments}>
             <FileText className="w-3.5 h-3.5" /> Upload CRO
+          </Button>
+        </div>
+      )}
+
+      {awaitingLc && (
+        <div className="border rounded-md p-2.5 bg-amber-50 dark:bg-amber-950/30 border-amber-300 dark:border-amber-800">
+          <p className="text-xs text-amber-800 dark:text-amber-200">
+            <span className="font-medium">We're waiting on your LC copy.</span> Upload the Letter of Credit so our
+            compliance team can review the trade terms.
+          </p>
+          <Button size="sm" variant="outline" className="h-7 text-xs gap-1 mt-2" onClick={onDocuments}>
+            <FileText className="w-3.5 h-3.5" /> Upload LC
           </Button>
         </div>
       )}
@@ -263,6 +296,10 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
 
 /* ── Requests: queries + their quotations, raise new, approve/reject ── */
 const RequestsTab = ({ onChanged }) => {
+  // Quotation writes go through the store so they publish the topics that wake the rest of
+  // the portal — and so approve gets the store's stale-rowVersion self-heal instead of
+  // telling the customer to reload.
+  const { approveQuotation, rejectQuotation } = useQuotationStore();
   const [queries, setQueries] = useState([]);
   const [quotesByQuery, setQuotesByQuery] = useState({});
   const [loading, setLoading] = useState(true);
@@ -270,10 +307,11 @@ const RequestsTab = ({ onChanged }) => {
   const [showNew, setShowNew] = useState(false);
   const [rejectFor, setRejectFor] = useState(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  const load = useCallback(async ({ isCurrent } = {}) => {
+    const ok = isCurrent ?? (() => true);
     try {
       const [qs, quotes] = await Promise.all([queryService.listQueries(), quotationService.listQuotations()]);
+      if (!ok()) return;
       setQueries(qs.data ?? []);
       const map = {};
       for (const quote of quotes.data ?? []) {
@@ -281,20 +319,25 @@ const RequestsTab = ({ onChanged }) => {
       }
       setQuotesByQuery(map);
     } catch (err) {
-      toast.error(err?.message || "Failed to load requests");
+      if (ok()) toast.error(err?.message || "Failed to load requests");
     } finally {
-      setLoading(false);
+      if (ok()) setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  // This tab kept its own copy of the queries and quotes, and the page's socket handlers
+  // only ever refreshed the dashboard payload — so a quote arriving live updated the KPI
+  // tiles and the shipment cards while this list stayed stale.
+  const { run: reload } = useTopicRefresh([TOPICS.QUERIES, TOPICS.QUOTATIONS], load);
+
+  useEffect(() => { reload(); }, [reload]);
 
   const act = async (fn, msg) => {
     setBusy(true);
     try {
       const res = await fn();
       toast.success(msg || res?.message);
-      await load();
+      await reload();
       onChanged?.();
       setRejectFor(null);
     } catch (err) {
@@ -350,7 +393,7 @@ const RequestsTab = ({ onChanged }) => {
                   {quote.status === "sent" && (
                     <div className="flex items-center gap-2">
                       <Button size="sm" className="h-8 text-xs gap-1" disabled={busy}
-                        onClick={() => act(() => quotationService.approveQuotation(quote.id, quote.rowVersion), "Quote approved — your shipment is being set up")}>
+                        onClick={() => act(() => approveQuotation(quote.id, quote.rowVersion), "Quote approved — your shipment is being set up")}>
                         <Check className="w-3.5 h-3.5" /> Approve
                       </Button>
                       <Button size="sm" variant="outline" className="h-8 text-xs gap-1 text-destructive" disabled={busy}
@@ -366,10 +409,10 @@ const RequestsTab = ({ onChanged }) => {
         })}
       </div>
 
-      {showNew && <NewQueryDialog onClose={() => setShowNew(false)} onCreated={() => { load(); onChanged?.(); }} />}
+      {showNew && <NewQueryDialog onClose={() => setShowNew(false)} onCreated={() => { reload(); onChanged?.(); }} />}
       {rejectFor && (
         <RejectDialog busy={busy} onClose={() => setRejectFor(null)}
-          onSubmit={(reason) => act(() => quotationService.rejectQuotation(rejectFor.id, reason), "Quote rejected")} />
+          onSubmit={(reason) => act(() => rejectQuotation(rejectFor.id, reason), "Quote rejected")} />
       )}
     </div>
   );
@@ -406,6 +449,8 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
   const [step, setStep] = useState(1); // 1 = pick a package, 2 = details
   const [servicePackage, setServicePackage] = useState(null);
   const [croHandledBy, setCroHandledBy] = useState("consort");
+  const [lcHandledBy, setLcHandledBy] = useState("not_applicable"); // ADR-050
+  const [includeDownstream, setIncludeDownstream] = useState(false); // international add-on
   const [ref, setRef] = useState({ ports: [], containerTypes: [] });
   const [form, setForm] = useState({
     originPort: "", destinationPort: "", pickupAddress: "", deliveryAddress: "",
@@ -419,17 +464,22 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
     serviceCatalogService.getReference().then((res) => setRef(res.data ?? { ports: [], containerTypes: [] })).catch(() => {});
   }, []);
 
-  // Preview the composed path for the current package + CRO choice. This is what makes
-  // the package concrete: "your shipment will run 8 steps", listed.
+  // Preview the composed path for the current package + CRO/LC choices and add-ons.
+  // This is what makes the package concrete: "your shipment will run 8 steps", listed.
   useEffect(() => {
     if (!servicePackage) return undefined;
     let alive = true;
     serviceCatalogService
-      .composeServices({ servicePackage, croHandledBy })
+      .composeServices({
+        servicePackage,
+        croHandledBy,
+        lcHandledBy,
+        services: includeDownstream ? ["destination_services"] : undefined,
+      })
       .then((res) => { if (alive) setPreview(res.data ?? null); })
       .catch(() => { if (alive) setPreview(null); });
     return () => { alive = false; };
-  }, [servicePackage, croHandledBy]);
+  }, [servicePackage, croHandledBy, lcHandledBy, includeDownstream]);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -439,6 +489,9 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
     // has no container and import delivery has one the line already released, so neither
     // has a CRO at all.
     setCroHandledBy(packageHasCroChoice(code) || code === "international" ? "consort" : "not_applicable");
+    // Both export packages ask the LC question fresh (ADR-050); the add-on is intl-only.
+    setLcHandledBy("not_applicable");
+    setIncludeDownstream(false);
   };
 
   const usesPorts = packageUsesPorts(servicePackage);
@@ -453,6 +506,8 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
       await queryService.createQuery({
         servicePackage,
         croHandledBy,
+        lcHandledBy: packageHasLcChoice(servicePackage) ? lcHandledBy : undefined,
+        services: includeDownstream ? ["destination_services"] : undefined,
         // A local job travels between two addresses, an import delivery from a port to
         // an address, an export job between port codes.
         originPort: usesPorts ? form.originPort || undefined : undefined,
@@ -543,6 +598,55 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
                   </label>
                 ))}
               </div>
+            )}
+
+            {/* LC question (ADR-050) — both export packages. Customer language: is this
+                trade paid under a Letter of Credit, and if so, who runs it? */}
+            {packageHasLcChoice(servicePackage) && (
+              <div className="border rounded-lg p-3 space-y-2 bg-muted/30">
+                <Label className="text-sm">Letter of Credit (LC)</Label>
+                <p className="text-xs text-muted-foreground">
+                  Is this trade paid under a Letter of Credit with your buyer's bank?
+                </p>
+                {[
+                  { mode: "not_applicable", title: "No LC on this trade", hint: "Open-account / direct payment — no bank paperwork from our side." },
+                  { mode: "customer", title: "I have the LC — I'll send a copy", hint: "You run the LC with your bank; we'll ask you to upload the LC copy." },
+                  { mode: "consort", title: "Consort should manage the LC", hint: "We handle the SWIFT/LC advice and the bank document submission for you." },
+                ].map(({ mode, title, hint }) => (
+                  <label key={mode} className="flex items-start gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="lcHandledBy"
+                      className="mt-1"
+                      checked={lcHandledBy === mode}
+                      onChange={() => setLcHandledBy(mode)}
+                    />
+                    <span>
+                      {title}
+                      <span className="block text-xs text-muted-foreground">{hint}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {/* Destination delivery add-on — international only (ADR-050). */}
+            {packageHasDownstreamToggle(servicePackage) && (
+              <label className="flex items-start gap-2 text-sm cursor-pointer border rounded-lg p-3 bg-muted/30">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={includeDownstream}
+                  onChange={(e) => setIncludeDownstream(e.target.checked)}
+                />
+                <span>
+                  Also deliver to the consignee at destination
+                  <span className="block text-xs text-muted-foreground">
+                    Our destination agent collects the container at the arrival port, delivers it and
+                    returns the empty — otherwise the job ends at the destination port.
+                  </span>
+                </span>
+              </label>
             )}
 
             {preview && (

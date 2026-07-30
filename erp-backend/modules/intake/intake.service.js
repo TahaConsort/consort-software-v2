@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { allocateRef } from "../../utils/referenceNumber.js";
-import { inferPackageFromServices, resolveCroMode, resolveServices } from "../../utils/servicePackage.js";
+import { inferPackageFromServices, resolveCroMode, resolveLcMode, resolveServices } from "../../utils/servicePackage.js";
 
 /**
  * Shared intake materialisation (CRM_MASTER §5.20/§5.21). Both the *direct*
@@ -132,7 +132,9 @@ export const materializeCustomerAndQuery = async (
   //    infer one from them; resolveServices then applies the preset and the
   //    bank_lc ⇒ lc_finance rule (RULE-SVC-04).
   const servicePackage = inferPackageFromServices(services ?? []);
-  const finalServices = resolveServices({ servicePackage, services, customerSource: source });
+  // A bank-LC referral defaults to Consort managing the LC (ADR-050 / RULE-SVC-04).
+  const lcHandledBy = resolveLcMode({ servicePackage, customerSource: source });
+  const finalServices = resolveServices({ servicePackage, services, customerSource: source, lcHandledBy });
   const croHandledBy = resolveCroMode({ servicePackage });
   const refs = await sanitizeRefs(tx, { originPort, destinationPort, containerTypeCode });
   const queryRef = await allocateRef(tx, "query");

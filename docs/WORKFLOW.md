@@ -250,68 +250,76 @@ stateDiagram-v2
 
 The customer chooses **one of four service packages** (ADR-046, ADR-049). The package presets the query's `services ServiceCode[]` set, and on quote approval the shipment is seeded with the **subset of the canonical step catalog the package, CRO mode and service set select** — always in canonical order. This is the mechanism behind "a local order has fewer steps and no customs role."
 
-| Package | Route shape | Presets `services` | CRO sub-option |
-|---|---|---|---|
-| `local_transport` — Local Transport | address → address | `local_transport` | none (`not_applicable`) |
-| `loading_point_to_port` — Loading Point → Port | address → port | `local_transport`, `port_handling` | **`customer` or `consort`** |
-| `international` — International Shipment | port → port | `local_transport`, `port_handling`, `customs_clearance`, `sea_freight` | `consort` |
-| `port_to_consignee` — Port → Consignee (import delivery) | port → address | `local_transport`, `port_handling` | none (`not_applicable`) |
+| Package | Route shape | Presets `services` | CRO sub-option | LC sub-option (ADR-050) |
+|---|---|---|---|---|
+| `local_transport` — Local Transport | address → address | `local_transport` | none (`not_applicable`) | none (`not_applicable`) |
+| `loading_point_to_port` — Loading Point → Port | address → port | `local_transport`, `port_handling` | **`customer` or `consort`** | **`not_applicable`, `customer` or `consort`** |
+| `international` — International Shipment | port → port | `local_transport`, `port_handling`, `customs_clearance`, `sea_freight` | `consort` | **`not_applicable`, `customer` or `consort`** |
+| `port_to_consignee` — Port → Consignee (import delivery) | port → address | `local_transport`, `port_handling` | none (`not_applicable`) | none (`not_applicable`) |
 
-`lc_finance` and `destination_services` are add-ons layered on any package: `lc_finance` is implied when the customer's `source` is Bank LC (§1) and may also be added explicitly; `destination_services` is an Ops per-job addition to an **export** package.
+Both export packages ask **who manages the Letter of Credit** (`lc_handled_by`, ADR-050): `not_applicable` is an open-account trade with no LC steps; `customer` means they run the LC with their bank and we chase the copy (row 35); `consort` means we sell the legwork — which IS the `lc_finance` service, so `resolveServices` unions it and rows 30/130 compose through their unchanged service gate.
+
+`lc_finance` and `destination_services` are add-ons layered on any package: `lc_finance` is implied when the customer's `source` is Bank LC (§1) or when `lc_handled_by = consort`, and may also be added explicitly; `destination_services` is a per-job addition to an **export** package — surfaced on International as the intake form's **"add destination delivery" (Downstream) toggle**.
 
 **Why `port_to_consignee` does not simply reuse the destination-agent steps.** The physical work matches (`destination_do` / `destination_pickup` / `empty_return`), but those are the far end of somebody else's export job — performed by an overseas agent and Operations-owned — whereas this leg runs on our own vehicles and is Transport-owned end to end. The customer also supplies the delivery order and gate pass themselves, so those belong in the `order_confirmed` pack rather than in a step that goes and obtains them. See ADR-049.
 
 `port_to_consignee` is the first package to need **a port code and a street address at the same time**: `origin_port` is the terminal holding the container, `delivery_address` is the consignee. It also carries two terms no other package has — `free_days` (the detention-free window the line granted) and `empty_return_location` (where the empty goes back, often a dry port rather than the terminal it came off).
 
-### 4a.1 Step → package/CRO/service composition
+### 4a.1 Step → package/CRO/LC/service composition
 
-Three gates are evaluated **package → CRO mode → service**, each *empty means don't gate*. `always: true` combined with a non-empty package list reads "always, on these packages". Canonical numbers are spaced by 10 so steps can be inserted without renumbering; the composition logic renumbers to 1..N for display and retains `step_code` and the canonical number for reporting.
+Four gates are evaluated **package → CRO mode → LC mode → service**, each *empty means don't gate*. `always: true` combined with a non-empty package list reads "always, on these packages". Canonical numbers are spaced by 10 so steps can be inserted without renumbering; the composition logic renumbers to 1..N for display and retains `step_code` and the canonical number for reporting.
 
-| # | Step (code) | Owner | Packages | CRO | Service | Required docs |
-|---|---|---|---|---|---|---|
-| 10 | `order_lock` | Operations | **ALWAYS** | — | — | — |
-| 20 | `order_confirmed` (customer doc pack) | Operations | lp→port, intl, port→cons | — | — | *(sub-actions — §4a.2)* |
-| 22 | `transporter_assigned` | Transport | local | — | — | — |
-| 24 | `vehicle_dispatched` | Transport | local | — | — | — |
-| 26 | `goods_loaded` | Transport | local | — | — | proof |
-| 28 | `in_transit` | Transport | local | — | — | — |
-| 30 | `lc_generated` (SWIFT/LC advice) | Compliance | — | — | `lc_finance` | lc |
-| 40 | `vessel_booked` | Operations | — | — | `sea_freight` | — |
-| 50 | `cro_received_from_customer` | Operations | lp→port, intl | **customer** | — | **cro** |
-| 55 | `cro_released` (apply & obtain from line) | Operations | lp→port, intl | **consort** | — | commercial_invoice, packing_list, authority_letterhead, cro |
-| 60 | `empty_container_pickup` (LOLO) | Transport | lp→port, intl | — | `local_transport` | eir_out |
-| 70 | `cargo_pickup` (stuffing) | Transport | lp→port, intl | — | `local_transport` | — |
-| 80 | `inland_transit` | Transport | lp→port, intl | — | `local_transport` | — |
-| 95 | `customs_clearance` | Compliance | — | — | `customs_clearance` | *(sub-actions — §4a.2)* |
-| ~~90~~ | ~~`customs_entry`~~ | *superseded by 95 (ADR-048) — row kept `active: false` so historical shipments still resolve* ||||
-| ~~100~~ | ~~`inspected_sealed`~~ | *superseded by 95 (ADR-048)* ||||
-| 110 | `port_handover` (gate-in) | Operations | lp→port, intl | — | `port_handling` ∨ `sea_freight` | eir_in |
-| 120 | `bol_issued` | Operations | — | — | `sea_freight` | bol |
-| 130 | `bol_submitted` (docs to bank) | Finance | — | — | `lc_finance` | bank_receipt |
-| 140 | `telex_released` | Finance | — | — | `sea_freight` | telex |
-| 150 | `destination_do` | Operations | lp→port, intl | — | `destination_services` | delivery_order, gate_pass |
-| 152 | `import_container_pickup` (off the terminal) | **Transport** | port→cons | — | — | eir_pickup |
-| 160 | `destination_pickup` | Operations | lp→port, intl | — | `destination_services` | eir_pickup |
-| 170 | `delivered` (final delivery / POD) | Operations | intl | — | — | pod |
-| 172 | `local_delivered` (delivered & POD) | **Transport** | local, port→cons | — | — | pod |
-| 175 | `port_job_completed` (handover confirmed) | Operations | lp→port | — | — | — |
-| 178 | `import_empty_return` | **Transport** | port→cons | — | — | eir_empty_return |
-| 180 | `empty_return` | Operations | lp→port, intl | — | `destination_services` | eir_empty_return |
+> Since ADR-051 this table is a **snapshot of the factory catalog** — the live catalog is
+> admin-managed in the Workflow panel (`/admin/workflow`) and may have been extended or
+> re-gated since. `node prisma/seed.js --templates-only --factory-reset` restores exactly
+> this table.
+
+| # | Step (code) | Owner | Packages | CRO | LC | Service | Required docs |
+|---|---|---|---|---|---|---|---|
+| 10 | `order_lock` | Operations | **ALWAYS** | — | — | — | — |
+| 20 | `order_confirmed` (customer doc pack) | Operations | lp→port, intl, port→cons | — | — | — | *(sub-actions — §4a.2)* |
+| 22 | `transporter_assigned` | Transport | local | — | — | — | — |
+| 24 | `vehicle_dispatched` | Transport | local | — | — | — | — |
+| 26 | `goods_loaded` | Transport | local | — | — | — | proof |
+| 28 | `in_transit` | Transport | local | — | — | — | — |
+| 30 | `lc_generated` (SWIFT/LC advice) | Compliance | — | — | — | `lc_finance` | lc |
+| 35 | `lc_received_from_customer` | Compliance | lp→port, intl | — | **customer** | — | **lc** |
+| 40 | `vessel_booked` | Operations | — | — | — | `sea_freight` | — |
+| 50 | `cro_received_from_customer` | Operations | lp→port, intl | **customer** | — | — | **cro** |
+| 55 | `cro_released` (apply & obtain from line) | Operations | lp→port, intl | **consort** | — | — | commercial_invoice, packing_list, authority_letterhead, cro |
+| 60 | `empty_container_pickup` (LOLO) | Transport | lp→port, intl | — | — | `local_transport` | eir_out |
+| 70 | `cargo_pickup` (stuffing) | Transport | lp→port, intl | — | — | `local_transport` | — |
+| 80 | `inland_transit` | Transport | lp→port, intl | — | — | `local_transport` | — |
+| 95 | `customs_clearance` | Compliance | — | — | — | `customs_clearance` | *(sub-actions — §4a.2)* |
+| ~~90~~ | ~~`customs_entry`~~ | *superseded by 95 (ADR-048) — row kept `active: false` so historical shipments still resolve* |||||
+| ~~100~~ | ~~`inspected_sealed`~~ | *superseded by 95 (ADR-048)* |||||
+| 110 | `port_handover` (gate-in) | Operations | lp→port, intl | — | — | `port_handling` ∨ `sea_freight` | eir_in |
+| 120 | `bol_issued` | Operations | — | — | — | `sea_freight` | bol |
+| 130 | `bol_submitted` (docs to bank) | Finance | — | — | — | `lc_finance` | bank_receipt |
+| 140 | `telex_released` | Finance | — | — | — | `sea_freight` | telex |
+| 150 | `destination_do` | Operations | lp→port, intl | — | — | `destination_services` | delivery_order, gate_pass |
+| 152 | `import_container_pickup` (off the terminal) | **Transport** | port→cons | — | — | — | eir_pickup |
+| 160 | `destination_pickup` | Operations | lp→port, intl | — | — | `destination_services` | eir_pickup |
+| 170 | `delivered` (final delivery / POD) | Operations | intl | — | — | — | pod |
+| 172 | `local_delivered` (delivered & POD) | **Transport** | local, port→cons | — | — | — | pod |
+| 175 | `port_job_completed` (handover confirmed) | Operations | lp→port | — | — | — | — |
+| 178 | `import_empty_return` | **Transport** | port→cons | — | — | — | eir_empty_return |
+| 180 | `empty_return` | Operations | lp→port, intl | — | — | `destination_services` | eir_empty_return |
 
 Rules:
 
-1. Seed every step passing all three gates, ordered by canonical number. Renumber for display as 1..N of the composed path.
+1. Seed every step passing all four gates, ordered by canonical number. Renumber for display as 1..N of the composed path.
 2. **A department with no step on the composed path has no role on that shipment** — no queue entry, no task, no ownership. A local-only shipment therefore never involves Compliance/Customs.
 3. `shipments.status` is derived from the highest completed step **on the composed path** (§5.1). A shorter path exposes only its own subset of the status enum.
 4. Every package composes **exactly one step deriving `delivered`** from its delivery milestone — 170, 172 or 175. This is load-bearing: `maybeSettleTx` only settles a shipment whose status is `delivered`, so a package without one could never settle or close. An empty-return step (178/180) runs *after* it and also derives `delivered`, which changes nothing: settlement additionally refuses while any step is still pending.
-5. The two CRO rows (50 and 55) are **mutually exclusive** and are separate template rows rather than one conditional row, because `OtdStep` persists neither `title` nor `requiredDocTypes` — both are looked up from the template by `step_code` at completion time.
-6. The composed template, the package and the CRO mode are all **frozen at approval** and stored on the shipment (INV-14). Changing them afterwards is a controlled, audited re-scope (out of Phase-1 scope unless raised as an exception).
-7. The one permitted out-of-order pair (RULE-SH-03) is `lc_generated` ↔ `vessel_booked`, keyed on **step code**, not canonical number — so re-spacing the catalog can never silently relocate the exemption.
+5. The two CRO rows (50 and 55) are **mutually exclusive** and are separate template rows rather than one conditional row, because `OtdStep` persists neither `title` nor `requiredDocTypes` — both are looked up from the template by `step_code` at completion time. The LC pair (30 and 35) is mutually exclusive **by construction** rather than by symmetric gates: 30 needs the `lc_finance` service (sold only in `consort` mode or on a bank-LC trade), 35 needs `lc_handled_by = customer`, and customer mode never sells the service. Gating 30/130 on lc_modes instead would strip them from a bank-LC customer's non-export jobs, which compose them through the service gate alone (ADR-050).
+6. The composed template, the package and the CRO **and LC** modes are all **frozen at approval** and stored on the shipment (INV-14). Changing them afterwards is a controlled, audited re-scope (out of Phase-1 scope unless raised as an exception).
+7. The permitted out-of-order pairs (RULE-SH-03) are `lc_generated` ↔ `vessel_booked` and `lc_received_from_customer` ↔ `vessel_booked`, keyed on **step code**, not canonical number — so re-spacing the catalog can never silently relocate the exemption.
 8. A superseded step is **deactivated, not deleted** (`active: false`). Composition skips it, but `missingRequiredDocs` and `recomputeStatus` still resolve it by `step_code` for shipments that already ran it.
 
 ### 4a.2 Sub-actions — one main step, a checklist beneath it
 
-Two steps are single milestones made of several parts. Rather than split them into steps that have no order between them, own no distinct status and would fire fake status transitions, they carry an ordered **sub-action checklist** (ADR-048), seeded in `otd_step_action_templates` and materialised per shipment at approval. Sub-actions use the **same three gates as steps**, which is how one `order_confirmed` step carries two different document packs.
+Two steps are single milestones made of several parts. Rather than split them into steps that have no order between them, own no distinct status and would fire fake status transitions, they carry an ordered **sub-action checklist** (ADR-048), seeded in `otd_step_action_templates` and materialised per shipment at approval. Sub-actions use the **same four gates as steps** (package → CRO → LC → service), which is how one `order_confirmed` step carries two different document packs.
 
 **`order_confirmed` — international** (7 items, all documents):
 

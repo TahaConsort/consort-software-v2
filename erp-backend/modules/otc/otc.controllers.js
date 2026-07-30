@@ -2,7 +2,7 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { shipmentInScope } from "./otc.middleware.js";
-import { completeMilestoneTx, maybeSettleTx, MANUAL_MILESTONES } from "./otc.service.js";
+import { completeMilestoneTx, maybeSettleTx, MANUAL_MILESTONES, emitOtcEvent } from "./otc.service.js";
 import { auditShipment, assertShipmentUnlocked } from "../shipment/shipment.service.js";
 
 /**
@@ -81,7 +81,15 @@ export const completeMilestone = catchAsync(async (req, res, next) => {
       resourceId: shipment.id,
       diff: { milestoneNo, type: target.type, notes: req.body?.notes ?? null },
     });
-    return maybeSettleTx(tx, shipment.id, req.user.id);
+    const status = await maybeSettleTx(tx, shipment.id, req.user.id);
+    await emitOtcEvent(tx, "otc.milestone.completed", {
+      shipmentId: shipment.id,
+      customerId: shipment.customerId ?? null,
+      milestoneNo,
+      type: target.type,
+      newStatus: status,
+    });
+    return status;
   });
 
   res.json({

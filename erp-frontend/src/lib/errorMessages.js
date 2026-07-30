@@ -1,4 +1,4 @@
-import { DOC_TYPE_LABELS } from "@/services/documentService";
+import { useWorkflowStore } from "@/store/workflowStore";
 
 // Backend messages that should never reach users verbatim.
 const TECHNICAL_RE = /^Request failed|^timeout of|^Network Error|prisma\.|^Cannot read|npm i /i;
@@ -8,7 +8,12 @@ const STALE_RE = /rowVersion|If-Match|modified by someone else|changed since you
 // like "(RULE-SH-04)"/"(EDGE-FI-01)" and two-segment invariants like "(INV-06)".
 const RULE_ID_RE = /\s*\((RULE|INV|EDGE)(-[A-Z]{2,5})?-\d+\)/g;
 
-const STALE_MSG = "Someone else updated this while you had it open. Refresh the page and try again.";
+// No longer tells the user to reload: the stores that use optimistic concurrency
+// (shipmentDetailStore.completeStep, quotationStore.approveQuotation) read the current
+// rowVersion out of the 412/428 body and retry once by themselves. This message is what
+// survives a SECOND conflict — a genuine race with another person, where the right advice
+// is to look at what they changed, not to reload.
+const STALE_MSG = "Someone else changed this at the same moment. Check their update, then try again.";
 const GENERIC_MSG = "Something went wrong on our side — please try again. Nothing was saved.";
 
 /** "containerTypeCode" → "Container type code" */
@@ -51,7 +56,10 @@ export function friendlyError(status, raw) {
       .trim()
       .replace(/[.\s]+$/, "")
       .split(", ")
-      .map((code) => DOC_TYPE_LABELS[code] ?? code)
+      // Admin-managed labels (ADR-051); the store falls back to the static map, then
+      // to the raw code, for anything predating the vocabulary table. zustand's
+      // getState works outside React, which is what a message formatter needs.
+      .map((code) => useWorkflowStore.getState().labelForDocType(code) || code)
       .join(", ");
     return `Attach these documents first: ${names}.`;
   }

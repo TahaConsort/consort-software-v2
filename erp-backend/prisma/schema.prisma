@@ -153,50 +153,22 @@ enum CroHandling {
   consort // we apply to the shipping line and obtain the CRO
 }
 
-// ADR-003 canonical codes, in canonical order. Expanded catalog (freight-forwarding OTC upgrade);
-// `container_allocated` and `destination_inspection` are RETIRED from the seeded catalog but kept
-// here so historical rows remain valid.
-enum OtdStepCode {
-  order_lock // canonical 1  — derives order_confirmed
-  order_confirmed // canonical 2  — derives order_confirmed
-  lc_generated // canonical 3
-  container_allocated // RETIRED — superseded by vessel_booked
-  cro_released // canonical 5
-  cargo_pickup // canonical 7
-  customs_entry // canonical 9
-  inspected_sealed // canonical 10
-  port_handover // canonical 11
-  bol_issued // canonical 12
-  bol_submitted // canonical 13
-  telex_released // canonical 14
-  destination_inspection // RETIRED — superseded by destination_pickup / destination_do
-  delivered // canonical 17
-  vessel_booked // canonical 4
-  empty_container_pickup // canonical 6
-  inland_transit // canonical 8
-  destination_do // canonical 15
-  destination_pickup // canonical 16
-  empty_return // canonical 18 — derives status `delivered`
-  // Service-package catalog (canonical numbers re-spaced to multiples of 10; see seed.js).
-  // The pure-local trucking leg — no container, no port, no trade docs.
-  transporter_assigned // canonical 22 — package local_transport
-  vehicle_dispatched // canonical 24 — package local_transport
-  goods_loaded // canonical 26 — package local_transport
-  in_transit // canonical 28 — package local_transport
-  local_delivered // canonical 172 — package local_transport terminal; derives status `delivered`
-  cro_received_from_customer // canonical 50 — the croHandledBy=customer variant of cro_released
-  port_job_completed // canonical 175 — package loading_point_to_port terminal; derives `delivered`
-  // The import delivery leg (package port_to_consignee). Deliberately NOT the
-  // destination_pickup/empty_return pair: those are the destination AGENT's steps on an
-  // export job and sit with Operations, whereas this leg is our own trucks and is
-  // Transport-owned end to end, like the local trucking package.
-  import_container_pickup // canonical 152 — package port_to_consignee; derives `destination_pickup`
-  import_empty_return // canonical 178 — package port_to_consignee terminal; derives `delivered`
-  // canonical 95 — ONE customs step carrying filing, duty, examination and seal as
-  // sub-actions (ADR-048). Supersedes customs_entry + inspected_sealed, which stay in
-  // this enum (and as `active: false` template rows) so historical shipments still resolve.
-  customs_clearance
+// Who manages the Letter of Credit (ADR-050). A second per-shipment sub-option beside
+// CroHandling — CRO is container release, LC is trade finance; the two vary independently.
+// Only the export packages (loading_point_to_port, international) may hold customer/consort;
+// not_applicable doubles as "no-LC trade" there (CHECK in prisma/sql/constraints.sql).
+enum LcHandling {
+  not_applicable // no LC on this trade, or a package with no LC choice
+  customer // customer runs the LC with their bank; we collect a copy
+  consort // we manage the LC end-to-end (lc_finance service is implied)
 }
+
+// Step codes are plain strings since ADR-051, so the Workflow admin panel can mint new
+// steps without a schema change. Format is guarded by otd_step_templates_code_format in
+// prisma/sql/constraints.sql (^[a-z][a-z0-9_]{1,49}$) and by the workflow module's Zod.
+// The catalog itself lives in otd_step_templates; ADR-003's canonical codes are seeded
+// there (prisma/seed.js) and historical rows resolve by step_code forever — which is why
+// a used step is deactivated, never deleted, and its code is immutable.
 
 // A step's sub-action is either ticked by its owner or satisfied by evidence.
 // `document` actions are DERIVED, never written — satisfaction is the presence of a
@@ -650,6 +622,7 @@ model Query {
   services          ServiceCode[] // RULE-QRY-05 — non-empty CHECK, DATABASE.md §5
   servicePackage    ServicePackage? @map("service_package") // what the customer picked; presets `services`
   croHandledBy      CroHandling     @default(not_applicable) @map("cro_handled_by") // package #2 sub-option
+  lcHandledBy       LcHandling      @default(not_applicable) @map("lc_handled_by") // ADR-050 — export-package sub-option
   originPort        String?       @map("origin_port") // validated against ports; null for local_transport
   destinationPort   String?       @map("destination_port")
   // Free-text door addresses for local_transport, where a UN/LOCODE port is the wrong shape.
@@ -688,6 +661,7 @@ model Quotation {
   services          ServiceCode[] // snapshot from the query
   servicePackage    ServicePackage?       @map("service_package") // snapshot from the query
   croHandledBy      CroHandling           @default(not_applicable) @map("cro_handled_by") // snapshot from the query
+  lcHandledBy       LcHandling            @default(not_applicable) @map("lc_handled_by") // snapshot from the query
   currency          String                @default("PKR") @db.Char(3)
   fxRate            Decimal?              @map("fx_rate") @db.Decimal(12, 6)
   totalAmount       Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
@@ -733,7 +707,7 @@ model QuotationChargeLine {
 model OtdStepTemplate {
   id               String         @id @default(uuid())
   canonicalNo      Int            @unique @map("canonical_no")
-  stepCode         OtdStepCode    @unique @map("step_code")
+  stepCode         String         @unique @map("step_code")
   title            String
   ownerDepartment  DepartmentCode @map("owner_department") // ADR-003/039 ownership
   always           Boolean        @default(false) // steps 1–2 and 14 (RULE-SVC-01)
@@ -744,6 +718,11 @@ model OtdStepTemplate {
   // package gate entirely, which is what makes legacy paths reproduce byte-for-byte.
   packages         ServicePackage[] // empty = applies to any package
   croModes         CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
+  lcModes          LcHandling[]     @map("lc_modes") // empty = applies in any LC mode (ADR-050)
+  // One plain-language line on what completing this step actually means — shown on the
+  // step panel. Lives here (ADR-051) so admin-created steps carry their own guidance;
+  // previously a hardcoded STEP_HINTS map in the frontend.
+  hint             String?
   requiredDocTypes String[]       @map("required_doc_types") // RULE-SH-06
   dueOffsetHours   Int            @default(48) @map("due_offset_hours") // seeds the step's TaskTemplate SLA
   derivedStatus    ShipmentStatus @map("derived_status") // what completing this step derives
@@ -766,7 +745,7 @@ model OtdStepTemplate {
  */
 model OtdStepActionTemplate {
   id         String           @id @default(uuid())
-  stepCode   OtdStepCode      @map("step_code")
+  stepCode   String           @map("step_code")
   step       OtdStepTemplate  @relation(fields: [stepCode], references: [stepCode], onDelete: Cascade)
   actionCode String           @map("action_code") // unique within the step
   title      String
@@ -776,6 +755,7 @@ model OtdStepActionTemplate {
   required   Boolean          @default(true) // false = advisory; does not gate completion
   packages   ServicePackage[] // empty = applies to any package
   croModes   CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
+  lcModes    LcHandling[]     @map("lc_modes") // empty = applies in any LC mode (ADR-050)
   services   ServiceCode[] // empty = applies whatever the services
 
   @@unique([stepCode, actionCode])
@@ -820,6 +800,7 @@ model Shipment {
   services         ServiceCode[] // FROZEN at approval (INV-14) — non-empty CHECK, DATABASE.md §5
   servicePackage   ServicePackage?         @map("service_package") // FROZEN at approval; null = pre-package shipment
   croHandledBy     CroHandling             @default(not_applicable) @map("cro_handled_by") // FROZEN at approval
+  lcHandledBy      LcHandling              @default(not_applicable) @map("lc_handled_by") // FROZEN at approval (ADR-050)
   status           ShipmentStatus          @default(booking) // DERIVED (ADR-014, INV-02)
   exceptionState   ExceptionState          @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
   totalHoldMinutes Int                     @default(0) @map("total_hold_minutes")
@@ -867,7 +848,7 @@ model OtdStep {
   shipment        Shipment       @relation(fields: [shipmentId], references: [id])
   canonicalNo     Int            @map("canonical_no") // 1..14 — reporting key (RULE-SVC-05)
   displayNo       Int            @map("display_no") // 1..N of the composed path
-  stepCode        OtdStepCode    @map("step_code")
+  stepCode        String         @map("step_code")
   ownerDepartment DepartmentCode @map("owner_department") // completion guard (RULE-SH-04)
   status          OtdStepStatus  @default(pending)
   completedById   String?        @map("completed_by_id")
@@ -1035,7 +1016,7 @@ model ChargeType {
   code             String           @id // 'ocean_freight', 'lolo', ...
   label            String
   defaultDirection ChargeDirection? @map("default_direction")
-  defaultStepCode  OtdStepCode?     @map("default_step_code") // where this money usually lands
+  defaultStepCode  String?          @map("default_step_code") // where this money usually lands
   service          ServiceCode? // which sold service it belongs to
   isActive         Boolean          @default(true) @map("is_active")
 
@@ -1047,7 +1028,7 @@ model ChargeType {
 model TaskTemplate {
   id               String         @id @default(uuid())
   eventCode        String         @map("event_code") // from the closed catalog (ADR-020)
-  stepCode         OtdStepCode?   @map("step_code") // fires only if on the composed path (RULE-AE-07)
+  stepCode         String?        @map("step_code") // fires only if on the composed path (RULE-AE-07)
   title            String
   description      String?
   department       DepartmentCode
@@ -1106,6 +1087,21 @@ model OutboxEvent {
 }
 
 // ================= DOCUMENTS =================
+
+// Admin-managed document vocabulary (ADR-051) — the closed DOC_TYPES list that lived in
+// modules/document/document.validation.js (and its frontend mirror) as data. Uploads
+// validate against ACTIVE rows; `customerUploadable` replaces the hardcoded
+// CUSTOMER_UPLOADABLE_DOC_TYPES allowlist. Rows referenced by documents or templates are
+// deactivated, never deleted, so historical docTypes always resolve to a label.
+model DocumentType {
+  code               String  @id // ^[a-z][a-z0-9_]{1,49}$ — same format guard as step codes
+  label              String
+  customerUploadable Boolean @default(false) @map("customer_uploadable")
+  active             Boolean @default(true)
+  sortOrder          Int     @default(0) @map("sort_order")
+
+  @@map("document_types")
+}
 
 model Document {
   id            String            @id @default(uuid())

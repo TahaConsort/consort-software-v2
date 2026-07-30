@@ -32,6 +32,9 @@ import {
 } from "@/components/ui/select";
 import toast from "react-hot-toast";
 import * as leadService from "@/services/leadService";
+import { useLeadStore } from "@/store/leadStore";
+import { useTopicRefresh } from "@/lib/useTopicRefresh";
+import { leadTopic, TOPICS } from "@/lib/topics";
 import {
   LeadStatusBadge,
   LeadSourceBadge,
@@ -52,33 +55,50 @@ const LeadDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
 
+  const { transitionLead, reopenLead, logOutreach, convertLead } = useLeadStore();
   const [lead, setLead] = useState(null);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // Which lead the state in `lead` belongs to. Adjusting it during render (React's
+  // documented adjust-state-on-prop-change pattern) means navigating to another lead
+  // blanks the stale one immediately, without a setState inside an effect.
+  const [loadedId, setLoadedId] = useState(id);
+  if (loadedId !== id) {
+    setLoadedId(id);
+    setLead(null);
+  }
+  // Derived, so a BACKGROUND refresh can never replace the page with a spinner.
+  const loading = lead === null;
   const [dialog, setDialog] = useState(null); // 'outreach' | 'lost' | 'reopen' | 'convert' | null
 
-  const fetchLead = useCallback(async () => {
-    setLoading(true);
+  // `isCurrent` is the stale guard: without it a slow response for the previous lead can
+  // land after navigating to another one, and a response arriving after unmount warns.
+  const loadLead = useCallback(async ({ isCurrent } = {}) => {
+    const ok = isCurrent ?? (() => true);
     try {
       const res = await leadService.getLead(id);
-      setLead(res.data);
+      if (ok()) setLead(res.data);
     } catch (err) {
+      if (!ok()) return;
       toast.error(err?.message || "Lead not found");
       navigate("/admin/leads");
-    } finally {
-      setLoading(false);
     }
   }, [id, navigate]);
 
-  useEffect(() => { fetchLead(); }, [fetchLead]);
+  // Refresh when this lead or the lead list changes — including from another user.
+  const { run: reloadLead } = useTopicRefresh([leadTopic(id), TOPICS.LEADS], loadLead);
 
+  useEffect(() => { reloadLead(); }, [id, reloadLead]);
+
+  // Mutations go through the store so the LIST hears about them: this page used to
+  // refresh only its own detail, so qualifying or losing a lead and pressing Back showed
+  // the old status until a reload.
   const act = async (fn, successMsg) => {
     setBusy(true);
     try {
       const res = await fn();
       toast.success(successMsg || res?.message);
       setDialog(null);
-      await fetchLead();
+      await reloadLead();
       return res;
     } catch (err) {
       toast.error(err?.message || "Couldn't update the lead");
@@ -129,7 +149,7 @@ const LeadDetailPage = () => {
               className="gap-2"
               title={hasPositiveTouch ? "" : "Needs at least one non-negative outreach (RULE-LD-02)"}
               disabled={!hasPositiveTouch || busy}
-              onClick={() => act(() => leadService.transitionLead(lead.id, { toStatus: "qualified" }), "Lead qualified")}
+              onClick={() => act(() => transitionLead(lead.id, { toStatus: "qualified" }), "Lead qualified")}
             >
               <CheckCircle2 className="w-4 h-4" /> Qualify
             </Button>
@@ -143,7 +163,7 @@ const LeadDetailPage = () => {
                 size="sm"
                 variant="outline"
                 disabled={busy}
-                onClick={() => act(() => leadService.transitionLead(lead.id, { toStatus: "contacted", notes: "De-qualified — needs more work" }), "Moved back to contacted")}
+                onClick={() => act(() => transitionLead(lead.id, { toStatus: "contacted", notes: "De-qualified — needs more work" }), "Moved back to contacted")}
               >
                 De-qualify
               </Button>
@@ -254,7 +274,7 @@ const LeadDetailPage = () => {
         open={dialog === "outreach"}
         busy={busy}
         onClose={() => setDialog(null)}
-        onSubmit={(payload) => act(() => leadService.logOutreach(lead.id, payload), "Outreach logged")}
+        onSubmit={(payload) => act(() => logOutreach(lead.id, payload), "Outreach logged")}
       />
       <ReasonDialog
         open={dialog === "lost"}
@@ -264,7 +284,7 @@ const LeadDetailPage = () => {
         confirmLabel="Mark Lost"
         destructive
         onClose={() => setDialog(null)}
-        onSubmit={(reason) => act(() => leadService.transitionLead(lead.id, { toStatus: "lost", reason }), "Lead marked lost")}
+        onSubmit={(reason) => act(() => transitionLead(lead.id, { toStatus: "lost", reason }), "Lead marked lost")}
       />
       <ReasonDialog
         open={dialog === "reopen"}
@@ -273,7 +293,7 @@ const LeadDetailPage = () => {
         description="Reopening moves the lead back to Contacted (RULE-LD-04)."
         confirmLabel="Reopen"
         onClose={() => setDialog(null)}
-        onSubmit={(reason) => act(() => leadService.reopenLead(lead.id, reason), "Lead reopened")}
+        onSubmit={(reason) => act(() => reopenLead(lead.id, reason), "Lead reopened")}
       />
       <ConvertDialog
         open={dialog === "convert"}
@@ -281,7 +301,7 @@ const LeadDetailPage = () => {
         companyName={lead.company?.name}
         onClose={() => setDialog(null)}
         onConfirm={async () => {
-          const res = await act(() => leadService.convertLead(lead.id), "Lead converted to customer");
+          const res = await act(() => convertLead(lead.id), "Lead converted to customer");
           if (res) navigate("/admin/customers");
         }}
       />

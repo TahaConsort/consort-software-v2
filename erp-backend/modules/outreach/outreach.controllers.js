@@ -134,6 +134,15 @@ export const createOutreach = catchAsync(async (req, res, next) => {
       advanced = true;
     }
 
+    // This module wrote outreach rows and emitted nothing at all, so a touch logged here
+    // was invisible to the Leads list even when it had just advanced the lead.
+    await emitEvent(tx, "outreach.logged", {
+      outreachId: outreach.id,
+      leadId: outreach.leadId ?? null,
+      customerId: outreach.customerId ?? null,
+      advanced,
+    });
+
     return { outreach, advanced };
   });
 

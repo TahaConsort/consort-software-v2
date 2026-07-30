@@ -3,7 +3,7 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
-import { packageUsesPorts, resolveCroMode, resolveServices } from "../../utils/servicePackage.js";
+import { packageUsesPorts, resolveCroMode, resolveLcMode, resolveServices } from "../../utils/servicePackage.js";
 import { scopedQueryWhere, queryInScope } from "./query.middleware.js";
 
 /**
@@ -89,12 +89,19 @@ export const createQuery = catchAsync(async (req, res, next) => {
 
   // The package presets the service set; Ops overrides are additive; bank-LC customers
   // imply LC / Trade Finance (RULE-SVC-04, EDGE-SVC-01). One helper, one rule — shared
-  // with the intake-conversion path.
+  // with the intake-conversion path. The LC mode resolves FIRST (ADR-050) because the
+  // service set depends on it: consort mode sells lc_finance, customer mode does not.
   const { servicePackage } = req.body;
+  const lcHandledBy = resolveLcMode({
+    servicePackage,
+    lcHandledBy: req.body.lcHandledBy,
+    customerSource: customer.source,
+  });
   const services = resolveServices({
     servicePackage,
     services: req.body.services,
     customerSource: customer.source,
+    lcHandledBy,
   });
   const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: req.body.croHandledBy });
 
@@ -128,6 +135,7 @@ export const createQuery = catchAsync(async (req, res, next) => {
         services,
         servicePackage,
         croHandledBy,
+        lcHandledBy,
         originPort: req.body.originPort ?? null,
         destinationPort: req.body.destinationPort ?? null,
         pickupAddress: req.body.pickupAddress ?? null,
@@ -200,15 +208,21 @@ export const updateQuery = catchAsync(async (req, res, next) => {
     if (!ct) return next(new AppError("Unknown container type code", 422));
   }
 
-  // Re-resolve services and the CRO mode whenever the package changes, so the row can
-  // never end up with a service set or CRO mode its package cannot serve.
+  // Re-resolve services and the CRO/LC modes whenever any of them changes, so the row
+  // can never end up with a service set or a mode its package cannot serve.
   const data = { ...req.body };
-  if (req.body.servicePackage || req.body.services || req.body.croHandledBy) {
+  if (req.body.servicePackage || req.body.services || req.body.croHandledBy || req.body.lcHandledBy) {
     const customer = await prisma.customer.findUnique({ where: { id: query.customerId } });
+    data.lcHandledBy = resolveLcMode({
+      servicePackage,
+      lcHandledBy: req.body.lcHandledBy ?? query.lcHandledBy,
+      customerSource: customer?.source,
+    });
     data.services = resolveServices({
       servicePackage,
       services: req.body.services ?? query.services,
       customerSource: customer?.source,
+      lcHandledBy: data.lcHandledBy,
     });
     data.servicePackage = servicePackage;
     data.croHandledBy = resolveCroMode({
@@ -228,6 +242,7 @@ export const updateQuery = catchAsync(async (req, res, next) => {
     if (!wasFlagged && (u.isHazardous || u.isReefer)) {
       await emitEvent(tx, "query.hazardous", { queryId: u.id, referenceNo: u.referenceNo });
     }
+    await emitEvent(tx, "query.updated", { queryId: u.id, referenceNo: u.referenceNo });
     return u;
   });
 
@@ -245,9 +260,14 @@ export const cancelQuery = catchAsync(async (req, res, next) => {
     return next(new AppError(`A ${query.status} query cannot be cancelled`, 409));
   }
 
-  const updated = await prisma.query.update({
-    where: { id: query.id },
-    data: { status: "cancelled", cancelReason: req.body.reason },
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.query.update({
+      where: { id: query.id },
+      data: { status: "cancelled", cancelReason: req.body.reason },
+    });
+    // Cancelling a query invalidates any quotation raised from it.
+    await emitEvent(tx, "query.cancelled", { queryId: u.id, referenceNo: u.referenceNo });
+    return u;
   });
 
   const [hydrated] = await hydrateQueries([updated]);

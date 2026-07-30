@@ -125,9 +125,13 @@ export const updateReferralStatus = catchAsync(async (req, res, next) => {
   if (["converted", "rejected"].includes(referral.status)) {
     return next(new AppError(`A ${referral.status} referral cannot change status`, 409));
   }
-  const updated = await prisma.bankLcReferral.update({
-    where: { id: referral.id },
-    data: { status: req.body.status, reviewedById: req.user.id },
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.bankLcReferral.update({
+      where: { id: referral.id },
+      data: { status: req.body.status, reviewedById: req.user.id },
+    });
+    await emitEvent(tx, "lc.updated", { referralId: row.id, referenceNo: row.referenceNo, status: row.status });
+    return row;
   });
   res.json({ success: true, message: "Referral updated", data: serialize(updated) });
 });
@@ -139,9 +143,13 @@ export const rejectReferral = catchAsync(async (req, res, next) => {
   if (["converted", "rejected"].includes(referral.status)) {
     return next(new AppError(`A ${referral.status} referral cannot be rejected`, 409));
   }
-  const updated = await prisma.bankLcReferral.update({
-    where: { id: referral.id },
-    data: { status: "rejected", reviewedById: req.user.id, rejectReason: req.body.reason },
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.bankLcReferral.update({
+      where: { id: referral.id },
+      data: { status: "rejected", reviewedById: req.user.id, rejectReason: req.body.reason },
+    });
+    await emitEvent(tx, "lc.updated", { referralId: row.id, referenceNo: row.referenceNo, status: "rejected" });
+    return row;
   });
   res.json({ success: true, message: "Referral rejected", data: serialize(updated) });
 });

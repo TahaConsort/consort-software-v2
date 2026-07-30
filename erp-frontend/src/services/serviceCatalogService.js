@@ -24,11 +24,11 @@ export const getPackages = async () => {
 
 /**
  * Preview the OTD path a shipment would run — the same composition it gets at quote
- * approval. Pass a package (preferred) and, for Loading Point → Port, the CRO mode;
- * `services` is the optional additive Ops override.
- * → { servicePackage, croHandledBy, services, steps, stepCount, departments, requiredDocTypes }
+ * approval. Pass a package (preferred); for Loading Point → Port the CRO mode; for the
+ * export packages the LC mode (ADR-050); `services` is the optional additive Ops override.
+ * → { servicePackage, croHandledBy, lcHandledBy, services, steps, stepCount, departments, requiredDocTypes }
  */
-export const composeServices = async ({ servicePackage, croHandledBy, services } = {}) => {
-  const res = await api.post("/services/compose", { servicePackage, croHandledBy, services });
+export const composeServices = async ({ servicePackage, croHandledBy, lcHandledBy, services } = {}) => {
+  const res = await api.post("/services/compose", { servicePackage, croHandledBy, lcHandledBy, services });
   return res.data;
 };

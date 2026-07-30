@@ -31,7 +31,6 @@ import {
 } from "@/components/ui/dialog";
 import { useAuthStore } from "@/store/authStore";
 import {
-  deleteSuperAdmin,
   getSuperAdmins,
   updateSuperAdmin,
 } from "@/services/superAdminService";

@@ -185,7 +185,11 @@ export const updateLead = catchAsync(async (req, res, next) => {
     }
   }
 
-  const updated = await prisma.lead.update({ where: { id: lead.id }, data: req.body });
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.lead.update({ where: { id: lead.id }, data: req.body });
+    await emitEvent(tx, "lead.updated", { leadId: u.id, referenceNo: u.referenceNo });
+    return u;
+  });
   const [hydrated] = await hydrateLeads([updated]);
   res.json({ success: true, message: "Lead updated", data: hydrated });
 });
@@ -220,6 +224,12 @@ export const logOutreach = catchAsync(async (req, res, next) => {
       await recordTransition(tx, lead, "contacted", req.user.id, "First outreach logged");
       await tx.lead.update({ where: { id: lead.id }, data: { status } });
     }
+
+    // A touch belongs to the Outreach log as much as to this lead, and may have just
+    // advanced the lead's status.
+    await emitEvent(tx, "outreach.logged", {
+      leadId: lead.id, referenceNo: lead.referenceNo, advanced: status !== lead.status,
+    });
 
     return { outreach, status };
   });
@@ -261,10 +271,14 @@ export const transitionLead = catchAsync(async (req, res, next) => {
 
   const updated = await prisma.$transaction(async (tx) => {
     await recordTransition(tx, lead, toStatus, req.user.id, toStatus === "lost" ? reason : notes);
-    return tx.lead.update({
+    const u = await tx.lead.update({
       where: { id: lead.id },
       data: { status: toStatus, lostReason: toStatus === "lost" ? reason : lead.lostReason },
     });
+    await emitEvent(tx, "lead.status_changed", {
+      leadId: u.id, referenceNo: u.referenceNo, fromStatus: lead.status, toStatus,
+    });
+    return u;
   });
 
   const [hydrated] = await hydrateLeads([updated]);
@@ -280,7 +294,11 @@ export const reopenLead = catchAsync(async (req, res, next) => {
 
   const updated = await prisma.$transaction(async (tx) => {
     await recordTransition(tx, lead, "contacted", req.user.id, `Reopened: ${req.body.reason}`);
-    return tx.lead.update({ where: { id: lead.id }, data: { status: "contacted", lostReason: null } });
+    const u = await tx.lead.update({ where: { id: lead.id }, data: { status: "contacted", lostReason: null } });
+    await emitEvent(tx, "lead.status_changed", {
+      leadId: u.id, referenceNo: u.referenceNo, fromStatus: "lost", toStatus: "contacted",
+    });
+    return u;
   });
 
   const [hydrated] = await hydrateLeads([updated]);

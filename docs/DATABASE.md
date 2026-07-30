@@ -53,26 +53,21 @@ enum QuotationStatus { draft  sent  approved  rejected  expired } // revisions a
 enum ApprovalChannel { customer_portal  asm  management }
 
 enum ServiceCode {                                     // ADR-041 — the Phase-1 catalog, closed
-  local_transport  customs_clearance  sea_freight  port_handling  lc_finance
+  local_transport  customs_clearance  sea_freight  port_handling  lc_finance  destination_services
 }
 
-enum OtdStepCode {                                     // ADR-003 canonical codes, in canonical order
-  order_lock            // step 1  — derives order_confirmed
-  order_confirmed       // step 2  — derives order_confirmed
-  lc_generated          // step 3
-  container_allocated   // step 4
-  cro_released          // step 5
-  cargo_pickup          // step 6
-  customs_entry         // step 7
-  inspected_sealed      // step 8
-  port_handover         // step 9
-  bol_issued            // step 10
-  bol_submitted         // step 11
-  telex_released        // step 12
-  destination_inspection// step 13
-  delivered             // step 14
+enum ServicePackage {                                  // ADR-046/049 — what the business sells
+  local_transport  loading_point_to_port  international  port_to_consignee
 }
+enum CroHandling { not_applicable  customer  consort } // who obtains the CRO (ADR-046)
+enum LcHandling  { not_applicable  customer  consort } // who manages the LC (ADR-050)
+
+// step_code is a STRING since ADR-051 (enum OtdStepCode dropped by
+// prisma/sql/2026-07-step-code-to-text.sql) so the Workflow admin panel can mint new
+// steps without a schema change. Format CHECK: ^[a-z][a-z0-9_]{1,49}$ (§5). The
+// catalog itself lives in otd_step_templates (§8 seeds the factory rows).
 enum OtdStepStatus { pending  done }                   // reopen returns a step to pending (RULE-SH-05)
+enum StepActionKind { manual  document }               // sub-actions (ADR-048); document kind is DERIVED
 
 enum ShipmentStatus {                                  // 16 progressive values (ADR-039); DERIVED, never
   booking                                              // written by an endpoint (ADR-014, INV-02).
@@ -462,27 +457,34 @@ model QuotationChargeLine {
 ### 4.5 Shipment, OTD, OTC, Exceptions
 
 ```prisma
+// The admin-managed catalog (ADR-051, Workflow panel) — DB form of WORKFLOW §4a.1's
+// factory snapshot; the composition logic reads it at approval time.
 model OtdStepTemplate {
-  id             String         @id @default(uuid())    // DB form of WORKFLOW §4a.1 — seeded, read by
-  canonicalNo    Int            @unique @map("canonical_no") // the composition logic at approval time
-  stepCode       OtdStepCode    @unique @map("step_code")
+  id             String         @id @default(uuid())
+  canonicalNo    Int            @unique @map("canonical_no")
+  stepCode       String         @unique @map("step_code") // format CHECK §5; IMMUTABLE once created
   title          String
-  ownerDepartment DepartmentCode @map("owner_department")    // ADR-003/039 ownership
-  always         Boolean        @default(false)         // steps 1–2 and 14 (RULE-SVC-01)
-  services       ServiceCode[]                          // included when selection intersects (ADR-040)
-  requiredDocTypes String[]     @map("required_doc_types")   // RULE-SH-06
-  derivedStatus  ShipmentStatus @map("derived_status")  // what completing this step derives
-  active         Boolean        @default(true)          // superseded steps are kept, not deleted (ADR-048)
+  hint           String?                                  // one plain-language line, shown on the step panel (ADR-051)
+  ownerDepartment DepartmentCode @map("owner_department")  // ADR-003/039 ownership
+  always         Boolean        @default(false)           // "always, on the gated packages" (RULE-SVC-01)
+  services       ServiceCode[]                            // included when selection intersects (ADR-040)
+  packages       ServicePackage[]                         // empty = any package (ADR-046)
+  croModes       CroHandling[]  @map("cro_modes")         // empty = any CRO mode
+  lcModes        LcHandling[]   @map("lc_modes")          // empty = any LC mode (ADR-050)
+  requiredDocTypes String[]     @map("required_doc_types") // RULE-SH-06; must exist in document_types
+  dueOffsetHours Int            @default(48) @map("due_offset_hours") // seeds the step's TaskTemplate SLA
+  derivedStatus  ShipmentStatus @map("derived_status")    // what completing this step derives
+  active         Boolean        @default(true)            // superseded/used steps are deactivated, not deleted
   actions        OtdStepActionTemplate[]
   @@map("otd_step_templates")
 }
 
 // The sub-action checklist that hangs under one main step (ADR-048, WORKFLOW §4a.2).
-// Gated by the same three gates as the step catalog, which is how ONE order_confirmed
+// Gated by the same four gates as the step catalog, which is how ONE order_confirmed
 // step carries two different document packs.
 model OtdStepActionTemplate {
   id         String         @id @default(uuid())
-  stepCode   OtdStepCode    @map("step_code")
+  stepCode   String         @map("step_code")
   step       OtdStepTemplate @relation(fields: [stepCode], references: [stepCode], onDelete: Cascade)
   actionCode String         @map("action_code")          // unique within the step
   title      String
@@ -492,6 +494,7 @@ model OtdStepActionTemplate {
   required   Boolean        @default(true)               // false = advisory; does not gate
   packages   ServicePackage[]                            // empty = any package
   croModes   CroHandling[]  @map("cro_modes")
+  lcModes    LcHandling[]   @map("lc_modes")             // ADR-050
   services   ServiceCode[]
   @@unique([stepCode, actionCode])
   @@index([stepCode])
@@ -505,6 +508,9 @@ model Shipment {
   queryId          String         @unique @map("query_id")
   customerId       String         @map("customer_id")
   services         ServiceCode[]                          // FROZEN at approval (INV-14) — non-empty CHECK, §5
+  servicePackage   ServicePackage? @map("service_package") // FROZEN; null = pre-package row (ADR-046)
+  croHandledBy     CroHandling    @default(not_applicable) @map("cro_handled_by") // FROZEN (ADR-046)
+  lcHandledBy      LcHandling     @default(not_applicable) @map("lc_handled_by")  // FROZEN (ADR-050)
   status           ShipmentStatus @default(booking)       // DERIVED (ADR-014, INV-02)
   exceptionState   ExceptionState @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
   totalHoldMinutes Int            @default(0) @map("total_hold_minutes")
@@ -541,9 +547,9 @@ model OtdStep {
   id             String        @id @default(uuid())
   shipmentId     String        @map("shipment_id")
   shipment       Shipment      @relation(fields: [shipmentId], references: [id])
-  canonicalNo    Int           @map("canonical_no")     // 1..14 — reporting key (RULE-SVC-05)
+  canonicalNo    Int           @map("canonical_no")     // reporting key (RULE-SVC-05)
   displayNo      Int           @map("display_no")       // 1..N of the composed path
-  stepCode       OtdStepCode   @map("step_code")
+  stepCode       String        @map("step_code")        // resolves title/hint/docs from the template forever
   ownerDepartment DepartmentCode @map("owner_department") // completion guard (RULE-SH-04)
   status         OtdStepStatus @default(pending)
   completedById  String?       @map("completed_by_id")
@@ -686,7 +692,7 @@ model Payment {
 model TaskTemplate {
   id               String         @id @default(uuid())
   eventCode        String         @map("event_code")    // from the closed catalog (ADR-020)
-  stepCode         OtdStepCode?   @map("step_code")     // fires only if on the composed path (RULE-AE-07)
+  stepCode         String?        @map("step_code")     // fires only if on the composed path (RULE-AE-07)
   title            String
   description      String?
   department       DepartmentCode
@@ -745,6 +751,19 @@ model OutboxEvent {
 ### 4.8 Documents
 
 ```prisma
+// Admin-managed docType vocabulary (ADR-051) — replaces the hardcoded Zod DOC_TYPES
+// list and the CUSTOMER_UPLOADABLE_DOC_TYPES allowlist. Uploads validate against
+// ACTIVE rows (60s cache, invalidated on admin writes); referenced rows deactivate,
+// never delete. Seeded by upsert — admin-added types survive every seed run.
+model DocumentType {
+  code               String  @id                        // ^[a-z][a-z0-9_]{1,49}$
+  label              String
+  customerUploadable Boolean @default(false) @map("customer_uploadable")
+  active             Boolean @default(true)
+  sortOrder          Int     @default(0) @map("sort_order")
+  @@map("document_types")
+}
+
 model Document {
   id            String            @id @default(uuid())
   ownerType     DocumentOwnerType @map("owner_type")     // polymorphic (RULE-DOC-03)
@@ -936,6 +955,18 @@ ALTER TABLE tasks ADD CONSTRAINT tasks_hold_pair
 -- Positive money
 ALTER TABLE payments      ADD CONSTRAINT payments_amount_positive     CHECK (amount > 0);
 ALTER TABLE invoice_lines ADD CONSTRAINT invoice_lines_amount_nonneg  CHECK (amount >= 0);
+
+-- ADR-046/049 — package ↔ CRO-mode consistency (mirrors allowedCroModes)
+-- queries/quotations/shipments each: the non-export packages must be not_applicable,
+-- the export packages must not be; NULL package (pre-package row) exempt.
+
+-- ADR-050 — package ↔ LC-mode consistency (mirrors allowedLcModes). Only the export
+-- packages may hold customer/consort; unlike the CRO, not_applicable stays legal there
+-- (open-account trades). One CHECK per table: *_lc_mode_valid.
+
+-- ADR-051 — step codes are admin-minted strings since the OtdStepCode enum was dropped
+ALTER TABLE otd_step_templates ADD CONSTRAINT otd_step_templates_code_format
+  CHECK (step_code ~ '^[a-z][a-z0-9_]{1,49}$');
 ```
 
 Two invariants stay **application-enforced** (documented, not encodable as constraints): customers never join chat channels (INV-11 — the membership guard checks `users.role`), and `shipments.status` is only ever written by the derive routine inside the step-completion transaction (INV-02 — no route exposes it).
@@ -967,16 +998,17 @@ Applied by the weekly pruning job (WORKFLOW §14). **Business records are perman
 
 ## 8. Seed data
 
-Seeded by `prisma/seed.js`, idempotent (upsert by natural key):
+Seeded by `prisma/seed.js`, idempotent (upsert by natural key). Since ADR-051 the seed is **factory settings** — the live catalog is admin-managed in the Workflow panel and may have diverged.
 
 1. **Departments** — the seven codes with display names.
-2. **`otd_step_templates`** — 28 rows, the DB form of `WORKFLOW.md §4a.1`, read by the composition logic at quote approval (RULE-SVC-01). **`WORKFLOW.md §4a.1` is the single source; the catalog is deliberately not duplicated here.** Each row carries the three gates (`packages`, `cro_modes`, `services`), its `required_doc_types`, `due_offset_hours` and `derived_status`, plus `active` — superseded rows (`container_allocated`, `destination_inspection`, `customs_entry`, `inspected_sealed`) are **kept with `active: false`**, never deleted, because `missing_required_docs` and `recompute_status` resolve templates by `step_code` for shipments that already ran them (ADR-048).
-3. **`otd_step_action_templates`** — 21 rows, the sub-action checklists that hang under a main step (ADR-048, `WORKFLOW.md §4a.2`). Gated by the same three gates as steps, which is how one `order_confirmed` row carries the seven-document international pack, the shorter loading-point-to-port pack and the import leg's BOL / delivery order / gate pass / free-days pack. Materialised per shipment into `otd_step_actions` at approval; `document` items are derived from the shipment's files at read time and never stored as satisfied.
-4. **`task_templates`** — one per **active** composable step (`shipment.step.completed:<code>` → next step's task) plus the pre-check (`query.hazardous` → compliance), invoice-chase (`invoice.overdue`), and the `quotation.approved` fan-out. A superseded step gets no template, so nothing can raise its task.
-5. **Reference data** — `ports` (UN/LOCODE subset served), `container_types` (`20GP`, `40GP`, `40HC`, `REEFER20`, `REEFER40`, …).
-6. **Bootstrap users** — one Management account per role for staging; production seeds only the first CEO + HR, who create the rest through the app (RULE-EMP-01).
+2. **`otd_step_templates`** — 29 rows (row 35 `lc_received_from_customer` joined under ADR-050), the DB form of `WORKFLOW.md §4a.1`, read by the composition logic at quote approval (RULE-SVC-01). **`WORKFLOW.md §4a.1` is the single source; the catalog is deliberately not duplicated here.** Each row carries the four gates (`packages`, `cro_modes`, `lc_modes`, `services`), its `required_doc_types`, `due_offset_hours`, `derived_status` and `hint`, plus `active` — superseded rows (`container_allocated`, `destination_inspection`, `customs_entry`, `inspected_sealed`) are **kept with `active: false`**, never deleted, because `missing_required_docs` and `recompute_status` resolve templates by `step_code` for shipments that already ran them (ADR-048).
+3. **`otd_step_action_templates`** — 21 rows, the sub-action checklists that hang under a main step (ADR-048, `WORKFLOW.md §4a.2`). Gated by the same four gates as steps, which is how one `order_confirmed` row carries the seven-document international pack, the shorter loading-point-to-port pack and the import leg's BOL / delivery order / gate pass / free-days pack. Materialised per shipment into `otd_step_actions` at approval; `document` items are derived from the shipment's files at read time and never stored as satisfied.
+4. **`task_templates`** — one per **active** composable step (`shipment.step.completed:<code>` → next step's task) plus the pre-check (`query.hazardous` → compliance), invoice-chase (`invoice.overdue`), and the `quotation.approved` fan-out. A superseded step gets no template, so nothing can raise its task. Derivation lives in `utils/taskTemplates.js`, shared with the Workflow admin so a seed run and an admin edit can never drift (ADR-051).
+5. **`document_types`** — the 25-code factory vocabulary with labels and the `customer_uploadable` flags (`cro`, `lc`, `commercial_invoice`, `packing_list`, `authority_letterhead`). **Upserted, never deleted** — admin-added types survive every seed run.
+6. **Reference data** — `ports` (UN/LOCODE subset served), `container_types` (`20GP`, `40GP`, `40HC`, `REEFER20`, `REEFER40`, …).
+7. **Bootstrap users** — one Management account per role for staging; production seeds only the first CEO + HR, who create the rest through the app (RULE-EMP-01).
 
-The catalogs (1–4) and the accounts can each be reseeded **on their own**, without the wipe that `node prisma/seed.js` performs: `--templates-only` replaces the step / sub-action / task / charge catalogs in one transaction, `--accounts-only` upserts the role logins. Adding a sub-action to an existing shipment's step is then `node scripts/backfillStepActions.js --apply` (idempotent, dry-run by default).
+The catalogs and the accounts can each be reseeded **on their own**, without the wipe that `node prisma/seed.js` performs: `--templates-only --factory-reset` replaces the step / sub-action / task / charge catalogs in one transaction (**the second flag is mandatory** — a reseed destroys Workflow-panel edits, so the old muscle-memory command now refuses; ADR-051), `--accounts-only` upserts the role logins. Adding a sub-action to an existing shipment's step is then `node scripts/backfillStepActions.js --apply` (idempotent, dry-run by default).
 
 ---
 
