@@ -789,7 +789,9 @@ const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
 
   return (
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="lg">
+      {/* Body scrolls, footer stays clear of it — a dialog-level scroll leaves the last
+          charge line under the sticky footer and past the end of the scroll range. */}
+      <DialogContent size="lg" className="overflow-hidden">
         <DialogHeader>
           <DialogTitle>Quote {query.referenceNo}</DialogTitle>
           <DialogDescription>
@@ -799,97 +801,99 @@ const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={submit} className="space-y-4 py-2">
-          {/* What the customer asked for */}
-          <div className="rounded-lg border bg-muted/30 p-3 space-y-2 text-sm">
-            <div className="flex flex-wrap gap-1">
-              {query.servicePackage && <Badge className="text-[10px]">{labelForPackage(query.servicePackage)}</Badge>}
-              {query.croHandledBy && query.croHandledBy !== "not_applicable" && (
-                <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[query.croHandledBy]}</Badge>
+        <form onSubmit={submit} className="flex flex-1 min-h-0 flex-col gap-4">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
+            {/* What the customer asked for */}
+            <div className="rounded-lg border bg-muted/30 p-3 space-y-2 text-sm">
+              <div className="flex flex-wrap gap-1">
+                {query.servicePackage && <Badge className="text-[10px]">{labelForPackage(query.servicePackage)}</Badge>}
+                {query.croHandledBy && query.croHandledBy !== "not_applicable" && (
+                  <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[query.croHandledBy]}</Badge>
+                )}
+                {query.lcHandledBy && query.lcHandledBy !== "not_applicable" && (
+                  <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[query.lcHandledBy]}</Badge>
+                )}
+                {(query.services ?? []).map((s) => (
+                  <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
+                ))}
+                {query.isHazardous && <Badge variant="outline" className="text-[10px] text-red-600 border-red-300">Hazardous</Badge>}
+                {query.isReefer && <Badge variant="outline" className="text-[10px] text-sky-600 border-sky-300">Reefer</Badge>}
+              </div>
+              {query.croHandledBy === "customer" && (
+                <p className="text-xs text-muted-foreground">
+                  The customer is supplying their own CRO — no CRO charge line is pre-seeded.
+                </p>
               )}
-              {query.lcHandledBy && query.lcHandledBy !== "not_applicable" && (
-                <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[query.lcHandledBy]}</Badge>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {query.containerTypeCode && <span>Container: <b className="text-foreground">{query.containerTypeCode}</b></span>}
+                {query.incoterm && <span>Incoterm: <b className="text-foreground">{query.incoterm}</b></span>}
+                {query.weightKg != null && <span>Weight: <b className="text-foreground">{Number(query.weightKg).toLocaleString()} kg</b></span>}
+              </div>
+              {query.cargoDescription && (
+                <p className="text-xs text-muted-foreground">Cargo: {query.cargoDescription}</p>
               )}
-              {(query.services ?? []).map((s) => (
-                <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
-              ))}
-              {query.isHazardous && <Badge variant="outline" className="text-[10px] text-red-600 border-red-300">Hazardous</Badge>}
-              {query.isReefer && <Badge variant="outline" className="text-[10px] text-sky-600 border-sky-300">Reefer</Badge>}
             </div>
-            {query.croHandledBy === "customer" && (
-              <p className="text-xs text-muted-foreground">
-                The customer is supplying their own CRO — no CRO charge line is pre-seeded.
-              </p>
-            )}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              {query.containerTypeCode && <span>Container: <b className="text-foreground">{query.containerTypeCode}</b></span>}
-              {query.incoterm && <span>Incoterm: <b className="text-foreground">{query.incoterm}</b></span>}
-              {query.weightKg != null && <span>Weight: <b className="text-foreground">{Number(query.weightKg).toLocaleString()} kg</b></span>}
-            </div>
-            {query.cargoDescription && (
-              <p className="text-xs text-muted-foreground">Cargo: {query.cargoDescription}</p>
-            )}
-          </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="gq-ccy">Currency</Label>
-              <Input id="gq-ccy" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5 min-w-0">
+                <Label htmlFor="gq-ccy">Currency</Label>
+                <Input id="gq-ccy" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
+              </div>
+              <div className="space-y-1.5 min-w-0">
+                <Label htmlFor="gq-validity">Valid until (optional)</Label>
+                <Input id="gq-validity" type="date" value={validityDate} onChange={(e) => setValidityDate(e.target.value)} />
+              </div>
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="gq-validity">Valid until (optional)</Label>
-              <Input id="gq-validity" type="date" value={validityDate} onChange={(e) => setValidityDate(e.target.value)} />
-            </div>
-          </div>
 
-          {/* Charge lines */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Charge lines</Label>
-              <Button type="button" size="sm" variant="outline" className="gap-1 h-8" onClick={addLine}>
-                <Plus className="w-3.5 h-3.5" /> Add line
-              </Button>
-            </div>
+            {/* Charge lines */}
             <div className="space-y-2">
-              {lines.map((l, i) => (
-                <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                  <Input
-                    className="col-span-6"
-                    placeholder="Description"
-                    value={l.description}
-                    onChange={(e) => setLine(i, "description", e.target.value)}
-                  />
-                  <Input
-                    className="col-span-2"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="Qty"
-                    value={l.quantity}
-                    onChange={(e) => setLine(i, "quantity", e.target.value)}
-                  />
-                  <Input
-                    className="col-span-3"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="Unit price"
-                    value={l.unitPrice}
-                    onChange={(e) => setLine(i, "unitPrice", e.target.value)}
-                  />
-                  <button
-                    type="button"
-                    className="col-span-1 text-muted-foreground hover:text-destructive disabled:opacity-30"
-                    onClick={() => removeLine(i)}
-                    disabled={lines.length === 1}
-                    aria-label="Remove charge line"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              ))}
+              <div className="flex items-center justify-between">
+                <Label>Charge lines</Label>
+                <Button type="button" size="sm" variant="outline" className="gap-1 h-8" onClick={addLine}>
+                  <Plus className="w-3.5 h-3.5" /> Add line
+                </Button>
+              </div>
+              <div className="space-y-2">
+                {lines.map((l, i) => (
+                  <div key={i} className="grid grid-cols-12 gap-2 items-center">
+                    <Input
+                      className="col-span-6 min-w-0"
+                      placeholder="Description"
+                      value={l.description}
+                      onChange={(e) => setLine(i, "description", e.target.value)}
+                    />
+                    <Input
+                      className="col-span-2 min-w-0"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Qty"
+                      value={l.quantity}
+                      onChange={(e) => setLine(i, "quantity", e.target.value)}
+                    />
+                    <Input
+                      className="col-span-3 min-w-0"
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="Unit price"
+                      value={l.unitPrice}
+                      onChange={(e) => setLine(i, "unitPrice", e.target.value)}
+                    />
+                    <button
+                      type="button"
+                      className="col-span-1 text-muted-foreground hover:text-destructive disabled:opacity-30"
+                      onClick={() => removeLine(i)}
+                      disabled={lines.length === 1}
+                      aria-label="Remove charge line"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+              <div className="text-right text-sm font-semibold pt-1">Total: {money(total, currency)}</div>
             </div>
-            <div className="text-right text-sm font-semibold pt-1">Total: {money(total, currency)}</div>
           </div>
 
           <DialogFooter className="gap-2">

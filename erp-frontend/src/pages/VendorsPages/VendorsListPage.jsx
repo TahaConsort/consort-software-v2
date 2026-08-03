@@ -65,6 +65,7 @@ export default function VendorsListPage({ lockedType }) {
     setForm({ ...EMPTY, ...(lockedType ? { type: lockedType } : {}) });
     setOpen(true);
   };
+  
   const openEdit = (v) => {
     setEditing(v);
     setForm({

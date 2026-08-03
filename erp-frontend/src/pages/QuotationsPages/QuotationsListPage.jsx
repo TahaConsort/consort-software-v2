@@ -239,88 +239,97 @@ const CreateQuotationDialog = ({ busy, onClose, onSubmit }) => {
 
   return (
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="lg" className="max-h-[90vh] overflow-y-auto">
+      {/* overflow-hidden so the FORM scrolls, not the dialog: with the dialog as the
+          scroll container the sticky footer sits on top of the last row and its -mb-5
+          puts those pixels past the end of the scroll range. */}
+      <DialogContent size="lg" className="overflow-hidden">
         <DialogHeader>
           <DialogTitle>New Quotation</DialogTitle>
           <DialogDescription>Totals are computed server-side (RULE-QT-02). Only ops_manager can send.</DialogDescription>
         </DialogHeader>
-        <form onSubmit={submit} className="space-y-4 py-2">
-          <div className="grid sm:grid-cols-3 gap-3">
-            <div className="space-y-1.5 sm:col-span-2">
-              <Label>Query</Label>
-              <Select value={queryId} onValueChange={setQueryId} items={queries.map((q) => ({ value: q.id, label: `${q.referenceNo} — ${q.customerCompany}` }))}>
-                <SelectTrigger><SelectValue placeholder="Select a query…" /></SelectTrigger>
-                <SelectContent>
-                  {queries.map((q) => (
-                    <SelectItem key={q.id} value={q.id}>{q.referenceNo} — {q.customerCompany}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+        <form onSubmit={submit} className="flex flex-1 min-h-0 flex-col gap-4">
+          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div className="space-y-1.5 sm:col-span-2 min-w-0">
+                <Label>Query</Label>
+                <Select value={queryId} onValueChange={setQueryId} items={queries.map((q) => ({ value: q.id, label: `${q.referenceNo} — ${q.customerCompany}` }))}>
+                  {/* w-full: SelectTrigger is `w-fit whitespace-nowrap` by default, so a
+                      single long option ("QRY-… — LINYI TRADE CITY NEW COMMERCIAL
+                      DEVELOPMENT CO.,LTD") sets an un-shrinkable minimum and drags the
+                      whole modal sideways. Clamped, the value truncates instead. */}
+                  <SelectTrigger className="w-full"><SelectValue placeholder="Select a query…" /></SelectTrigger>
+                  <SelectContent>
+                    {queries.map((q) => (
+                      <SelectItem key={q.id} value={q.id}>{q.referenceNo} — {q.customerCompany}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5 min-w-0">
+                <Label htmlFor="qt-ccy">Currency</Label>
+                <Input id="qt-ccy" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
+              </div>
             </div>
+
+            {selectedQuery && (
+              <div className="flex flex-wrap gap-1">
+                {selectedQuery.services.map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
+              </div>
+            )}
+
             <div className="space-y-1.5">
-              <Label htmlFor="qt-ccy">Currency</Label>
-              <Input id="qt-ccy" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
+              <Label htmlFor="qt-validity">Validity date (optional)</Label>
+              <Input id="qt-validity" type="date" value={validityDate} onChange={(e) => setValidityDate(e.target.value)} />
             </div>
-          </div>
 
-          {selectedQuery && (
-            <div className="flex flex-wrap gap-1">
-              {selectedQuery.services.map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
-            </div>
-          )}
-
-          <div className="space-y-1.5">
-            <Label htmlFor="qt-validity">Validity date (optional)</Label>
-            <Input id="qt-validity" type="date" value={validityDate} onChange={(e) => setValidityDate(e.target.value)} />
-          </div>
-
-          {/* Charge lines — sell side + internal cost sheet (buy side) */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Charge lines <span className="text-[11px] font-normal text-muted-foreground">(cost & vendor are internal only)</span></Label>
-              <Button type="button" size="sm" variant="outline" className="gap-1 h-8" onClick={addLine}>
-                <Plus className="w-3.5 h-3.5" /> Add line
-              </Button>
-            </div>
-            <div className="space-y-3">
-              {lines.map((l, i) => (
-                <div key={i} className="border rounded-lg p-2 space-y-2">
-                  <div className="grid grid-cols-12 gap-2 items-center">
-                    <Input className="col-span-6" placeholder="Description" value={l.description} onChange={(e) => setLine(i, "description", e.target.value)} />
-                    <Input className="col-span-2" type="number" min="0" step="0.01" placeholder="Qty" value={l.quantity} onChange={(e) => setLine(i, "quantity", e.target.value)} />
-                    <Input className="col-span-3" type="number" min="0" step="0.01" placeholder="Sell price" value={l.unitPrice} onChange={(e) => setLine(i, "unitPrice", e.target.value)} />
-                    <button type="button" className="col-span-1 text-muted-foreground hover:text-destructive" onClick={() => removeLine(i)} disabled={lines.length === 1}>
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-12 gap-2 items-center">
-                    <div className="col-span-5">
-                      <Select value={l.chargeCode || "none"} onValueChange={(v) => setLine(i, "chargeCode", v === "none" ? "" : v)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Charge type" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">— type —</SelectItem>
-                          {chargeTypes.map((t) => <SelectItem key={t.code} value={t.code}>{t.label}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
+            {/* Charge lines — sell side + internal cost sheet (buy side) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label>Charge lines <span className="text-[11px] font-normal text-muted-foreground">(cost & vendor are internal only)</span></Label>
+                <Button type="button" size="sm" variant="outline" className="gap-1 h-8" onClick={addLine}>
+                  <Plus className="w-3.5 h-3.5" /> Add line
+                </Button>
+              </div>
+              <div className="space-y-3">
+                {lines.map((l, i) => (
+                  <div key={i} className="border rounded-lg p-2 space-y-2">
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <Input className="col-span-6 min-w-0" placeholder="Description" value={l.description} onChange={(e) => setLine(i, "description", e.target.value)} />
+                      <Input className="col-span-2 min-w-0" type="number" min="0" step="0.01" placeholder="Qty" value={l.quantity} onChange={(e) => setLine(i, "quantity", e.target.value)} />
+                      <Input className="col-span-3 min-w-0" type="number" min="0" step="0.01" placeholder="Sell price" value={l.unitPrice} onChange={(e) => setLine(i, "unitPrice", e.target.value)} />
+                      <button type="button" className="col-span-1 justify-self-center text-muted-foreground hover:text-destructive" onClick={() => removeLine(i)} disabled={lines.length === 1}>
+                        <Trash2 className="w-4 h-4" />
+                      </button>
                     </div>
-                    <Input className="col-span-3 h-8 text-xs" type="number" min="0" step="0.01" placeholder="Cost (buy)" value={l.cost} onChange={(e) => setLine(i, "cost", e.target.value)} />
-                    <div className="col-span-4">
-                      <Select value={l.vendorId || "none"} onValueChange={(v) => setLine(i, "vendorId", v === "none" ? "" : v)}>
-                        <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Vendor" /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="none">— vendor —</SelectItem>
-                          {vendors.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>)}
-                        </SelectContent>
-                      </Select>
+                    <div className="grid grid-cols-12 gap-2 items-center">
+                      <div className="col-span-5 min-w-0">
+                        <Select value={l.chargeCode || "none"} onValueChange={(v) => setLine(i, "chargeCode", v === "none" ? "" : v)}>
+                          <SelectTrigger className="h-8 w-full text-xs"><SelectValue placeholder="Charge type" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">— type —</SelectItem>
+                            {chargeTypes.map((t) => <SelectItem key={t.code} value={t.code}>{t.label}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <Input className="col-span-3 h-8 text-xs" type="number" min="0" step="0.01" placeholder="Cost (buy)" value={l.cost} onChange={(e) => setLine(i, "cost", e.target.value)} />
+                      <div className="col-span-4 min-w-0">
+                        <Select value={l.vendorId || "none"} onValueChange={(v) => setLine(i, "vendorId", v === "none" ? "" : v)}>
+                          <SelectTrigger className="h-8 w-full text-xs"><SelectValue placeholder="Vendor" /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="none">— vendor —</SelectItem>
+                            {vendors.map((v) => <SelectItem key={v.id} value={v.id}>{v.name}</SelectItem>)}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
-            </div>
-            <div className="flex items-center justify-end gap-4 text-sm pt-1">
-              <span className="text-muted-foreground">Cost {money(costTotal, currency)}</span>
-              <span className="font-semibold">Sell {money(total, currency)}</span>
-              <span className={`font-semibold ${margin >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>Margin {money(margin, currency)}</span>
+                ))}
+              </div>
+              <div className="flex items-center justify-end gap-4 text-sm pt-1">
+                <span className="text-muted-foreground">Cost {money(costTotal, currency)}</span>
+                <span className="font-semibold">Sell {money(total, currency)}</span>
+                <span className={`font-semibold ${margin >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>Margin {money(margin, currency)}</span>
+              </div>
             </div>
           </div>
 
