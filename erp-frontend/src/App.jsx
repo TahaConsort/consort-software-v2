@@ -38,6 +38,8 @@ import ShipmentDetailPage from "./pages/ShipmentsPages/ShipmentDetailPage";
 import TasksListPage from "./pages/TasksPages/TasksListPage";
 import FinanceListPage from "./pages/FinancePages/FinanceListPage";
 import VendorsListPage from "./pages/VendorsPages/VendorsListPage";
+import DriversListPage from "./pages/VendorsPages/DriversListPage";
+import VehiclesListPage from "./pages/VendorsPages/VehiclesListPage";
 import ActionEngineListPage from "./pages/ActionEnginePages/ActionEngineListPage";
 import ReportsListPage from "./pages/ReportsPages/ReportsListPage";
 import AuditListPage from "./pages/AuditPages/AuditListPage";
@@ -64,6 +66,7 @@ const INQUIRY_ROLES = ["asm", "bdo"]; // direct-channel triage (§5.20)
 const LC_ROLES = ["ops_manager", "ops_exec"]; // bank-LC inbox (§5.21)
 const LOADBOARD_ROLES = ["ops_manager", "transport_manager"]; // load board management (§5.20)
 const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"]; // vendor.read (freight-forwarding OTC)
+const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // fleet.read — own drivers & vehicles
 
 const App = () => {
   return (
@@ -159,9 +162,22 @@ const App = () => {
                 <Route path="finance" element={<FinanceListPage />} />
               </Route>
 
-              {/* Vendors — Ops/Transport/Compliance/Finance/Sales + Management */}
+              {/* Vendors — Ops/Transport/Compliance/Finance/Sales + Management.
+                  Shipping Lines and Transporters are the same screen pinned to one
+                  vendor type; Drivers/Trucks/Dumpers are the own-fleet masters. The
+                  `key` forces a remount between sibling routes that share a
+                  component, so the list never carries over. */}
               <Route element={<RoleGuard allowedRoles={VENDOR_ROLES} />}>
                 <Route path="vendors" element={<VendorsListPage />} />
+                <Route path="vendors/shipping-lines" element={<VendorsListPage key="shipping_line" lockedType="shipping_line" />} />
+                <Route path="vendors/transporters" element={<VendorsListPage key="transporter" lockedType="transporter" />} />
+              </Route>
+
+              {/* Own fleet — drivers, trucks, dumpers (fleet.read/fleet.manage) */}
+              <Route element={<RoleGuard allowedRoles={FLEET_ROLES} />}>
+                <Route path="vendors/drivers" element={<DriversListPage />} />
+                <Route path="vendors/trucks" element={<VehiclesListPage key="truck" kind="truck" />} />
+                <Route path="vendors/dumpers" element={<VehiclesListPage key="dumper" kind="dumper" />} />
               </Route>
             </Route>
           </Route>

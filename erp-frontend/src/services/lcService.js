@@ -18,3 +18,13 @@ export const rejectReferral = async (id, reason) =>
 
 export const convertReferral = async (id, payload = {}) =>
   (await api.post(`/lc-referrals/${id}/convert`, payload)).data;
+
+/**
+ * Read the LC PDF attached to a referral — SWIFT MT700/710 fields, the resolved port
+ * codes and the raw text layer. Read-only: nothing is written until `applyExtraction`.
+ */
+export const extractReferral = async (id) => (await api.get(`/lc-referrals/${id}/extract`)).data;
+
+/** Write the PDF's fields onto the referral (empty columns only unless `overwrite`). */
+export const applyExtraction = async (id, overwrite = false) =>
+  (await api.post(`/lc-referrals/${id}/extract/apply`, { overwrite })).data;

@@ -311,3 +311,12 @@ export const VENDOR_TYPE_LABELS = {
 };
 
 export const VENDOR_TYPE_OPTIONS = Object.entries(VENDOR_TYPE_LABELS).map(([value, label]) => ({ value, label }));
+
+// ── Own fleet — drivers and vehicles (not vendors: never billed) ──
+
+export const VEHICLE_KIND_LABELS = {
+  truck: "Truck",
+  dumper: "Dumper",
+};
+
+export const VEHICLE_KIND_OPTIONS = Object.entries(VEHICLE_KIND_LABELS).map(([value, label]) => ({ value, label }));

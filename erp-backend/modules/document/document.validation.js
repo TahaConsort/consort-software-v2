@@ -2,7 +2,14 @@ import { z } from "zod";
 
 /** Documents — request schemas (CRM_MASTER §5.13, RULE-DOC). */
 
-const OWNER_TYPES = ["shipment", "quotation", "query", "lead", "customer", "task", "chat_message"];
+// `vendor`, `driver` and `vehicle` are master-data owners: the compliance paperwork
+// that proves a counterparty or an asset may move cargo (CNIC, licence, registration).
+// Internal-only — a portal customer is denied them in `ownerInScope`.
+const OWNER_TYPES = [
+  "shipment", "quotation", "query", "lead", "customer", "task", "chat_message",
+  "vendor", "driver", "vehicle",
+  "lc_referral", // the bank's SWIFT advice — the source document a query is built from
+];
 
 // The document-type vocabulary lives in the `document_types` table since ADR-051
 // (admin-managed; uploads are checked against ACTIVE rows in the controller via
@@ -36,6 +43,13 @@ export const DOC_TYPES = [
   "delivery_order",
   "gate_pass",
   "proof", // evidence attached to a specific step (pickup photo, gate pass, …)
+  // Master-data paperwork — vendors, drivers and own vehicles
+  "cnic", // national ID card scan (driver)
+  "driving_license",
+  "vehicle_registration", // registration book / number plate document
+  "route_permit",
+  "insurance",
+  "tax_certificate", // vendor NTN/STRN certificate
   "other",
 ];
 
@@ -70,6 +84,12 @@ export const DOC_TYPE_LABELS = {
   delivery_order: "Delivery Order (DO)",
   gate_pass: "Gate Pass",
   proof: "Proof / Evidence",
+  cnic: "CNIC (National ID)",
+  driving_license: "Driving Licence",
+  vehicle_registration: "Vehicle Registration",
+  route_permit: "Route Permit",
+  insurance: "Insurance Certificate",
+  tax_certificate: "Tax Certificate (NTN/STRN)",
   other: "Other",
 };
 

@@ -19,6 +19,7 @@ import { pathToFileURL } from "url";
 import prisma from "../config/prisma.js";
 import { DEFAULT_CURRENCY } from "../utils/currency.js";
 import { deriveTaskTemplateData } from "../utils/taskTemplates.js";
+import { seedDemoLcReferral } from "../modules/lc/lc.seed.js";
 
 const DEPARTMENTS = [
   { code: "management", name: "Management" },
@@ -283,6 +284,13 @@ const DOCUMENT_TYPES = [
   { code: "delivery_order", label: "Delivery Order (DO)" },
   { code: "gate_pass", label: "Gate Pass" },
   { code: "proof", label: "Proof / Evidence" },
+  // Master-data paperwork — vendors, drivers and own vehicles
+  { code: "cnic", label: "CNIC (National ID)" },
+  { code: "driving_license", label: "Driving Licence" },
+  { code: "vehicle_registration", label: "Vehicle Registration" },
+  { code: "route_permit", label: "Route Permit" },
+  { code: "insurance", label: "Insurance Certificate" },
+  { code: "tax_certificate", label: "Tax Certificate (NTN/STRN)" },
   { code: "other", label: "Other" },
 ].map((t, i) => ({
   ...t,
@@ -497,6 +505,8 @@ async function assertWipeAllowed() {
   What you almost certainly want instead:
     node prisma/seed.js --templates-only   step/task/charge catalogs (upserts, no delete)
     node prisma/seed.js --accounts-only    role logins + reporting tree (upserts, no delete)
+    node prisma/seed.js --lc-only          demo bank-LC referral + its SWIFT advice PDF
+                                           (insert-if-absent; touches nothing else)
 
   If you genuinely mean to destroy everything above, say so:
     node prisma/seed.js --force-wipe
@@ -707,6 +717,10 @@ async function main() {
   // 5 — Bootstrap accounts (one active login per role + CEO reporting tree + heads)
   await seedAccounts();
 
+  // 6 — Demo bank-LC referral with the real SWIFT advice attached (§5.21). AFTER
+  // accounts, because the upload is attributed to an ops_manager.
+  await seedDemoLcReferral();
+
   console.log("Seed complete.");
 }
 
@@ -726,9 +740,14 @@ if (isEntryPoint) {
   //                                     catalog with the factory rows — see guard below;
   //                                     document types are upserts and always survive)
   //   --accounts-only                   role logins, reporting tree, dept heads (upserts)
+  //   --lc-only                         demo bank-LC referral + the SWIFT advice PDF
+  //                                     (insert-if-absent; safe on a live database)
   //   --force-wipe                      override the guard and clear everything
   const templatesOnly = process.argv.includes("--templates-only");
   const accountsOnly = process.argv.includes("--accounts-only");
+  // The demo LC is pure insert-if-absent — no deletes, no upserts over existing rows —
+  // so it is safe to run on its own against a database that already holds real work.
+  const lcOnly = process.argv.includes("--lc-only");
 
   // Since ADR-051 the step catalog is edited LIVE in the Workflow admin panel, so a
   // template reseed is no longer harmless: it REPLACES every step/sub-action row with
@@ -745,17 +764,19 @@ if (isEntryPoint) {
     process.exit(1);
   }
 
-  const run = templatesOnly && accountsOnly
-    ? seedTemplates().then(seedAccounts)
-    : templatesOnly
-      ? seedTemplates()
-      : accountsOnly
-        ? seedAccounts()
-        : main();
+  const run = lcOnly && !templatesOnly && !accountsOnly
+    ? seedDemoLcReferral()
+    : templatesOnly && accountsOnly
+      ? seedTemplates().then(seedAccounts)
+      : templatesOnly
+        ? seedTemplates()
+        : accountsOnly
+          ? seedAccounts()
+          : main();
 
   run
     .then(() => {
-      if (templatesOnly || accountsOnly) console.log("Partial seed complete (no data was cleared).");
+      if (templatesOnly || accountsOnly || lcOnly) console.log("Partial seed complete (no data was cleared).");
     })
     .catch((e) => {
       console.error("Seed failed:", e);

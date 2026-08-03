@@ -29,6 +29,7 @@ import loadboardRoutes from "./modules/loadboard/loadboard.routes.js";
 import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
+import { driverRouter, vehicleRouter } from "./modules/fleet/fleet.routes.js";
 import workflowRoutes from "./modules/workflow/workflow.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
 import { AppError } from "./utils/AppError.js";
@@ -43,7 +44,7 @@ app.use(
   cors({
     origin: [
       "https://consort-erp-client.vercel.app",
-      "http://192.168.50.26:5173",
+      "https://crescent-ungraded-curable.ngrok-free.dev",
       "http://localhost:5173",
       "http://127.0.0.1:5173",
     ],
@@ -105,6 +106,8 @@ app.use("/api/otc", otcRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/vendors", vendorRoutes);
+app.use("/api/drivers", driverRouter); // own fleet — drivers
+app.use("/api/vehicles", vehicleRouter); // own fleet — trucks & dumpers
 app.use("/api/documents", documentRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/dashboard", dashboardRoutes);

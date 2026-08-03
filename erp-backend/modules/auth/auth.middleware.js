@@ -36,6 +36,8 @@ const MANAGEMENT_PERMS = [
   "inquiry.read", "inquiry.convert", "lc.read", "lc.convert", "loadboard.manage",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
+  // Own fleet — drivers, trucks, dumpers
+  "fleet.read", "fleet.manage",
   // Workflow catalog admin (ADR-051) — steps, checklists, document types
   "workflow.manage",
 ];
@@ -91,6 +93,7 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "lc.read", "lc.convert", "loadboard.manage",
     "vendor.read", "vendor.manage",
+    "fleet.read", "fleet.manage",
   ],
 
   ops_exec: [
@@ -102,6 +105,9 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "dashboard.read",
     "lc.read", "lc.convert",
     "vendor.read",
+    // Ops executives keep the fleet masters current — they are the people who
+    // meet the driver and the truck, so they add them, not just read them.
+    "fleet.read", "fleet.manage",
   ],
 
   compliance_manager: [
@@ -130,6 +136,7 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "loadboard.manage",
     "vendor.read", "vendor.manage",
+    "fleet.read", "fleet.manage",
   ],
 
   // Mirrors compliance_exec. Transport owns 5 of the 6 steps on a Local Transport job,

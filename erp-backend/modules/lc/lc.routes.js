@@ -9,6 +9,8 @@ import {
   updateReferralStatus,
   rejectReferral,
   convertReferral,
+  extractReferral,
+  applyExtraction,
 } from "./lc.controllers.js";
 
 /**
@@ -26,6 +28,8 @@ const inboxRouter = express.Router();
 inboxRouter.use(protect);
 inboxRouter.get("/", requirePermission("lc.read"), listReferrals);
 inboxRouter.get("/:id", requirePermission("lc.read"), getReferral);
+inboxRouter.get("/:id/extract", requirePermission("lc.read"), extractReferral); // read the attached PDF
+inboxRouter.post("/:id/extract/apply", requirePermission("lc.convert"), applyExtraction);
 inboxRouter.patch("/:id/status", requirePermission("lc.read"), validate(updateLcStatusSchema), updateReferralStatus);
 inboxRouter.post("/:id/reject", requirePermission("lc.convert"), validate(rejectLcSchema), rejectReferral);
 inboxRouter.post("/:id/convert", requirePermission("lc.convert"), validate(convertLcSchema), convertReferral);

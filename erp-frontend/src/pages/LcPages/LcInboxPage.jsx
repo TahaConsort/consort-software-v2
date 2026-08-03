@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Landmark, Loader2, ArrowRight, Ban, Eye, Check } from "lucide-react";
+import { Landmark, Loader2, ArrowRight, Ban, Eye, Check, FileText, ScanLine, Download } from "lucide-react";
 import toast from "react-hot-toast";
 import { useTopicRefresh } from "@/lib/useTopicRefresh";
 import { invalidate } from "@/lib/invalidationBus";
@@ -13,7 +13,8 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { useAuthStore } from "@/store/authStore";
-import { listReferrals, setReferralStatus, rejectReferral, convertReferral } from "@/services/lcService";
+import { listReferrals, setReferralStatus, rejectReferral, convertReferral, extractReferral, applyExtraction } from "@/services/lcService";
+import { downloadDocument } from "@/services/documentService";
 import { DEFAULT_CURRENCY } from "@/lib/catalog";
 
 const STATUS_STYLE = {
@@ -27,6 +28,143 @@ const money = (n, ccy = DEFAULT_CURRENCY) =>
   n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || DEFAULT_CURRENCY, maximumFractionDigits: 0 }).format(Number(n));
 
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : "—");
+
+/**
+ * The LC advice attached to a referral, and the fields read out of it.
+ *
+ * A bank that posts to the webhook sends structured JSON; a bank that emails the
+ * SWIFT printout sends a PDF and nothing else. For the second case the referral row
+ * is empty until someone reads the document — so this panel does the reading, shows
+ * exactly what it found, and only writes to the referral when the operator says so.
+ * Nothing here is automatic: an extracted field is a suggestion until applied.
+ */
+const LcSourcePanel = ({ referral, canApply, onApplied }) => {
+  const [state, setState] = useState({ status: "idle" }); // idle | loading | ready | none | error
+  const [applying, setApplying] = useState(false);
+  const [showText, setShowText] = useState(false);
+
+  const read = async () => {
+    setState({ status: "loading" });
+    try {
+      const res = await extractReferral(referral.id);
+      setState({ status: "ready", data: res.data });
+    } catch (err) {
+      // 404 = no PDF attached, which is normal for webhook referrals, not an error.
+      setState(err?.status === 404 ? { status: "none" } : { status: "error", message: err?.message });
+    }
+  };
+
+  const apply = async () => {
+    setApplying(true);
+    try {
+      const res = await applyExtraction(referral.id);
+      toast.success(res?.message || "LC fields applied");
+      await onApplied?.();
+    } catch (err) {
+      toast.error(err?.message || "Could not apply the LC fields");
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const f = state.data?.fields;
+  const doc = state.data?.document;
+
+  const ROWS = f ? [
+    ["LC number", f.lcNumber],
+    ["Applicant", f.applicantName],
+    ["Beneficiary", f.beneficiaryName],
+    ["Issuing bank", [f.issuingBankName, f.issuingBankBic].filter(Boolean).join(" · ")],
+    ["Amount", f.amount != null ? `${f.currency ?? ""} ${Number(f.amount).toLocaleString()}`.trim() : null],
+    ["Commodity", [f.commodity, f.quantity].filter(Boolean).join(" · ")],
+    ["Lane", (f.originPort || f.destinationPort) ? `${f.originPort ?? "?"} → ${f.destinationPort ?? "?"}` : null],
+    ["Price term", f.priceTerm || f.incoterm],
+    ["Latest shipment", fmtDate(f.latestShipmentDate)],
+    ["Expiry", fmtDate(f.expiryDate)],
+    ["Partial / transhipment", [f.partialShipments, f.transhipment].filter(Boolean).join(" / ")],
+  ].filter(([, v]) => v && v !== "—") : [];
+
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium flex items-center gap-1.5">
+          <FileText className="w-3.5 h-3.5" /> LC document
+        </p>
+        {state.status === "idle" && (
+          <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={read}>
+            <ScanLine className="w-3.5 h-3.5" /> Read LC
+          </Button>
+        )}
+      </div>
+
+      {state.status === "loading" && (
+        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Reading the advice…
+        </p>
+      )}
+      {state.status === "none" && (
+        <p className="text-xs text-muted-foreground">No LC document attached — this referral came in through the bank webhook.</p>
+      )}
+      {state.status === "error" && <p className="text-xs text-destructive">{state.message}</p>}
+
+      {state.status === "ready" && (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="truncate text-muted-foreground" title={doc?.fileName}>{doc?.fileName}</span>
+            <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[11px] gap-1"
+              onClick={() => downloadDocument(doc.id, doc.fileName)}>
+              <Download className="w-3 h-3" /> Get
+            </Button>
+          </div>
+
+          {ROWS.length === 0 ? (
+            <p className="text-xs text-amber-600">
+              The PDF has no readable SWIFT tags — it may be a scan. Enter the fields by hand.
+            </p>
+          ) : (
+            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+              {ROWS.map(([k, v]) => (
+                <div key={k} className="contents">
+                  <dt className="text-muted-foreground whitespace-nowrap">{k}</dt>
+                  <dd className="font-medium break-words">{v}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
+
+          {/* A lane the LC states but we hold no port code for. Saying so beats
+              silently converting a query with an empty destination. */}
+          {f?.destinationPort && !state.data.resolved.destinationPortCode && (
+            <p className="text-[11px] text-amber-600">
+              “{f.destinationPort}” is not in the ports list — the query's destination will be blank until it is added.
+            </p>
+          )}
+          {f?.originPort && !state.data.resolved.originPortCode && (
+            <p className="text-[11px] text-amber-600">“{f.originPort}” is not in the ports list.</p>
+          )}
+
+          <div className="flex items-center gap-2 pt-0.5">
+            {canApply && ROWS.length > 0 && (
+              <Button size="sm" className="h-7 text-xs gap-1" disabled={applying} onClick={apply}>
+                {applying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                Apply to referral
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowText((s) => !s)}>
+              {showText ? "Hide" : "Show"} raw text
+            </Button>
+          </div>
+
+          {showText && (
+            <pre className="max-h-52 overflow-auto rounded border bg-background p-2 text-[10px] leading-relaxed whitespace-pre-wrap scrollbar-thin">
+              {state.data.text}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 /**
  * Bank LC inbox (CRM_MASTER §5.21) — the Operations inbox for the *bank_lc*
@@ -177,21 +315,32 @@ export default function LcInboxPage() {
 
       {/* Detail dialog */}
       <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <DialogContent>
+        <DialogContent size="lg" className="overflow-hidden">
           {detail && (
             <>
               <DialogHeader>
                 <DialogTitle>{detail.referenceNo} · LC {detail.lcNumber}</DialogTitle>
                 <DialogDescription>{detail.bankName || "Bank"}{detail.bankRef ? ` · ${detail.bankRef}` : ""}</DialogDescription>
               </DialogHeader>
-              <div className="space-y-1.5 text-sm">
-                <p><span className="text-muted-foreground">Applicant:</span> {detail.applicantName || "—"}{detail.applicantEmail ? ` · ${detail.applicantEmail}` : ""}</p>
-                {detail.beneficiaryName && <p><span className="text-muted-foreground">Beneficiary:</span> {detail.beneficiaryName}</p>}
-                <p><span className="text-muted-foreground">Lane:</span> {detail.originPort || "—"} → {detail.destinationPort || "—"}</p>
-                {detail.commodity && <p><span className="text-muted-foreground">Commodity:</span> {detail.commodity}</p>}
-                <p><span className="text-muted-foreground">Amount:</span> {money(detail.amount, detail.currency)}{detail.incoterm ? ` · ${detail.incoterm}` : ""}</p>
-                <p><span className="text-muted-foreground">Issue / Expiry:</span> {fmtDate(detail.issueDate)} → {fmtDate(detail.expiryDate)}</p>
-                {detail.rejectReason && <p className="text-destructive">Rejected: {detail.rejectReason}</p>}
+              <div className="flex-1 min-h-0 overflow-y-auto space-y-3 px-1 -mx-1 scrollbar-thin">
+                <div className="space-y-1.5 text-sm">
+                  <p><span className="text-muted-foreground">Applicant:</span> {detail.applicantName || "—"}{detail.applicantEmail ? ` · ${detail.applicantEmail}` : ""}</p>
+                  {detail.beneficiaryName && <p><span className="text-muted-foreground">Beneficiary:</span> {detail.beneficiaryName}</p>}
+                  <p><span className="text-muted-foreground">Lane:</span> {detail.originPort || "—"} → {detail.destinationPort || "—"}</p>
+                  {detail.commodity && <p><span className="text-muted-foreground">Commodity:</span> {detail.commodity}</p>}
+                  <p><span className="text-muted-foreground">Amount:</span> {money(detail.amount, detail.currency)}{detail.incoterm ? ` · ${detail.incoterm}` : ""}</p>
+                  <p><span className="text-muted-foreground">Issue / Expiry:</span> {fmtDate(detail.issueDate)} → {fmtDate(detail.expiryDate)}</p>
+                  {detail.rejectReason && <p className="text-destructive">Rejected: {detail.rejectReason}</p>}
+                </div>
+
+                {/* The advice itself, and what we can read out of it. An LC that arrives
+                    as a PDF has no structured fields until someone reads them — this is
+                    where that happens, under review, before anything is written. */}
+                <LcSourcePanel
+                  referral={detail}
+                  canApply={canConvert && !["converted", "rejected"].includes(detail.status)}
+                  onApplied={async () => { await reload(); setDetail(null); }}
+                />
               </div>
               <DialogFooter className="flex-wrap gap-2">
                 {!["converted", "rejected"].includes(detail.status) && (
@@ -225,7 +374,8 @@ export default function LcInboxPage() {
           <DialogHeader>
             <DialogTitle>Convert {convertTarget?.referenceNo}?</DialogTitle>
             <DialogDescription>
-              This creates a customer (source: bank LC), a lead and a query (LC / Trade Finance is added automatically). You can then draft a quotation.
+              This creates a customer (source: bank LC), a lead and a query (LC / Trade Finance is added automatically), which Operations can then quote.
+              Any field still empty on the referral is read from the attached LC first, so the query carries the lane, commodity and value the bank stated.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

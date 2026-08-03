@@ -103,20 +103,31 @@ export const materializeCustomerAndQuery = async (
   });
 
   // 4. Lead — recorded as already converted, for source/history tracking.
-  const leadRef = await allocateRef(tx, "lead");
-  const lead = await tx.lead.create({
-    data: {
-      referenceNo: leadRef,
-      companyId: company.id,
-      contactId: contact.id,
-      source,
-      status: "converted",
-      ownerId,
-      createdById,
-      convertedAt: new Date(),
-      convertedToCustomerId: customer.id,
-    },
-  });
+  //
+  // A customer originates from exactly ONE lead (convertedToCustomerId is unique), and
+  // the customer above is reused whenever the company already exists (INV-06). So the
+  // SECOND intake from a company we already serve — a repeat LC from the same importer,
+  // a second web inquiry — must attach to that customer's existing lead. Creating one
+  // unconditionally, as this did, made every such conversion die on a unique-constraint
+  // 500 with nothing saved and no usable message.
+  let lead = await tx.lead.findFirst({ where: { convertedToCustomerId: customer.id } });
+  const leadIsNew = !lead;
+  if (!lead) {
+    const leadRef = await allocateRef(tx, "lead");
+    lead = await tx.lead.create({
+      data: {
+        referenceNo: leadRef,
+        companyId: company.id,
+        contactId: contact.id,
+        source,
+        status: "converted",
+        ownerId,
+        createdById,
+        convertedAt: new Date(),
+        convertedToCustomerId: customer.id,
+      },
+    });
+  }
   await tx.leadStatusHistory.create({
     data: {
       leadId: lead.id,
@@ -126,7 +137,11 @@ export const materializeCustomerAndQuery = async (
       notes: note ?? "Created from intake channel",
     },
   });
-  await emitEvent(tx, "lead.created", { leadId: lead.id, referenceNo: leadRef, source });
+  // The history entry is written either way — it is the record of THIS intake landing
+  // on the lead — but `lead.created` only fires for a lead that was actually created.
+  if (leadIsNew) {
+    await emitEvent(tx, "lead.created", { leadId: lead.id, referenceNo: lead.referenceNo, source });
+  }
 
   // 5. Query — the intake channel supplies raw services rather than a package, so
   //    infer one from them; resolveServices then applies the preset and the

@@ -4,6 +4,7 @@ import {
   listDocuments,
   listDocTypes,
   downloadDocument,
+  previewDocument,
   publishDocument,
   deleteDocument,
   requiredDocsForShipment,
@@ -28,6 +29,7 @@ router.get("/types", listDocTypes);
 router.get("/required/:shipmentId", requirePermission("document.read"), requiredDocsForShipment);
 router.get("/", requirePermission("document.read"), validateQuery(listQuerySchema), listDocuments);
 router.get("/:id/download", requirePermission("document.read"), downloadDocument);
+router.get("/:id/preview", requirePermission("document.read"), previewDocument); // inline, for thumbnails
 
 router.post("/", requirePermission("document.upload"), uploadSingle("file"), validate(uploadSchema), uploadDocument);
 router.post("/:id/publish", requirePermission("document.publish"), publishDocument);

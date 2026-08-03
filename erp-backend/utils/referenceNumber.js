@@ -18,6 +18,8 @@ const PREFIXES = {
   lc_referral: "LC", // bank LC intake webhook (CRM_MASTER §5.21)
   load_board: "LB", // load board posting (CRM_MASTER §5.20)
   vendor: "VEN", // vendor/carrier master (freight-forwarding OTC upgrade)
+  driver: "DRV", // own-fleet driver master
+  vehicle: "VEH", // own-fleet truck/dumper master
 };
 
 export const allocateRef = async (tx, entity) => {

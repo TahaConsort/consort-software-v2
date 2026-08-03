@@ -6,6 +6,7 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { ownerInScope } from "./document.middleware.js";
 import {
   absPathFor,
+  buildDocumentFileName,
   checksumFile,
   safeUnlink,
   sniffMatchesMime,
@@ -20,6 +21,9 @@ import { lockReason } from "../shipment/shipment.service.js";
  * no publishing, no deletes. Non-shipment owners (leads, customers…) never lock.
  * @returns a refusal string, or null when writing is allowed
  */
+// Owners whose documents are ours alone — no customer ever sees a driver's CNIC.
+const MASTER_DATA_OWNERS = new Set(["vendor", "driver", "vehicle", "lc_referral"]);
+
 const shipmentLockReason = async (ownerType, ownerId, action) => {
   if (ownerType !== "shipment") return null;
   const shipment = await prisma.shipment.findUnique({ where: { id: ownerId } });
@@ -204,12 +208,25 @@ export const uploadDocument = catchAsync(async (req, res, next) => {
 
   const storageKey = req.file.filename; // relative to uploads/ (Phase-2: swap adapter)
   const created = await prisma.$transaction(async (tx) => {
+    // A typed upload is renamed after the document it satisfies — IMG_0043.pdf
+    // becomes SHIP-2025-00042_Bill-of-Lading.pdf. Display name only; the bytes stay
+    // under the UUID storageKey. Computed inside the transaction so the "_2" suffix
+    // is chosen against the same snapshot the row is written into.
+    const fileName = await buildDocumentFileName({
+      ownerType,
+      ownerId,
+      docType,
+      originalName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      db: tx,
+    });
+
     const doc = await tx.document.create({
       data: {
         ownerType,
         ownerId,
         otdStepId: otdStepId ?? null,
-        fileName: req.file.originalname,
+        fileName,
         mimeType: req.file.mimetype,
         sizeBytes: req.file.size,
         checksum,
@@ -219,7 +236,15 @@ export const uploadDocument = catchAsync(async (req, res, next) => {
         uploadedById: req.user.id,
       },
     });
-    await audit(tx, req.user.id, "document.upload", doc, { ownerType, ownerId, docType: docType ?? null, fileName: doc.fileName });
+    // originalName is kept in the audit trail, not the row: renaming is for reading,
+    // and what the uploader actually handed over must stay recoverable (INV-15).
+    await audit(tx, req.user.id, "document.upload", doc, {
+      ownerType,
+      ownerId,
+      docType: docType ?? null,
+      fileName: doc.fileName,
+      originalName: req.file.originalname,
+    });
     await emitDocumentsChanged(tx, doc, { change: "upload", actorRole: req.user.role });
     return doc;
   });
@@ -268,6 +293,52 @@ export const downloadDocument = catchAsync(async (req, res, next) => {
   fs.createReadStream(abs).pipe(res);
 });
 
+/* ── GET /api/documents/:id/preview ── (inline bytes for a thumbnail) */
+/**
+ * The same bytes as /download, served inline for on-screen rendering.
+ *
+ * A separate route rather than reusing /download because of the audit trail: the
+ * master-data panels render a thumbnail for every image the moment a dialog opens,
+ * and routing that through `document.download` would fill the log with copies that
+ * nobody took. `document.preview` keeps "downloaded" meaning downloaded while still
+ * recording that the content was shown — the read is never silent (INV-15).
+ *
+ * Restricted to formats a browser renders natively; anything else is a download.
+ */
+const PREVIEWABLE = new Set(["image/png", "image/jpeg", "image/webp", "application/pdf"]);
+
+export const previewDocument = catchAsync(async (req, res, next) => {
+  const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+  if (!doc || doc.deletedAt) return next(new AppError("Document not found", 404));
+
+  const allowed = await ownerInScope(req.user, doc.ownerType, doc.ownerId);
+  if (!allowed || (req.user.role === "customer" && !doc.isPublished)) {
+    return next(new AppError("Document not found", 404));
+  }
+  if (!PREVIEWABLE.has(doc.mimeType)) {
+    return next(new AppError("This file type has no inline preview", 415));
+  }
+
+  const abs = absPathFor(doc.storageKey);
+  if (!fs.existsSync(abs)) return next(new AppError("Stored file is missing", 410));
+
+  await prisma.auditLog.create({
+    data: {
+      actorId: req.user.id,
+      action: "document.preview",
+      resourceType: "document",
+      resourceId: doc.id,
+      correlationId: crypto.randomUUID(),
+    },
+  });
+
+  res.setHeader("Content-Type", doc.mimeType);
+  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(doc.fileName)}"`);
+  // Private: the bytes are internal, and a shared cache must never hold a CNIC scan.
+  res.setHeader("Cache-Control", "private, max-age=300");
+  fs.createReadStream(abs).pipe(res);
+});
+
 /* ── POST /api/documents/:id/publish ── (manager-level, INV-10, RULE-DOC-01) */
 export const publishDocument = catchAsync(async (req, res, next) => {
   const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
@@ -275,6 +346,15 @@ export const publishDocument = catchAsync(async (req, res, next) => {
 
   const allowed = await ownerInScope(req.user, doc.ownerType, doc.ownerId, { forWrite: true });
   if (!allowed) return next(new AppError("Document not found", 404));
+
+  // Master data has no portal audience — a customer cannot reach a driver or a
+  // vehicle at all (ownerInScope), so publishing one would set a flag that reads
+  // as "the customer can see this" while meaning nothing. Refuse it outright
+  // rather than leave a misleading badge on a CNIC scan.
+  if (MASTER_DATA_OWNERS.has(doc.ownerType)) {
+    return next(new AppError("Master-data documents are internal only and cannot be published", 409));
+  }
+
   if (doc.isPublished) return res.json({ success: true, message: "Already published", data: publicShape(doc) });
 
   const updated = await prisma.$transaction(async (tx) => {

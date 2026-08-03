@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, Flame, Snowflake, FileText, Send, Trash2, CheckCircle2, Check, X } from "lucide-react";
+import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, Flame, Snowflake, FileText, Send, Trash2, CheckCircle2, Check, X, Eye, Landmark } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +38,7 @@ import {
   packageUsesDeliveryAddress, packageUsesImportTerms, routeOf, DEFAULT_CURRENCY,
 } from "@/lib/catalog";
 import { quoteTemplateFor } from "@/lib/quoteTemplates";
+import QueryLcDetails from "./QueryLcDetails";
 
 const STATUS_STYLES = {
   open: "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300",
@@ -70,6 +71,7 @@ const QueriesListPage = () => {
   const [cancelFor, setCancelFor] = useState(null);
   const [quoteFor, setQuoteFor] = useState(null);
   const [decideFor, setDecideFor] = useState(null);
+  const [detailFor, setDetailFor] = useState(null);
 
   useEffect(() => { fetchQueries(); }, [fetchQueries]);
 
@@ -175,6 +177,8 @@ const QueriesListPage = () => {
                   <span className="ml-1.5 inline-flex gap-1 align-middle">
                     {q.isHazardous && <Flame className="w-3.5 h-3.5 text-red-500" title="Hazardous" />}
                     {q.isReefer && <Snowflake className="w-3.5 h-3.5 text-sky-500" title="Reefer" />}
+                    {/* Priced against a credit, not just a lane — worth seeing in the list. */}
+                    {q.lcDetails && <Landmark className="w-3.5 h-3.5 text-primary" title={`LC ${q.lcDetails.lcNumber ?? ""}`} />}
                   </span>
                 </td>
                 <td className="p-3">
@@ -197,6 +201,14 @@ const QueriesListPage = () => {
                   </Badge>
                 </td>
                 <td className="p-3 text-right whitespace-nowrap">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 px-2 text-xs gap-1"
+                    onClick={() => setDetailFor(q)}
+                  >
+                    <Eye className="w-3.5 h-3.5" /> Details
+                  </Button>
                   {QUOTABLE.includes(q.status) && hasPermission("quotation.create") && (
                     <Button
                       size="sm"
@@ -286,9 +298,72 @@ const QueriesListPage = () => {
           onSubmit={(reason) => act(() => cancelQuery(cancelFor.id, reason), "Query cancelled")}
         />
       )}
+      {detailFor && <QueryDetailDialog query={detailFor} onClose={() => setDetailFor(null)} />}
     </div>
   );
 };
+
+/* ── Query detail — what was asked for, and the LC it was asked against ── */
+const QueryDetailDialog = ({ query: q, onClose }) => (
+  <Dialog open onOpenChange={(v) => !v && onClose()}>
+    <DialogContent size="xl" className="overflow-hidden">
+      <DialogHeader>
+        <DialogTitle className="flex items-center gap-2">
+          {q.referenceNo}
+          <Badge variant="outline" className={`text-xs ${STATUS_STYLES[q.status] ?? ""}`}>
+            {QUERY_STATUS_LABELS[q.status]}
+          </Badge>
+        </DialogTitle>
+        <DialogDescription>
+          {q.customerCompany} ({q.customerRef}) · raised by {q.raisedByName}
+        </DialogDescription>
+      </DialogHeader>
+
+      <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
+        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">
+          <div className="col-span-full">
+            <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">Services</dt>
+            <dd className="flex flex-wrap gap-1 mt-1">
+              {q.services.map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
+            </dd>
+          </div>
+          {[
+            ["Package", q.servicePackage ? labelForPackage(q.servicePackage) : null],
+            ["Route", routeOf(q) || [q.originPort, q.destinationPort].filter(Boolean).join(" → ")],
+            ["Incoterm", q.incoterm],
+            ["Cargo", q.cargoDescription],
+            ["Weight", q.weightKg != null ? `${Number(q.weightKg).toLocaleString()} kg` : null],
+            ["Container", q.containerTypeCode],
+            ["CRO handling", q.croHandledBy && q.croHandledBy !== "not_applicable" ? CRO_HANDLING_LABELS[q.croHandledBy] : null],
+            ["LC handling", q.lcHandledBy && q.lcHandledBy !== "not_applicable" ? LC_HANDLING_LABELS[q.lcHandledBy] : null],
+            ["Pickup", q.pickupAddress],
+            ["Delivery", q.deliveryAddress],
+            ["Free days", q.freeDays != null ? `${q.freeDays} days` : null],
+            ["Empty return", q.emptyReturnLocation],
+            ["Cancelled because", q.cancelReason],
+          ].filter(([, v]) => v).map(([label, value]) => (
+            <div key={label}>
+              <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</dt>
+              <dd className="text-sm font-medium break-words">{value}</dd>
+            </div>
+          ))}
+          {(q.isHazardous || q.isReefer) && (
+            <div className="col-span-full flex gap-1.5">
+              {q.isHazardous && <Badge variant="outline" className="text-[10px] border-red-400 text-red-600 gap-1"><Flame className="w-3 h-3" /> Hazardous</Badge>}
+              {q.isReefer && <Badge variant="outline" className="text-[10px] border-sky-400 text-sky-600 gap-1"><Snowflake className="w-3 h-3" /> Reefer</Badge>}
+            </div>
+          )}
+        </dl>
+
+        <QueryLcDetails query={q} />
+      </div>
+
+      <DialogFooter>
+        <Button variant="outline" onClick={onClose}>Close</Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+);
 
 /* ── New query — service multi-select is the core (RULE-QRY-05) ── */
 const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {

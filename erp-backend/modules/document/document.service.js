@@ -2,6 +2,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import prisma from "../../config/prisma.js";
+import { docTypeLabels } from "./docTypes.cache.js";
+import { docTypeLabel } from "./document.validation.js";
 
 /**
  * Documents shared logic (CRM_MASTER §5.13, RULE-DOC, RULE-SH-06).
@@ -80,6 +82,120 @@ export const checksumFile = (absPath) =>
 
 /** Absolute path for a stored key. */
 export const absPathFor = (storageKey) => path.join(UPLOAD_ROOT, storageKey);
+
+// ── display-name normalisation (the file a user sees and downloads) ───────────
+/**
+ * A document's `fileName` is presentation only — the bytes live under a random
+ * `storageKey`. So the name people read in the panel, and the name their browser
+ * saves on download, can be restated to match the document TYPE it satisfies
+ * ("Bill of Lading (BOL)") instead of whatever the scanner called it (IMG_0043.pdf).
+ * That is the whole point: a shipment's paperwork folder should be legible without
+ * opening a single file.
+ *
+ * Deliberately NOT renaming the file on disk: the UUID storageKey is what makes
+ * path traversal, collisions and the checksum dedup a non-issue, and none of those
+ * guarantees are worth trading for a tidy `uploads/` listing nobody browses.
+ */
+
+const MIME_EXT = {
+  "application/pdf": ".pdf",
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/webp": ".webp",
+  "application/msword": ".doc",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+  "application/vnd.ms-excel": ".xls",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+  "text/plain": ".txt",
+  "text/csv": ".csv",
+};
+
+// Labels are written for humans, not filesystems — "GD / Customs Declaration",
+// "EIR — Empty Container Pickup". Everything outside [A-Za-z0-9] collapses to a
+// single hyphen, which also keeps the name free of anything Content-Disposition
+// would have to percent-encode on download.
+const slug = (value, max = 60) =>
+  String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[^A-Za-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, max)
+    .replace(/-+$/g, "");
+
+const extensionFor = (originalName, mimeType) => {
+  const raw = path.extname(String(originalName ?? "")).toLowerCase();
+  if (/^\.[a-z0-9]{1,8}$/.test(raw)) return raw;
+  return MIME_EXT[mimeType] ?? "";
+};
+
+// Master-data owners whose reference number prefixes the display name, mapped to
+// their Prisma delegate.
+const MASTER_DATA_MODEL = { vendor: "vendor", driver: "driver", vehicle: "fleetVehicle" };
+
+/** An untyped upload keeps its own name — there is nothing to name it after. */
+const sanitizedOriginal = (originalName, mimeType) => {
+  const base = String(originalName ?? "");
+  const stem = slug(path.basename(base, path.extname(base)), 80);
+  return `${stem || "document"}${extensionFor(originalName, mimeType)}`;
+};
+
+/**
+ * The stored display name for an upload: `SHIP-2025-00042_Bill-of-Lading.pdf`.
+ *
+ * The shipment reference leads so a folder of downloads sorts by order; the docType
+ * LABEL follows, because that is the wording the RULE-SH-06 checklist shows the
+ * person who was asked for the document in the first place.
+ *
+ * `db` must be the caller's transaction client when the owning shipment was created
+ * in that same transaction (the approval path) — an uncommitted row is invisible to
+ * the default client, and the name would silently lose its prefix. `shipmentRef`
+ * short-circuits that lookup entirely where the caller already holds it.
+ *
+ * Untyped and `other` uploads fall through to their own (sanitised) name.
+ */
+export const buildDocumentFileName = async ({
+  ownerType,
+  ownerId,
+  docType,
+  originalName,
+  mimeType,
+  shipmentRef,
+  db = prisma,
+}) => {
+  if (!docType || docType === "other") return sanitizedOriginal(originalName, mimeType);
+
+  const labels = await docTypeLabels();
+  const label = slug(labels[docType] ?? docTypeLabel(docType));
+  if (!label) return sanitizedOriginal(originalName, mimeType);
+
+  let prefix = "";
+  if (ownerType === "shipment") {
+    const ref = shipmentRef
+      ?? (await db.shipment.findUnique({ where: { id: ownerId }, select: { referenceNo: true } }))?.referenceNo;
+    if (ref) prefix = `${slug(ref, 30)}_`;
+  } else if (MASTER_DATA_MODEL[ownerType]) {
+    // Same reasoning as a shipment reference: a folder of downloaded CNICs is
+    // useless if every file is called CNIC.jpg. DRV-2026-00007_CNIC.jpg is not.
+    const ref = (await db[MASTER_DATA_MODEL[ownerType]]
+      .findUnique({ where: { id: ownerId }, select: { referenceNo: true } }))?.referenceNo;
+    if (ref) prefix = `${slug(ref, 30)}_`;
+  }
+
+  const stem = `${prefix}${label}`;
+  const ext = extensionFor(originalName, mimeType);
+
+  // Second EIR, re-uploaded POD, a corrected invoice — suffix rather than collide.
+  // Two simultaneous uploads of one type can still land on the same name; fileName
+  // carries no unique constraint, so that is a cosmetic tie, not a lost document.
+  const existing = await db.document.findMany({
+    where: { ownerType, ownerId, deletedAt: null },
+    select: { fileName: true },
+  });
+  const taken = new Set(existing.map((d) => d.fileName?.toLowerCase()));
+  let name = `${stem}${ext}`;
+  for (let i = 2; taken.has(name.toLowerCase()); i += 1) name = `${stem}_${i}${ext}`;
+  return name;
+};
 
 /** Best-effort unlink (used on rollback / dedup discard). */
 export const safeUnlink = (absPath) => {

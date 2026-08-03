@@ -120,6 +120,27 @@ export const resolveOwner = async (ownerType, ownerId) => {
       const l = await prisma.lead.findUnique({ where: { id: ownerId }, select: { ownerId: true } });
       return l ? { ownerUserId: l.ownerId } : null;
     }
+    // Master data — no customer, no shipment, no owning salesperson to inherit scope
+    // from. The lookup exists so an upload against a deleted or invented id 404s
+    // instead of writing a document nobody can ever reach.
+    case "vendor": {
+      const v = await prisma.vendor.findUnique({ where: { id: ownerId }, select: { id: true } });
+      return v ? { masterData: true } : null;
+    }
+    case "driver": {
+      const d = await prisma.driver.findUnique({ where: { id: ownerId }, select: { id: true } });
+      return d ? { masterData: true } : null;
+    }
+    case "vehicle": {
+      const v = await prisma.fleetVehicle.findUnique({ where: { id: ownerId }, select: { id: true } });
+      return v ? { masterData: true } : null;
+    }
+    // An inbound LC is bank correspondence about a customer we may not have created
+    // yet, so it carries no customer scope — it is internal intake, like the referral.
+    case "lc_referral": {
+      const r = await prisma.bankLcReferral.findUnique({ where: { id: ownerId }, select: { id: true } });
+      return r ? { masterData: true } : null;
+    }
     default:
       return {};
   }
@@ -172,12 +193,20 @@ export const ownerInScope = async (user, ownerType, ownerId, { forWrite = false 
   if (isManagement(user)) return true;
 
   if (user.role === "customer") {
+    // A driver's CNIC or a vendor's tax certificate is our compliance file, not the
+    // customer's business — master data is closed to the portal on read as well as
+    // write (INV-10). The customerId test below would already refuse it; this is the
+    // explicit statement of intent so a future ctx shape cannot loosen it by accident.
+    if (ctx.masterData) return false;
     // Inbound uploads are confined to the customer's OWN shipments; nothing else.
     if (forWrite && ownerType !== "shipment") return false;
     return !!ctx.customerId && ctx.customerId === user.customerId;
   }
 
   // internal, non-management
+  // Master data is company-wide by nature — a driver belongs to no department and no
+  // sales book, so holding the document permission is the whole gate.
+  if (ctx.masterData) return true;
   if (ctx.shipmentId) return shipmentInScopeForUser(user, ctx.shipmentId, ctx.customerId);
   if (ctx.customerId) {
     // ops/compliance/transport/finance have department-wide read of customer-linked docs

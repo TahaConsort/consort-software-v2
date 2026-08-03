@@ -31,6 +31,13 @@ export const DOC_TYPE_OPTIONS = [
   { value: "delivery_order", label: "Delivery Order (DO)" },
   { value: "gate_pass", label: "Gate Pass" },
   { value: "proof", label: "Proof / Evidence" },
+  // Master-data paperwork — vendors, drivers and own vehicles
+  { value: "cnic", label: "CNIC (National ID)" },
+  { value: "driving_license", label: "Driving Licence" },
+  { value: "vehicle_registration", label: "Vehicle Registration" },
+  { value: "route_permit", label: "Route Permit" },
+  { value: "insurance", label: "Insurance Certificate" },
+  { value: "tax_certificate", label: "Tax Certificate (NTN/STRN)" },
   { value: "other", label: "Other" },
 ];
 
@@ -78,6 +85,19 @@ export const publishDocument = async (id) => {
 export const deleteDocument = async (id, reason) => {
   const res = await api.delete(`/documents/${id}`, { data: reason ? { reason } : {} });
   return res.data;
+};
+
+/**
+ * Inline bytes for an on-screen thumbnail, as an object URL. The endpoint needs the
+ * bearer token, so an <img src="/api/…"> cannot work — the blob has to come through
+ * axios first. Callers MUST revokeObjectURL when the preview unmounts, or every
+ * dialog open leaks a full-size image for the life of the tab.
+ *
+ * Only png/jpeg/webp/pdf are previewable; anything else answers 415.
+ */
+export const previewDocumentUrl = async (id) => {
+  const res = await api.get(`/documents/${id}/preview`, { responseType: "blob" });
+  return URL.createObjectURL(res.data);
 };
 
 // Streams the file as a blob and triggers a browser download (audited server-side).

@@ -285,6 +285,16 @@ enum DocumentOwnerType {
   customer
   task
   chat_message
+  // Master data — the paperwork that proves a counterparty or an asset is legal
+  // to move cargo: a vendor's tax certificate, a driver's CNIC and licence, a
+  // vehicle's registration. Internal-only (never portal-visible).
+  vendor
+  driver
+  vehicle
+  // The LC advice itself (the SWIFT MT700/710 printout the bank sends). It is the
+  // source document the query is built from, so it hangs off the referral rather
+  // than being re-keyed into columns and lost.
+  lc_referral
 }
 
 enum ScanStatus {
@@ -363,6 +373,13 @@ enum VendorType {
   destination_agent
   port_terminal
   other
+}
+
+// Own fleet assets. Trucks and dumpers carry the same record shape and differ
+// only in what they haul, so they are one table behind two filtered views.
+enum VehicleKind {
+  truck
+  dumper
 }
 
 enum ChargeDirection {
@@ -641,6 +658,12 @@ model Query {
   isHazardous       Boolean       @default(false) @map("is_hazardous") // triggers pre-check (RULE-QRY-02)
   isReefer          Boolean       @default(false) @map("is_reefer")
   cancelReason      String?       @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
+  // The source LC, as read off the bank's advice at conversion (CRM_MASTER §5.21).
+  // A snapshot, not a live join: the credit's terms at the moment the query was
+  // raised are what the quotation is priced against, and an amended LC must not
+  // silently rewrite the basis of a quote already sent. Null for every query that
+  // did not come from the bank_lc channel.
+  lcDetails         Json?         @map("lc_details")
   quotations        Quotation[]
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
@@ -1006,6 +1029,42 @@ model Vendor {
   @@index([normalizedName])
   @@index([type, isActive])
   @@map("vendors")
+}
+
+// ================= OWN FLEET =================
+
+// Drivers and vehicles are OWN operational master data, not counterparties — a
+// driver is never billed, so they are deliberately not Vendors. Both carry
+// documents (CNIC, licence, registration) through the polymorphic Document
+// table, which is the whole reason they are first-class rows.
+
+model Driver {
+  id          String   @id @default(uuid())
+  referenceNo String   @unique @map("reference_no") // DRV-YYYY-NNNNN
+  name        String
+  phone       String?
+  cnic        String? // 13-digit national ID, stored digits-only
+  licenseNo   String?  @map("license_no")
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+  @@map("drivers")
+}
+
+model FleetVehicle {
+  id          String      @id @default(uuid())
+  referenceNo String      @unique @map("reference_no") // VEH-YYYY-NNNNN
+  kind        VehicleKind
+  plateNo     String      @map("plate_no") // registration number
+  notes       String?
+  isActive    Boolean     @default(true) @map("is_active")
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  @@index([kind, isActive])
+  @@map("fleet_vehicles")
 }
 
 // Seeded, admin-extensible charge catalog (a table, not an enum). This is quote
