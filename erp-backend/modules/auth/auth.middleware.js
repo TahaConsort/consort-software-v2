@@ -36,6 +36,8 @@ const MANAGEMENT_PERMS = [
   "inquiry.read", "inquiry.convert", "lc.read", "lc.convert", "loadboard.manage",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
+  // Vendor rate requests — the buy side of a query
+  "rfq.read", "rfq.manage", "rfq.award",
   // Own fleet — drivers, trucks, dumpers
   "fleet.read", "fleet.manage",
   // Workflow catalog admin (ADR-051) — steps, checklists, document types
@@ -93,6 +95,7 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "lc.read", "lc.convert", "loadboard.manage",
     "vendor.read", "vendor.manage",
+    "rfq.read", "rfq.manage", "rfq.award",
     "fleet.read", "fleet.manage",
   ],
 
@@ -105,6 +108,9 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "dashboard.read",
     "lc.read", "lc.convert",
     "vendor.read",
+    // Ops executives run the rate requests end to end — they are the ones on the
+    // phone to the transporter, so they also pick the winning vendor.
+    "rfq.read", "rfq.manage", "rfq.award",
     // Ops executives keep the fleet masters current — they are the people who
     // meet the driver and the truck, so they add them, not just read them.
     "fleet.read", "fleet.manage",

@@ -26,6 +26,7 @@ import {
   Package,
   Truck,
   Workflow,
+  Coins,
 } from "lucide-react";
 import { NavLink, useLocation } from "react-router-dom";
 import AdminLogoutModal from "./AdminLogoutModal";
@@ -57,6 +58,9 @@ const NAV_ITEMS = [
   { name: "Inquiries", icon: Inbox, path: "/admin/inquiries", roles: ["asm", "bdo"] }, // direct channel (§5.20)
   { name: "LC Inbox", icon: Landmark, path: "/admin/lc-inbox", roles: ["ops_manager", "ops_exec"] }, // bank-LC (§5.21)
   { name: "Load Board", icon: Package, path: "/admin/loadboard", roles: ["ops_manager", "transport_manager"] }, // §5.20
+  // The buy side sits between the query and the quote, because that is the order
+  // the work happens in: get vendor rates, then price the sale.
+  { name: "Rate Requests", icon: Coins, path: "/admin/rfqs", roles: ["ops_manager", "ops_exec"] },
   { name: "Quotations", icon: FileText, path: "/admin/quotations", roles: ["asm", "ops_manager", "ops_exec"] },
   { name: "Shipments", icon: Ship, path: "/admin/shipments", roles: SHIPMENT_ROLES },
   { name: "Tasks", icon: ListChecks, path: "/admin/tasks", roles: SHIPMENT_ROLES },

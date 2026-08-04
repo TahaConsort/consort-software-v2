@@ -108,6 +108,30 @@ DO $$ BEGIN
   ALTER TABLE invoice_lines ADD CONSTRAINT invoice_lines_amount_nonneg CHECK (amount >= 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
+-- Vendor RFQ — at most one OPEN rate request per (query, service, leg). Cancelled
+-- ones stay on the record and may be re-issued, which is why these are partial
+-- rather than a plain @@unique in the schema. Truck/non-transport RFQs carry a NULL
+-- leg; a rail inland service is asked once per leg. Two indexes rather than one
+-- COALESCE expression because NULLs are never equal in a plain unique index.
+--
+-- DROP-then-CREATE rather than IF NOT EXISTS alone: the original definition was
+-- (query_id, service) without the leg split, and a bare IF NOT EXISTS would leave
+-- that old index in place — rejecting every per-leg rail batch with P2002.
+DROP INDEX IF EXISTS vendor_rfqs_one_open_uq;
+CREATE UNIQUE INDEX vendor_rfqs_one_open_uq
+  ON vendor_rfqs (query_id, service) WHERE status = 'open' AND leg IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS vendor_rfqs_one_open_leg_uq
+  ON vendor_rfqs (query_id, service, leg) WHERE status = 'open' AND leg IS NOT NULL;
+
+-- Vendor RFQ — at most one selected (winning) vendor quote per RFQ
+CREATE UNIQUE INDEX IF NOT EXISTS vendor_quotes_one_selected_uq
+  ON vendor_quotes (rfq_id) WHERE is_selected;
+
+-- Vendor quote money is never negative
+DO $$ BEGIN
+  ALTER TABLE vendor_quote_lines ADD CONSTRAINT vendor_quote_lines_amount_nonneg CHECK (amount >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 -- ADR-051 — step codes are admin-minted strings since the OtdStepCode enum was dropped
 -- (prisma/sql/2026-07-step-code-to-text.sql). Guard the format at the source table; every
 -- other step_code column references or copies this one. Mirrors STEP_CODE_RE in

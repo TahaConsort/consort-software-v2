@@ -372,7 +372,23 @@ enum VendorType {
   customs_agent
   destination_agent
   port_terminal
+  rail_operator
   other
+}
+
+// Inland leg mode. Deliberately NOT TransportMode (sea/road/air/rail): a query's
+// inland leg is only ever truck or rail, and the narrower enum keeps bad values out.
+enum InlandMode {
+  truck
+  rail
+}
+
+// The three legs of a rail-mode inland journey. A VendorRfq with a null leg covers
+// the whole service (truck inland, or any non-transport service).
+enum RfqLeg {
+  first_mile // truck: pickup → origin rail terminal
+  middle_mile // rail: terminal → terminal
+  last_mile // truck: destination rail terminal → delivery
 }
 
 // Own fleet assets. Trucks and dumpers carry the same record shape and differ
@@ -385,6 +401,22 @@ enum VehicleKind {
 enum ChargeDirection {
   receivable // money IN — customer side
   payable // money OUT — vendor side
+}
+
+// ── Vendor rate requests (RFQ) ──
+// Consort owns no vessels, trucks or line, so every cost on a job is bought from
+// a vendor. An RFQ is one ask, for one service on one query, sent to N vendors.
+
+enum RfqStatus {
+  open
+  awarded // a winning vendor quote has been picked
+  cancelled
+}
+
+enum VendorQuoteStatus {
+  pending // vendor asked, nothing back yet
+  quoted // rates received and typed in by ops
+  declined // vendor passed on the job
 }
 
 // ================= IDENTITY & ORGANISATION =================
@@ -645,6 +677,22 @@ model Query {
   // Free-text door addresses for local_transport, where a UN/LOCODE port is the wrong shape.
   pickupAddress     String?       @map("pickup_address")
   deliveryAddress   String?       @map("delivery_address")
+  // Shipper / consignee contact details — optional-but-encouraged at intake. These are
+  // the people at the doors, not the paying customer: the vendor RC prints them as
+  // operational contacts while the customer's identity stays off vendor paperwork.
+  senderName        String?       @map("sender_name")
+  senderPhone       String?       @map("sender_phone")
+  senderAddress     String?       @map("sender_address")
+  receiverName      String?       @map("receiver_name")
+  receiverPhone     String?       @map("receiver_phone")
+  receiverAddress   String?       @map("receiver_address")
+  // Every package preset includes local_transport, so the inland leg always exists.
+  // Rail splits it into first/middle/last mile — one RFQ (and one vendor) per leg.
+  inlandMode        InlandMode    @default(truck) @map("inland_mode")
+  // Rail only: the two terminals bounding the middle mile. Free text — rail terminals
+  // are not in the Port reference table.
+  originRailTerminal      String? @map("origin_rail_terminal")
+  destinationRailTerminal String? @map("destination_rail_terminal")
   // ── port_to_consignee terms. Free days is the detention-free window the line grants
   // the consignee; blowing it is what turns a clean import job into a demurrage bill,
   // so it is captured as a number rather than buried in step notes. The return location
@@ -665,6 +713,7 @@ model Query {
   // did not come from the bank_lc channel.
   lcDetails         Json?         @map("lc_details")
   quotations        Quotation[]
+  vendorRfqs        VendorRfq[]
   createdAt         DateTime      @default(now())
   updatedAt         DateTime      @updatedAt
 
@@ -835,6 +884,17 @@ model Shipment {
   // port is the wrong shape. Snapshotted from the Query so transport knows where to drive.
   pickupAddress    String?                 @map("pickup_address")
   deliveryAddress  String?                 @map("delivery_address")
+  // Shipper/consignee contacts + inland mode, snapshotted from the Query at approval —
+  // the people transport actually calls at the doors, frozen with the rest of the route.
+  senderName       String?                 @map("sender_name")
+  senderPhone      String?                 @map("sender_phone")
+  senderAddress    String?                 @map("sender_address")
+  receiverName     String?                 @map("receiver_name")
+  receiverPhone    String?                 @map("receiver_phone")
+  receiverAddress  String?                 @map("receiver_address")
+  inlandMode       InlandMode              @default(truck) @map("inland_mode")
+  originRailTerminal      String?          @map("origin_rail_terminal")
+  destinationRailTerminal String?          @map("destination_rail_terminal")
   // Snapshotted from the Query at approval, same as the addresses above (package
   // port_to_consignee — see the Query model for what they mean).
   freeDays         Int?                    @map("free_days")
@@ -1023,12 +1083,88 @@ model Vendor {
   notes            String?
   isActive         Boolean          @default(true) @map("is_active")
   invoices         Invoice[]
+  vendorQuotes     VendorQuote[]
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
   @@index([normalizedName])
   @@index([type, isActive])
   @@map("vendors")
+}
+
+// ================= VENDOR RFQ (BUY SIDE) =================
+
+// The buy side of a query. Ops asks N vendors of the matching type for a price
+// on one service, types their replies in (vendors answer by phone/WhatsApp —
+// there is no vendor portal), picks a winner, and the winning lines seed the
+// cost sheet of the customer quotation.
+//
+// At most ONE open RFQ per (query, service) — enforced by a partial unique index
+// in prisma/sql/constraints.sql, so a cancelled RFQ can still be re-issued.
+model VendorRfq {
+  id          String        @id @default(uuid())
+  referenceNo String        @unique @map("reference_no") // RFQ-YYYY-NNNNN
+  queryId     String        @map("query_id")
+  query       Query         @relation(fields: [queryId], references: [id])
+  service     ServiceCode // one RFQ per sold service; lc_finance is never RFQ'd
+  // Rail inland only: the transport service is asked per leg, each with its own
+  // vendors and its own winner. Null = the whole service (truck, or non-transport).
+  leg         RfqLeg?
+  status      RfqStatus     @default(open)
+  neededBy    DateTime?     @map("needed_by")
+  notes       String?
+  createdById String        @map("created_by_id")
+  quotes      VendorQuote[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([queryId, status])
+  @@index([status, createdAt]) // board view
+  @@map("vendor_rfqs")
+}
+
+// One vendor's response to an RFQ. Created `pending` the moment the vendor is
+// asked, so the board shows who owes an answer. `totalAmount` is server-computed
+// from the lines, never trusted from the client (mirrors RULE-QT-02).
+model VendorQuote {
+  id           String            @id @default(uuid())
+  rfqId        String            @map("rfq_id")
+  rfq          VendorRfq         @relation(fields: [rfqId], references: [id])
+  vendorId     String            @map("vendor_id")
+  vendor       Vendor            @relation(fields: [vendorId], references: [id])
+  status       VendorQuoteStatus @default(pending)
+  currency     String            @default("PKR") @db.Char(3)
+  validityDate DateTime?         @map("validity_date")
+  notes        String?
+  totalAmount  Decimal           @default(0) @map("total_amount") @db.Decimal(14, 2)
+  receivedAt   DateTime?         @map("received_at")
+  enteredById  String?           @map("entered_by_id") // ops person who typed it in
+  // The winner. At most one selected per RFQ — partial unique in constraints.sql.
+  isSelected   Boolean           @default(false) @map("is_selected")
+  awardedAt    DateTime?         @map("awarded_at")
+  awardedById  String?           @map("awarded_by_id")
+  lines        VendorQuoteLine[]
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  @@unique([rfqId, vendorId])
+  @@index([vendorId])
+  @@map("vendor_quotes")
+}
+
+model VendorQuoteLine {
+  id          String      @id @default(uuid())
+  quoteId     String      @map("quote_id")
+  quote       VendorQuote @relation(fields: [quoteId], references: [id])
+  chargeCode  String?     @map("charge_code") // → ChargeType.code
+  description String
+  quantity    Decimal     @default(1) @db.Decimal(12, 2)
+  unitPrice   Decimal     @map("unit_price") @db.Decimal(14, 2)
+  amount      Decimal     @db.Decimal(14, 2) // server-computed
+  sortOrder   Int         @default(0) @map("sort_order")
+
+  @@index([quoteId])
+  @@map("vendor_quote_lines")
 }
 
 // ================= OWN FLEET =================

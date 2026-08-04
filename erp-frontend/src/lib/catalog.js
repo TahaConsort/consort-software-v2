@@ -307,10 +307,78 @@ export const VENDOR_TYPE_LABELS = {
   customs_agent: "Customs Agent",
   destination_agent: "Destination Agent",
   port_terminal: "Port Terminal",
+  rail_operator: "Rail Operator",
   other: "Other",
 };
 
 export const VENDOR_TYPE_OPTIONS = Object.entries(VENDOR_TYPE_LABELS).map(([value, label]) => ({ value, label }));
+
+// ── Vendor rate requests (RFQ) — the buy side of a query ──
+
+export const RFQ_STATUS_LABELS = {
+  open: "Awaiting rates",
+  awarded: "Awarded",
+  cancelled: "Cancelled",
+};
+
+export const RFQ_STATUS_OPTIONS = Object.entries(RFQ_STATUS_LABELS).map(([value, label]) => ({ value, label }));
+
+export const VENDOR_QUOTE_STATUS_LABELS = {
+  pending: "Awaiting reply",
+  quoted: "Quoted",
+  declined: "Declined",
+};
+
+/**
+ * Which kind of vendor can price which sold service — the default filter when ops
+ * picks who to ask for rates. A suggestion, not a rule: the request dialog can show
+ * all vendors, since a generalist filed under `other` may still quote a lane.
+ *
+ * Mirrors SERVICE_VENDOR_TYPES in erp-backend/utils/serviceVendorTypes.js; keep the
+ * two in step. lc_finance is absent on purpose — a bank instrument is not a vendor buy.
+ */
+export const SERVICE_VENDOR_TYPES = {
+  local_transport: ["transporter"],
+  sea_freight: ["shipping_line"],
+  customs_clearance: ["customs_agent"],
+  port_handling: ["port_terminal", "container_yard"],
+  destination_services: ["destination_agent"],
+  lc_finance: [],
+};
+
+/** Services that can actually be sent to a vendor for a price. */
+export const RFQ_SERVICES = Object.keys(SERVICE_VENDOR_TYPES).filter(
+  (s) => SERVICE_VENDOR_TYPES[s].length > 0,
+);
+
+// ── Inland transport mode + rail legs ──
+
+export const INLAND_MODE_LABELS = {
+  truck: "By truck",
+  rail: "By rail",
+};
+
+/**
+ * A rail-mode inland journey is priced per leg — three rate requests, three winners.
+ * Mirrors RFQ_LEGS / LEG_VENDOR_TYPES in erp-backend/utils/serviceVendorTypes.js;
+ * keep the two in step.
+ */
+export const RFQ_LEG_LABELS = {
+  first_mile: "First mile (truck)",
+  middle_mile: "Rail — terminal to terminal",
+  last_mile: "Last mile (truck)",
+};
+
+export const RFQ_LEGS = Object.keys(RFQ_LEG_LABELS);
+
+export const LEG_VENDOR_TYPES = {
+  first_mile: ["transporter"],
+  middle_mile: ["rail_operator"],
+  last_mile: ["transporter"],
+};
+
+export const vendorTypesFor = (service, leg) =>
+  (leg ? LEG_VENDOR_TYPES[leg] : SERVICE_VENDOR_TYPES[service]) ?? [];
 
 // ── Own fleet — drivers and vehicles (not vendors: never billed) ──
 

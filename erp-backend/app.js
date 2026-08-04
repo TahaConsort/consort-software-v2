@@ -29,6 +29,7 @@ import loadboardRoutes from "./modules/loadboard/loadboard.routes.js";
 import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
+import rfqRoutes from "./modules/rfq/rfq.routes.js";
 import { driverRouter, vehicleRouter } from "./modules/fleet/fleet.routes.js";
 import workflowRoutes from "./modules/workflow/workflow.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
@@ -106,6 +107,7 @@ app.use("/api/otc", otcRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/vendors", vendorRoutes);
+app.use("/api/rfqs", rfqRoutes); // vendor rate requests — the buy side of a query
 app.use("/api/drivers", driverRouter); // own fleet — drivers
 app.use("/api/vehicles", vehicleRouter); // own fleet — trucks & dumpers
 app.use("/api/documents", documentRoutes);

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { IdCard, Loader2, Plus, Pencil, Ban, Paperclip } from "lucide-react";
+import { IdCard, Loader2, Plus, Pencil, Ban, Paperclip, Coins } from "lucide-react";
 import toast from "react-hot-toast";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import {
 import DocumentsDialog from "@/components/DocumentsDialog";
 import { useAuthStore } from "@/store/authStore";
 import { listDrivers, createDriver, updateDriver, deactivateDriver } from "@/services/fleetService";
+import { createVendor } from "@/services/vendorService";
 
 const EMPTY = { name: "", phone: "", cnic: "", licenseNo: "" };
 
@@ -28,6 +29,8 @@ const prettyCnic = (v) => {
 export default function DriversListPage() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission("fleet.manage");
+  // Listing an owner-driver as a vendor is a vendor write, not a fleet one.
+  const canAddVendor = hasPermission("vendor.manage");
 
   const [drivers, setDrivers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -79,6 +82,31 @@ export default function DriversListPage() {
       await load();
     } catch (err) {
       toast.error(err?.message || "Could not save driver");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * List an owner-driver as a transporter so they can be asked for rates.
+   *
+   * A driver and a vendor are different things here — a salaried driver is never
+   * billed — but an owner-driver is both, and re-typing their details into the
+   * vendor form to get them onto a rate request is pure friction. The server's
+   * duplicate-name detection catches a second click.
+   */
+  const addAsVendor = async (d) => {
+    setBusy(true);
+    try {
+      const res = await createVendor({
+        name: d.name,
+        type: "transporter",
+        phone: d.phone || undefined,
+        notes: `Owner-driver — fleet ref ${d.referenceNo}`,
+      });
+      toast.success(res?.message || `${d.name} listed as a transporter`);
+    } catch (err) {
+      toast.error(err?.message || "Could not add as vendor");
     } finally {
       setBusy(false);
     }
@@ -141,6 +169,18 @@ export default function DriversListPage() {
                     <Button size="sm" variant="ghost" className="h-8 text-xs gap-1" onClick={() => setDocsFor(d)}>
                       <Paperclip className="w-3.5 h-3.5" /> Docs
                     </Button>
+                    {canAddVendor && d.isActive && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-8 text-xs gap-1"
+                        disabled={busy}
+                        title="List this owner-driver as a transporter so they can be asked for rates"
+                        onClick={() => addAsVendor(d)}
+                      >
+                        <Coins className="w-3.5 h-3.5" /> Add as vendor
+                      </Button>
+                    )}
                     {canManage && (
                       <>
                         <Button size="sm" variant="ghost" className="h-8" onClick={() => openEdit(d)}><Pencil className="w-3.5 h-3.5" /></Button>

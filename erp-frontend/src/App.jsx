@@ -32,6 +32,7 @@ import CustomersListPage from "./pages/CustomersPages/CustomersListPage";
 import VisitsListPage from "./pages/VisitsPages/VisitsListPage";
 import OutreachListPage from "./pages/OutreachPages/OutreachListPage";
 import QueriesListPage from "./pages/QueriesPages/QueriesListPage";
+import RfqsListPage from "./pages/RfqsPages/RfqsListPage";
 import QuotationsListPage from "./pages/QuotationsPages/QuotationsListPage";
 import ShipmentsListPage from "./pages/ShipmentsPages/ShipmentsListPage";
 import ShipmentDetailPage from "./pages/ShipmentsPages/ShipmentDetailPage";
@@ -66,6 +67,7 @@ const INQUIRY_ROLES = ["asm", "bdo"]; // direct-channel triage (§5.20)
 const LC_ROLES = ["ops_manager", "ops_exec"]; // bank-LC inbox (§5.21)
 const LOADBOARD_ROLES = ["ops_manager", "transport_manager"]; // load board management (§5.20)
 const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"]; // vendor.read (freight-forwarding OTC)
+const RFQ_ROLES = ["ops_manager", "ops_exec"]; // rfq.read — the buy side stays with Ops
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // fleet.read — own drivers & vehicles
 
 const App = () => {
@@ -143,6 +145,11 @@ const App = () => {
               </Route>
               <Route element={<RoleGuard allowedRoles={LOADBOARD_ROLES} />}>
                 <Route path="loadboard" element={<LoadBoardManagePage />} />
+              </Route>
+
+              {/* Rate requests — the buy side: ask vendors, compare, award, then quote */}
+              <Route element={<RoleGuard allowedRoles={RFQ_ROLES} />}>
+                <Route path="rfqs" element={<RfqsListPage />} />
               </Route>
 
               {/* Quotations — Ops drafts/sends; ASM approves */}

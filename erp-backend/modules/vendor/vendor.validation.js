@@ -13,6 +13,7 @@ export const VENDOR_TYPES = [
   "customs_agent",
   "destination_agent",
   "port_terminal",
+  "rail_operator",
   "other",
 ];
 

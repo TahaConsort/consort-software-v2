@@ -454,6 +454,9 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
   const [ref, setRef] = useState({ ports: [], containerTypes: [] });
   const [form, setForm] = useState({
     originPort: "", destinationPort: "", pickupAddress: "", deliveryAddress: "",
+    senderName: "", senderPhone: "", senderAddress: "",
+    receiverName: "", receiverPhone: "", receiverAddress: "",
+    inlandMode: "truck", originRailTerminal: "", destinationRailTerminal: "",
     freeDays: "", emptyReturnLocation: "",
     containerTypeCode: "", incoterm: "FOB", cargoDescription: "", weightKg: "",
   });
@@ -516,6 +519,15 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
         deliveryAddress: packageUsesDeliveryAddress(servicePackage) ? form.deliveryAddress || undefined : undefined,
         freeDays: isImport && form.freeDays !== "" ? Number(form.freeDays) : undefined,
         emptyReturnLocation: isImport ? form.emptyReturnLocation || undefined : undefined,
+        senderName: form.senderName || undefined,
+        senderPhone: form.senderPhone || undefined,
+        senderAddress: form.senderAddress || undefined,
+        receiverName: form.receiverName || undefined,
+        receiverPhone: form.receiverPhone || undefined,
+        receiverAddress: form.receiverAddress || undefined,
+        inlandMode: form.inlandMode,
+        originRailTerminal: form.inlandMode === "rail" ? form.originRailTerminal || undefined : undefined,
+        destinationRailTerminal: form.inlandMode === "rail" ? form.destinationRailTerminal || undefined : undefined,
         containerTypeCode: form.containerTypeCode || undefined,
         incoterm: usesPorts ? form.incoterm || undefined : undefined,
         cargoDescription: form.cargoDescription || undefined,
@@ -786,6 +798,77 @@ const NewQueryDialog = ({ onClose, onCreated }) => {
                 <Label htmlFor="weight">Weight (kg)</Label>
                 <Input id="weight" type="number" min="0" step="any" value={form.weightKg}
                   onChange={(e) => set("weightKg", e.target.value)} />
+              </div>
+            </div>
+
+            {/* How the inland leg should move. Rail is priced per leg on our side. */}
+            <div className="border rounded-lg p-3 space-y-3 bg-muted/30">
+              <Label className="text-sm">How should the inland leg move?</Label>
+              <div className="flex gap-4">
+                {[{ v: "truck", t: "By truck" }, { v: "rail", t: "By rail" }].map(({ v, t }) => (
+                  <label key={v} className="flex items-center gap-2 text-sm cursor-pointer">
+                    <input
+                      type="radio"
+                      name="inlandMode"
+                      checked={form.inlandMode === v}
+                      onChange={() =>
+                        setForm((f) => ({
+                          ...f,
+                          inlandMode: v,
+                          ...(v === "truck" ? { originRailTerminal: "", destinationRailTerminal: "" } : {}),
+                        }))
+                      }
+                    />
+                    {t}
+                  </label>
+                ))}
+              </div>
+              {form.inlandMode === "rail" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="railFrom">Origin rail terminal <span className="text-muted-foreground font-normal">(if known)</span></Label>
+                    <Input id="railFrom" value={form.originRailTerminal}
+                      onChange={(e) => set("originRailTerminal", e.target.value)} placeholder="e.g. Karachi Cantt Dry Port" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="railTo">Destination rail terminal <span className="text-muted-foreground font-normal">(if known)</span></Label>
+                    <Input id="railTo" value={form.destinationRailTerminal}
+                      onChange={(e) => set("destinationRailTerminal", e.target.value)} placeholder="e.g. Lahore Dry Port" />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* The people at the doors — printed on the paperwork as delivery contacts. */}
+            <div className="border rounded-lg p-3 space-y-3 bg-muted/30">
+              <Label className="text-sm">Sender &amp; receiver <span className="text-muted-foreground font-normal">(optional)</span></Label>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="sName">Sender name</Label>
+                  <Input id="sName" value={form.senderName} onChange={(e) => set("senderName", e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="sPhone">Sender phone</Label>
+                  <Input id="sPhone" value={form.senderPhone} onChange={(e) => set("senderPhone", e.target.value)} />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="sAddr">Sender address</Label>
+                <Input id="sAddr" value={form.senderAddress} onChange={(e) => set("senderAddress", e.target.value)} />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="rName">Receiver name</Label>
+                  <Input id="rName" value={form.receiverName} onChange={(e) => set("receiverName", e.target.value)} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="rPhone">Receiver phone</Label>
+                  <Input id="rPhone" value={form.receiverPhone} onChange={(e) => set("receiverPhone", e.target.value)} />
+                </div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="rAddr">Receiver address</Label>
+                <Input id="rAddr" value={form.receiverAddress} onChange={(e) => set("receiverAddress", e.target.value)} />
               </div>
             </div>
 

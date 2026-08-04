@@ -31,6 +31,7 @@ export const TOPICS = {
   NOTIFICATIONS: "notifications",
   EMPLOYEES: "employees",
   VENDORS: "vendors",
+  RFQS: "rfqs",
   LOADBOARD: "loadboard",
   AUDIT: "audit",
   ACTION_ENGINE: "actionEngine",

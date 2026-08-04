@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, Flame, Snowflake, FileText, Send, Trash2, CheckCircle2, Check, X, Eye, Landmark } from "lucide-react";
+import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, Flame, Snowflake, FileText, Send, Trash2, CheckCircle2, Check, X, Eye, Landmark, Coins } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,9 +36,12 @@ import {
   LC_HANDLING_LABELS, LC_HANDLING_SHORT, packageHasLcChoice, packageHasDownstreamToggle,
   labelForPackage, packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
   packageUsesDeliveryAddress, packageUsesImportTerms, routeOf, DEFAULT_CURRENCY,
+  INLAND_MODE_LABELS,
 } from "@/lib/catalog";
-import { quoteTemplateFor } from "@/lib/quoteTemplates";
 import QueryLcDetails from "./QueryLcDetails";
+import GiveQuoteDialog from "./GiveQuoteDialog";
+import RequestRatesDialog from "@/pages/RfqsPages/RequestRatesDialog";
+import { useRfqStore } from "@/store/rfqStore";
 
 const STATUS_STYLES = {
   open: "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300",
@@ -62,6 +65,7 @@ const money = (n, ccy) =>
 const QueriesListPage = () => {
   const { queries, loading, error, busy, filters, setFilter, fetchQueries, createQuery, cancelQuery } = useQueryStore();
   const { createQuotation, sendQuotation, approveQuotation, rejectQuotation } = useQuotationStore();
+  const createRfqs = useRfqStore((s) => s.createRfqs);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const location = useLocation();
   const navigate = useNavigate();
@@ -72,6 +76,7 @@ const QueriesListPage = () => {
   const [quoteFor, setQuoteFor] = useState(null);
   const [decideFor, setDecideFor] = useState(null);
   const [detailFor, setDetailFor] = useState(null);
+  const [ratesFor, setRatesFor] = useState(null);
 
   useEffect(() => { fetchQueries(); }, [fetchQueries]);
 
@@ -87,6 +92,7 @@ const QueriesListPage = () => {
       setCancelFor(null);
       setQuoteFor(null);
       setDecideFor(null);
+      setRatesFor(null);
     } catch (err) {
       toast.error(err?.message || "Couldn't update the query");
     }
@@ -199,6 +205,20 @@ const QueriesListPage = () => {
                   <Badge variant="outline" className={`text-xs ${STATUS_STYLES[q.status] ?? ""}`}>
                     {QUERY_STATUS_LABELS[q.status]}
                   </Badge>
+                  {/* How the buy side is going. Ops reads this before quoting: rates in
+                      hand mean a real price, rates outstanding mean a guess. */}
+                  {q.rfqSummary && (
+                    <button
+                      type="button"
+                      className="mt-1 block text-[10px] text-muted-foreground hover:text-primary underline-offset-2 hover:underline"
+                      onClick={() => navigate("/admin/rfqs", { state: { queryId: q.id } })}
+                      title="Open the rate requests for this query"
+                    >
+                      {q.rfqSummary.awarded > 0
+                        ? `${q.rfqSummary.awarded}/${q.rfqSummary.rfqs} awarded`
+                        : `rates ${q.rfqSummary.quotesIn}/${q.rfqSummary.quotesTotal} in`}
+                    </button>
+                  )}
                 </td>
                 <td className="p-3 text-right whitespace-nowrap">
                   <Button
@@ -209,10 +229,21 @@ const QueriesListPage = () => {
                   >
                     <Eye className="w-3.5 h-3.5" /> Details
                   </Button>
+                  {/* The buy side comes first: ask vendors, then price the sale. */}
+                  {QUOTABLE.includes(q.status) && hasPermission("rfq.manage") && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 px-2.5 text-xs gap-1 ml-1"
+                      onClick={() => setRatesFor(q)}
+                    >
+                      <Coins className="w-3.5 h-3.5" /> Request Rates
+                    </Button>
+                  )}
                   {QUOTABLE.includes(q.status) && hasPermission("quotation.create") && (
                     <Button
                       size="sm"
-                      className="h-8 px-2.5 text-xs gap-1"
+                      className="h-8 px-2.5 text-xs gap-1 ml-1"
                       onClick={() => setQuoteFor(q)}
                     >
                       <FileText className="w-3.5 h-3.5" />
@@ -298,6 +329,14 @@ const QueriesListPage = () => {
           onSubmit={(reason) => act(() => cancelQuery(cancelFor.id, reason), "Query cancelled")}
         />
       )}
+      {ratesFor && (
+        <RequestRatesDialog
+          busy={busy}
+          query={ratesFor}
+          onClose={() => setRatesFor(null)}
+          onSubmit={(payload) => act(() => createRfqs(payload))}
+        />
+      )}
       {detailFor && <QueryDetailDialog query={detailFor} onClose={() => setDetailFor(null)} />}
     </div>
   );
@@ -338,6 +377,13 @@ const QueryDetailDialog = ({ query: q, onClose }) => (
             ["LC handling", q.lcHandledBy && q.lcHandledBy !== "not_applicable" ? LC_HANDLING_LABELS[q.lcHandledBy] : null],
             ["Pickup", q.pickupAddress],
             ["Delivery", q.deliveryAddress],
+            // Truck is the default — only rail is news worth a row.
+            ["Inland mode", q.inlandMode === "rail" ? INLAND_MODE_LABELS.rail : null],
+            ["Rail leg", [q.originRailTerminal, q.destinationRailTerminal].filter(Boolean).join(" → ")],
+            ["Sender", [q.senderName, q.senderPhone].filter(Boolean).join(" · ")],
+            ["Sender address", q.senderAddress],
+            ["Receiver", [q.receiverName, q.receiverPhone].filter(Boolean).join(" · ")],
+            ["Receiver address", q.receiverAddress],
             ["Free days", q.freeDays != null ? `${q.freeDays} days` : null],
             ["Empty return", q.emptyReturnLocation],
             ["Cancelled because", q.cancelReason],
@@ -380,6 +426,15 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
     destinationPort: "",
     pickupAddress: "",
     deliveryAddress: "",
+    senderName: "",
+    senderPhone: "",
+    senderAddress: "",
+    receiverName: "",
+    receiverPhone: "",
+    receiverAddress: "",
+    inlandMode: "truck",
+    originRailTerminal: "",
+    destinationRailTerminal: "",
     freeDays: "",
     emptyReturnLocation: "",
     containerTypeCode: "",
@@ -446,6 +501,15 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
       deliveryAddress: packageUsesDeliveryAddress(pkg) ? form.deliveryAddress || undefined : undefined,
       freeDays: isImport && form.freeDays !== "" ? Number(form.freeDays) : undefined,
       emptyReturnLocation: isImport ? form.emptyReturnLocation || undefined : undefined,
+      senderName: form.senderName || undefined,
+      senderPhone: form.senderPhone || undefined,
+      senderAddress: form.senderAddress || undefined,
+      receiverName: form.receiverName || undefined,
+      receiverPhone: form.receiverPhone || undefined,
+      receiverAddress: form.receiverAddress || undefined,
+      inlandMode: form.inlandMode,
+      originRailTerminal: form.inlandMode === "rail" ? form.originRailTerminal || undefined : undefined,
+      destinationRailTerminal: form.inlandMode === "rail" ? form.destinationRailTerminal || undefined : undefined,
       containerTypeCode: form.containerTypeCode || undefined,
       incoterm: usesPorts ? form.incoterm || undefined : undefined,
       cargoDescription: form.cargoDescription || undefined,
@@ -707,6 +771,96 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
             <Input id="q-cargo" value={form.cargoDescription} onChange={(e) => setForm((p) => ({ ...p, cargoDescription: e.target.value }))} placeholder="Optional" />
           </div>
 
+          {/* Inland transport — every package moves inland; rail splits the leg into
+              first/middle/last mile and the RFQ module prices each leg separately. */}
+          {pkg && (
+            <div className="rounded-lg border p-3 space-y-3">
+              <div className="space-y-1.5">
+                <Label>Inland transport</Label>
+                <Select
+                  value={form.inlandMode}
+                  onValueChange={(v) =>
+                    setForm((p) => ({
+                      ...p,
+                      inlandMode: v,
+                      ...(v === "truck" ? { originRailTerminal: "", destinationRailTerminal: "" } : {}),
+                    }))
+                  }
+                  items={Object.entries(INLAND_MODE_LABELS).map(([value, label]) => ({ value, label }))}
+                >
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {Object.entries(INLAND_MODE_LABELS).map(([value, label]) => (
+                      <SelectItem key={value} value={value}>{label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {form.inlandMode === "rail" && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="q-rail-origin">Origin rail terminal</Label>
+                      <Input
+                        id="q-rail-origin"
+                        value={form.originRailTerminal}
+                        onChange={(e) => setForm((p) => ({ ...p, originRailTerminal: e.target.value }))}
+                        placeholder="e.g. Karachi Cantt Dry Port"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="q-rail-dest">Destination rail terminal</Label>
+                      <Input
+                        id="q-rail-dest"
+                        value={form.destinationRailTerminal}
+                        onChange={(e) => setForm((p) => ({ ...p, destinationRailTerminal: e.target.value }))}
+                        placeholder="e.g. Lahore Dry Port"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Rail journeys are priced in three legs — first mile (truck), rail, last mile
+                    (truck) — each with its own vendors when rates are requested.
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
+          {/* Sender / receiver — the people at the doors, printed on rate confirmations
+              as operational contacts. Optional but encouraged. */}
+          <div className="rounded-lg border p-3 space-y-3">
+            <Label className="text-muted-foreground">Sender / Receiver (optional)</Label>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="q-sender-name">Sender name</Label>
+                <Input id="q-sender-name" value={form.senderName} onChange={(e) => setForm((p) => ({ ...p, senderName: e.target.value }))} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="q-sender-phone">Sender phone</Label>
+                <Input id="q-sender-phone" value={form.senderPhone} onChange={(e) => setForm((p) => ({ ...p, senderPhone: e.target.value }))} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="q-sender-addr">Sender address</Label>
+                <Input id="q-sender-addr" value={form.senderAddress} onChange={(e) => setForm((p) => ({ ...p, senderAddress: e.target.value }))} />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="q-recv-name">Receiver name</Label>
+                <Input id="q-recv-name" value={form.receiverName} onChange={(e) => setForm((p) => ({ ...p, receiverName: e.target.value }))} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="q-recv-phone">Receiver phone</Label>
+                <Input id="q-recv-phone" value={form.receiverPhone} onChange={(e) => setForm((p) => ({ ...p, receiverPhone: e.target.value }))} />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="q-recv-addr">Receiver address</Label>
+                <Input id="q-recv-addr" value={form.receiverAddress} onChange={(e) => setForm((p) => ({ ...p, receiverAddress: e.target.value }))} />
+              </div>
+            </div>
+          </div>
+
           <div className="flex items-center gap-6">
             <label className="flex items-center gap-2 text-sm cursor-pointer">
               <Checkbox checked={form.isHazardous} onCheckedChange={(v) => setForm((p) => ({ ...p, isHazardous: !!v }))} />
@@ -726,186 +880,6 @@ const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
             <Button type="submit" disabled={busy} className="gap-2">
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Create Query
             </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
-};
-
-/* ── Give Quote — draft (and optionally send) a quotation without leaving the
-      queries list. Charge lines are pre-seeded from a PACKAGE template (see
-      lib/quoteTemplates.js) plus a line for any add-on service the template doesn't
-      cover, so Ops only fills in prices. Totals are recomputed server-side regardless
-      of what we send (RULE-QT-02). ── */
-const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
-  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
-  const [validityDate, setValidityDate] = useState("");
-  const [lines, setLines] = useState(() =>
-    quoteTemplateFor({
-      servicePackage: query.servicePackage,
-      croHandledBy: query.croHandledBy,
-      // Anything selected beyond what the package presets is an Ops add-on.
-      extraServices: (query.services ?? []).filter(
-        (s) => !(PACKAGE_PRESET_SERVICES[query.servicePackage] ?? []).includes(s),
-      ),
-    })
-  );
-
-  const setLine = (i, key, val) => setLines((p) => p.map((l, idx) => (idx === i ? { ...l, [key]: val } : l)));
-  const addLine = () => setLines((p) => [...p, { description: "", quantity: 1, unitPrice: "" }]);
-  const removeLine = (i) => setLines((p) => p.filter((_, idx) => idx !== i));
-  const total = lines.reduce((s, l) => s + (Number(l.quantity) || 0) * (Number(l.unitPrice) || 0), 0);
-
-  const build = () => {
-    const clean = lines.filter((l) => l.description.trim() && l.unitPrice !== "" && Number(l.unitPrice) >= 0);
-    if (!clean.length) {
-      toast.error("Add at least one charge line with a price");
-      return null;
-    }
-    return {
-      queryId: query.id,
-      currency,
-      validityDate: validityDate || undefined,
-      chargeLines: clean.map((l, i) => ({
-        service: l.service,
-        // Carried through so resolveCharge() places the charge on the right OTD step.
-        chargeCode: l.chargeCode,
-        description: l.description.trim(),
-        quantity: Number(l.quantity) || 1,
-        unitPrice: Number(l.unitPrice),
-        sortOrder: i,
-      })),
-    };
-  };
-
-  const submit = (e, alsoSend = false) => {
-    e.preventDefault();
-    const payload = build();
-    if (payload) onSubmit(payload, alsoSend);
-  };
-
-  const route = routeOf(query);
-
-  return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      {/* Body scrolls, footer stays clear of it — a dialog-level scroll leaves the last
-          charge line under the sticky footer and past the end of the scroll range. */}
-      <DialogContent size="lg" className="overflow-hidden">
-        <DialogHeader>
-          <DialogTitle>Quote {query.referenceNo}</DialogTitle>
-          <DialogDescription>
-            {query.customerCompany}
-            {route ? ` · ${route}` : ""} — price each service below. Approval by the
-            customer starts the shipment.
-          </DialogDescription>
-        </DialogHeader>
-
-        <form onSubmit={submit} className="flex flex-1 min-h-0 flex-col gap-4">
-          <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
-            {/* What the customer asked for */}
-            <div className="rounded-lg border bg-muted/30 p-3 space-y-2 text-sm">
-              <div className="flex flex-wrap gap-1">
-                {query.servicePackage && <Badge className="text-[10px]">{labelForPackage(query.servicePackage)}</Badge>}
-                {query.croHandledBy && query.croHandledBy !== "not_applicable" && (
-                  <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[query.croHandledBy]}</Badge>
-                )}
-                {query.lcHandledBy && query.lcHandledBy !== "not_applicable" && (
-                  <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[query.lcHandledBy]}</Badge>
-                )}
-                {(query.services ?? []).map((s) => (
-                  <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
-                ))}
-                {query.isHazardous && <Badge variant="outline" className="text-[10px] text-red-600 border-red-300">Hazardous</Badge>}
-                {query.isReefer && <Badge variant="outline" className="text-[10px] text-sky-600 border-sky-300">Reefer</Badge>}
-              </div>
-              {query.croHandledBy === "customer" && (
-                <p className="text-xs text-muted-foreground">
-                  The customer is supplying their own CRO — no CRO charge line is pre-seeded.
-                </p>
-              )}
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                {query.containerTypeCode && <span>Container: <b className="text-foreground">{query.containerTypeCode}</b></span>}
-                {query.incoterm && <span>Incoterm: <b className="text-foreground">{query.incoterm}</b></span>}
-                {query.weightKg != null && <span>Weight: <b className="text-foreground">{Number(query.weightKg).toLocaleString()} kg</b></span>}
-              </div>
-              {query.cargoDescription && (
-                <p className="text-xs text-muted-foreground">Cargo: {query.cargoDescription}</p>
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5 min-w-0">
-                <Label htmlFor="gq-ccy">Currency</Label>
-                <Input id="gq-ccy" value={currency} maxLength={3} onChange={(e) => setCurrency(e.target.value.toUpperCase())} />
-              </div>
-              <div className="space-y-1.5 min-w-0">
-                <Label htmlFor="gq-validity">Valid until (optional)</Label>
-                <Input id="gq-validity" type="date" value={validityDate} onChange={(e) => setValidityDate(e.target.value)} />
-              </div>
-            </div>
-
-            {/* Charge lines */}
-            <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label>Charge lines</Label>
-                <Button type="button" size="sm" variant="outline" className="gap-1 h-8" onClick={addLine}>
-                  <Plus className="w-3.5 h-3.5" /> Add line
-                </Button>
-              </div>
-              <div className="space-y-2">
-                {lines.map((l, i) => (
-                  <div key={i} className="grid grid-cols-12 gap-2 items-center">
-                    <Input
-                      className="col-span-6 min-w-0"
-                      placeholder="Description"
-                      value={l.description}
-                      onChange={(e) => setLine(i, "description", e.target.value)}
-                    />
-                    <Input
-                      className="col-span-2 min-w-0"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="Qty"
-                      value={l.quantity}
-                      onChange={(e) => setLine(i, "quantity", e.target.value)}
-                    />
-                    <Input
-                      className="col-span-3 min-w-0"
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="Unit price"
-                      value={l.unitPrice}
-                      onChange={(e) => setLine(i, "unitPrice", e.target.value)}
-                    />
-                    <button
-                      type="button"
-                      className="col-span-1 text-muted-foreground hover:text-destructive disabled:opacity-30"
-                      onClick={() => removeLine(i)}
-                      disabled={lines.length === 1}
-                      aria-label="Remove charge line"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="text-right text-sm font-semibold pt-1">Total: {money(total, currency)}</div>
-            </div>
-          </div>
-
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-            <Button type="submit" variant={canSend ? "outline" : "default"} disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />} Save as draft
-            </Button>
-            {canSend && (
-              <Button type="button" disabled={busy} className="gap-2" onClick={(e) => submit(e, true)}>
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />} Send to customer
-              </Button>
-            )}
           </DialogFooter>
         </form>
       </DialogContent>

@@ -3,6 +3,7 @@ import {
   allowedCroModes,
   allowedLcModes,
   CRO_MODES,
+  INLAND_MODES,
   LC_MODES,
   SERVICE_CODES,
   SERVICE_PACKAGES,
@@ -43,6 +44,18 @@ const baseQueryFields = {
   // port is the wrong shape.
   pickupAddress: z.string().max(500).optional(),
   deliveryAddress: z.string().max(500).optional(),
+  // Shipper/consignee contacts — the people at the doors, optional-but-encouraged.
+  senderName: z.string().max(200).optional(),
+  senderPhone: z.string().max(50).optional(),
+  senderAddress: z.string().max(500).optional(),
+  receiverName: z.string().max(200).optional(),
+  receiverPhone: z.string().max(50).optional(),
+  receiverAddress: z.string().max(500).optional(),
+  // Truck (default) or rail. Rail splits the inland leg into first/middle/last mile,
+  // which the RFQ module then prices per leg.
+  inlandMode: z.enum(INLAND_MODES).optional(),
+  originRailTerminal: z.string().max(200).optional(),
+  destinationRailTerminal: z.string().max(200).optional(),
   // port_to_consignee terms. Both optional at intake — the delivery order often lands
   // after the query is raised, and the free-days count comes with it. The order_confirmed
   // checklist is what actually forces them to be settled before the container moves.
@@ -95,7 +108,16 @@ const refineCoherence = (schema) =>
     .refine((v) => v.servicePackage === undefined || packageUsesImportTerms(v.servicePackage) || v.freeDays === undefined, {
       path: ["freeDays"],
       message: "Free days apply to an import delivery only",
-    });
+    })
+    // Rail terminals only make sense on a rail-mode inland leg. Skipped when the
+    // mode is absent (partial update touching neither field).
+    .refine(
+      (v) =>
+        v.inlandMode === undefined ||
+        v.inlandMode === "rail" ||
+        (!v.originRailTerminal && !v.destinationRailTerminal),
+      { path: ["originRailTerminal"], message: "Rail terminals only apply when the inland leg moves by rail" },
+    );
 
 /**
  * COMPLETENESS — create-only. An update must not demand fields it isn't touching, so

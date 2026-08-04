@@ -192,6 +192,14 @@ export const EVENT_TOPICS = {
   "user.updated": { topics: () => [TOPICS.EMPLOYEES, TOPICS.TASKS], roles: [...MGMT, "hr"] },
   "user.deactivated": { topics: () => [TOPICS.EMPLOYEES, TOPICS.TASKS], roles: [...MGMT, "hr"] },
   "vendor.changed": { topics: () => [TOPICS.VENDORS], roles: [...FINANCE, ...OPS, ...MGMT] },
+
+  /* ── Vendor RFQs (buy side) ────────────────────────────────────────────────
+     Each also carries QUERIES, because the queries list shows a per-query
+     "vendor quotes in" chip that goes stale the moment an RFQ moves. */
+  "rfq.created": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
+  "rfq.updated": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
+  "rfq.quote_received": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
+  "rfq.awarded": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...MGMT] },
   "loadboard.changed": { topics: () => [TOPICS.LOADBOARD], roles: [...SALES, ...OPS] },
 
   /* ── Observability ─────────────────────────────────────────────────────── */

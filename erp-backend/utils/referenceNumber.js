@@ -20,6 +20,7 @@ const PREFIXES = {
   vendor: "VEN", // vendor/carrier master (freight-forwarding OTC upgrade)
   driver: "DRV", // own-fleet driver master
   vehicle: "VEH", // own-fleet truck/dumper master
+  rfq: "RFQ", // vendor rate request (buy side of a query)
 };
 
 export const allocateRef = async (tx, entity) => {

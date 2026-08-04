@@ -31,6 +31,10 @@ export const SERVICE_PACKAGES = [
 
 export const CRO_MODES = ["not_applicable", "customer", "consort"];
 
+// How the inland leg moves. Every package preset includes local_transport, so the
+// choice exists on every query; rail splits the leg into first/middle/last mile.
+export const INLAND_MODES = ["truck", "rail"];
+
 export const SERVICE_PACKAGE_LABELS = {
   local_transport: "Local Transport",
   loading_point_to_port: "Loading Point → Port",

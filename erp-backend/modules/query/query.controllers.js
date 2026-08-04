@@ -1,4 +1,4 @@
-import crypto from "crypto";
+﻿import crypto from "crypto";
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
@@ -17,7 +17,10 @@ import { scopedQueryWhere, queryInScope } from "./query.middleware.js";
 const emitEvent = (tx, eventType, payload) =>
   tx.outboxEvent.create({ data: { eventType, payload, correlationId: crypto.randomUUID() } });
 
-const hydrateQueries = async (queries) => {
+// `includeRfq` carries the buy-side progress chip (how many vendors have come
+// back with rates). Counts only — no amounts — but it is still internal, so it
+// is withheld from portal customers.
+const hydrateQueries = async (queries, { includeRfq = true } = {}) => {
   const customerIds = [...new Set(queries.map((q) => q.customerId))];
   const userIds = [...new Set(queries.map((q) => q.raisedById))];
 
@@ -41,6 +44,26 @@ const hydrateQueries = async (queries) => {
   const customerById = new Map(customers.map((c) => [c.id, c]));
   const userById = new Map(users.map((u) => [u.id, u]));
 
+  // One extra round-trip for the whole page rather than a per-row count.
+  const rfqByQuery = new Map();
+  if (includeRfq) {
+    const rfqs = await prisma.vendorRfq.findMany({
+      where: { queryId: { in: queries.map((q) => q.id) }, status: { not: "cancelled" } },
+      select: { queryId: true, status: true, quotes: { select: { status: true } } },
+    });
+    for (const rfq of rfqs) {
+      const acc = rfqByQuery.get(rfq.queryId) ?? { rfqs: 0, awarded: 0, quotesIn: 0, quotesTotal: 0 };
+      acc.rfqs += 1;
+      if (rfq.status === "awarded") acc.awarded += 1;
+      for (const q of rfq.quotes) {
+        if (q.status === "declined") continue; // a decline is an answer, not a pending ask
+        acc.quotesTotal += 1;
+        if (q.status === "quoted") acc.quotesIn += 1;
+      }
+      rfqByQuery.set(rfq.queryId, acc);
+    }
+  }
+
   return queries.map((q) => {
     const customer = customerById.get(q.customerId);
     const raisedBy = userById.get(q.raisedById);
@@ -51,6 +74,7 @@ const hydrateQueries = async (queries) => {
       raisedByName: raisedBy?.employee
         ? `${raisedBy.employee.firstName} ${raisedBy.employee.lastName}`
         : raisedBy?.email ?? "—",
+      rfqSummary: rfqByQuery.get(q.id) ?? null,
     };
   });
 };
@@ -60,7 +84,7 @@ export const listQueries = catchAsync(async (req, res) => {
   const { status } = req.query;
   const where = await scopedQueryWhere(req, status ? { status } : {});
   const queries = await prisma.query.findMany({ where, orderBy: { createdAt: "desc" } });
-  res.json({ success: true, data: await hydrateQueries(queries) });
+  res.json({ success: true, data: await hydrateQueries(queries, { includeRfq: !req.user?.customerId }) });
 });
 
 /* ── POST /api/queries ── */
@@ -140,6 +164,16 @@ export const createQuery = catchAsync(async (req, res, next) => {
         destinationPort: req.body.destinationPort ?? null,
         pickupAddress: req.body.pickupAddress ?? null,
         deliveryAddress: req.body.deliveryAddress ?? null,
+        senderName: req.body.senderName ?? null,
+        senderPhone: req.body.senderPhone ?? null,
+        senderAddress: req.body.senderAddress ?? null,
+        receiverName: req.body.receiverName ?? null,
+        receiverPhone: req.body.receiverPhone ?? null,
+        receiverAddress: req.body.receiverAddress ?? null,
+        inlandMode: req.body.inlandMode ?? "truck",
+        // Terminals only exist on a rail leg — never carried onto a truck query.
+        originRailTerminal: req.body.inlandMode === "rail" ? req.body.originRailTerminal ?? null : null,
+        destinationRailTerminal: req.body.inlandMode === "rail" ? req.body.destinationRailTerminal ?? null : null,
         freeDays: req.body.freeDays ?? null,
         emptyReturnLocation: req.body.emptyReturnLocation ?? null,
         containerTypeCode: req.body.containerTypeCode ?? null,
@@ -158,7 +192,7 @@ export const createQuery = catchAsync(async (req, res, next) => {
     return created;
   });
 
-  const [hydrated] = await hydrateQueries([query]);
+  const [hydrated] = await hydrateQueries([query], { includeRfq: !req.user?.customerId });
   res.status(201).json({
     success: true,
     message:
@@ -175,7 +209,7 @@ export const getQuery = catchAsync(async (req, res, next) => {
   // Out-of-scope reads 404, never 403 (BUSINESS_RULES §2.3).
   if (!query || !(await queryInScope(req, query))) return next(new AppError("Query not found", 404));
 
-  const [hydrated] = await hydrateQueries([query]);
+  const [hydrated] = await hydrateQueries([query], { includeRfq: !req.user?.customerId });
   res.json({ success: true, data: hydrated });
 });
 
@@ -235,6 +269,12 @@ export const updateQuery = catchAsync(async (req, res, next) => {
     data.originPort = null;
     data.destinationPort = null;
   }
+  // Same discipline for the inland leg: back to truck means the terminals go.
+  const effectiveInlandMode = req.body.inlandMode ?? query.inlandMode;
+  if (effectiveInlandMode !== "rail") {
+    data.originRailTerminal = null;
+    data.destinationRailTerminal = null;
+  }
 
   const updated = await prisma.$transaction(async (tx) => {
     const u = await tx.query.update({ where: { id: query.id }, data });
@@ -246,7 +286,7 @@ export const updateQuery = catchAsync(async (req, res, next) => {
     return u;
   });
 
-  const [hydrated] = await hydrateQueries([updated]);
+  const [hydrated] = await hydrateQueries([updated], { includeRfq: !req.user?.customerId });
   res.json({ success: true, message: "Query updated", data: hydrated });
 });
 
@@ -270,6 +310,6 @@ export const cancelQuery = catchAsync(async (req, res, next) => {
     return u;
   });
 
-  const [hydrated] = await hydrateQueries([updated]);
+  const [hydrated] = await hydrateQueries([updated], { includeRfq: !req.user?.customerId });
   res.json({ success: true, message: "Query cancelled", data: hydrated });
 });
