@@ -339,23 +339,6 @@ export const logout = catchAsync(async (req, res) => {
   res.json({ success: true, message: "Logged out" });
 });
 
-/* ─────────────────────────── POST /logout-all ─────────────────────────── */
-// Bumping token_version invalidates every access token instantly (ADR-009).
-export const logoutAll = catchAsync(async (req, res) => {
-  await prisma.$transaction([
-    prisma.refreshToken.updateMany({
-      where: { userId: req.user.id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    }),
-    prisma.user.update({
-      where: { id: req.user.id },
-      data: { tokenVersion: { increment: 1 } },
-    }),
-  ]);
-  clearRefreshCookie(res);
-  res.json({ success: true, message: "All sessions revoked" });
-});
-
 /* ─────────────────────────── GET /me ─────────────────────────── */
 export const me = catchAsync(async (req, res) => {
   res.json({
@@ -363,57 +346,6 @@ export const me = catchAsync(async (req, res) => {
     user: publicUser(req.user),
     permissions: req.user.permissions,
   });
-});
-
-/* ─────────────────────────── GET /sessions ─────────────────────────── */
-// Multi-device visibility (ADR-033). The current device is flagged.
-export const listSessions = catchAsync(async (req, res) => {
-  const currentRaw = readCookie(req, REFRESH_COOKIE);
-  const currentHash = currentRaw ? sha256(currentRaw) : null;
-
-  const sessions = await prisma.refreshToken.findMany({
-    where: { userId: req.user.id, revokedAt: null, expiresAt: { gt: new Date() } },
-    orderBy: { createdAt: "desc" },
-    select: { id: true, deviceLabel: true, ip: true, createdAt: true, expiresAt: true, tokenHash: true },
-  });
-
-  res.json({
-    success: true,
-    data: sessions.map((s) => ({
-      id: s.id,
-      deviceLabel: s.deviceLabel,
-      ip: s.ip,
-      createdAt: s.createdAt,
-      expiresAt: s.expiresAt,
-      current: s.tokenHash === currentHash,
-    })),
-  });
-});
-
-/* ─────────────────────────── DELETE /sessions/:id ─────────────────────────── */
-export const revokeSession = catchAsync(async (req, res, next) => {
-  const session = await prisma.refreshToken.findUnique({ where: { id: req.params.id } });
-  if (!session || session.userId !== req.user.id) {
-    return next(new AppError("Session not found", 404));
-  }
-  await prisma.refreshToken.update({
-    where: { id: session.id },
-    data: { revokedAt: new Date() },
-  });
-  res.json({ success: true, message: "Session revoked" });
-});
-
-/* ─────────────────────────── GET /login-activity ─────────────────────────── */
-export const loginActivity = catchAsync(async (req, res) => {
-  // Management sees everyone; everyone else sees their own trail.
-  const where = isManagement(req.user) ? {} : { userId: req.user.id };
-  const data = await prisma.loginActivity.findMany({
-    where,
-    orderBy: { createdAt: "desc" },
-    take: 100,
-    select: { id: true, userId: true, emailAttempted: true, outcome: true, ip: true, createdAt: true },
-  });
-  res.json({ success: true, data });
 });
 
 /* ─────────────────────────── POST /activate ─────────────────────────── */

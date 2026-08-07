@@ -17,13 +17,10 @@ import {
   MessagesSquare,
   Bell,
   Cpu,
-  BarChart3,
   ShieldCheck,
-  Lock,
   PhoneCall,
   Inbox,
   Landmark,
-  Package,
   Truck,
   Workflow,
   Coins,
@@ -37,7 +34,6 @@ import { isManagement, labelForRoles, hasAnyRole, INTERNAL_ROLES } from "@/lib/r
 const NON_MGMT_INTERNAL = INTERNAL_ROLES.filter((r) => !isManagement(r));
 
 const SHIPMENT_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
-const REPORT_ROLES = ["hr", "asm", "bdo", "ops_manager", "compliance_manager", "transport_manager", "accounts"];
 const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"];
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // own drivers & vehicles
 
@@ -57,7 +53,6 @@ const NAV_ITEMS = [
   },
   { name: "Inquiries", icon: Inbox, path: "/admin/inquiries", roles: ["asm", "bdo"] }, // direct channel (§5.20)
   { name: "LC Inbox", icon: Landmark, path: "/admin/lc-inbox", roles: ["ops_manager", "ops_exec"] }, // bank-LC (§5.21)
-  { name: "Load Board", icon: Package, path: "/admin/loadboard", roles: ["ops_manager", "transport_manager"] }, // §5.20
   // The buy side sits between the query and the quote, because that is the order
   // the work happens in: get vendor rates, then price the sale.
   { name: "Rate Requests", icon: Coins, path: "/admin/rfqs", roles: ["ops_manager", "ops_exec"] },
@@ -83,8 +78,6 @@ const NAV_ITEMS = [
   },
   { name: "Chat", icon: MessagesSquare, path: "/admin/chat", roles: NON_MGMT_INTERNAL },
   { name: "Notifications", icon: Bell, path: "/admin/notifications", roles: NON_MGMT_INTERNAL, badge: "unread" },
-  { name: "Security", icon: Lock, path: "/admin/security", roles: NON_MGMT_INTERNAL },
-  { name: "Reports", icon: BarChart3, path: "/admin/reports", roles: REPORT_ROLES }, // report.read (§5.18)
   { name: "Action Engine", icon: Cpu, path: "/admin/action-engine", roles: [] }, // Management only (§5.12)
   { name: "Workflow", icon: Workflow, path: "/admin/workflow", roles: [] }, // Management only (ADR-051)
   { name: "Audit", icon: ShieldCheck, path: "/admin/audit", roles: [] }, // Management only (§5.19)

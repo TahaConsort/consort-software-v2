@@ -33,7 +33,7 @@ const MANAGEMENT_PERMS = [
   "chat.read", "chat.send",
   "report.read", "audit.read", "dashboard.read",
   // Intake channels & storefront (CRM_MASTER §5.20/§5.21)
-  "inquiry.read", "inquiry.convert", "lc.read", "lc.convert", "loadboard.manage",
+  "inquiry.read", "inquiry.convert", "lc.read", "lc.convert",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
   // Vendor rate requests — the buy side of a query
@@ -93,7 +93,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete", "task.reassign",
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "lc.read", "lc.convert", "loadboard.manage",
+    "lc.read", "lc.convert",
     "vendor.read", "vendor.manage",
     "rfq.read", "rfq.manage", "rfq.award",
     "fleet.read", "fleet.manage",
@@ -140,7 +140,6 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete", "task.reassign",
     "document.upload", "document.read",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "loadboard.manage",
     "vendor.read", "vendor.manage",
     "fleet.read", "fleet.manage",
   ],
@@ -237,7 +236,7 @@ export const protect = async (req, res, next) => {
       return next(new AppError("Not authorized, account inactive", 401));
     }
 
-    // Global invalidation — a role change / logout-all bumps token_version (EDGE-A-03).
+    // Global invalidation — a role change / password reset bumps token_version (EDGE-A-03).
     if (decoded.tv !== user.tokenVersion) {
       return next(new AppError("Session expired, please sign in again", 401));
     }

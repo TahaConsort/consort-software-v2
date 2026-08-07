@@ -122,14 +122,24 @@ const LcSourcePanel = ({ referral, canApply, onApplied }) => {
               The PDF has no readable SWIFT tags — it may be a scan. Enter the fields by hand.
             </p>
           ) : (
-            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-              {ROWS.map(([k, v]) => (
-                <div key={k} className="contents">
-                  <dt className="text-muted-foreground whitespace-nowrap">{k}</dt>
-                  <dd className="font-medium break-words">{v}</dd>
-                </div>
-              ))}
-            </dl>
+            <>
+              {/* This panel and the block above it BOTH show an "Amount", and until the
+                  operator applies, they disagree — the referral's is blank, this one is
+                  the PDF's. That reads as a bug ("the amount is right there, why is the
+                  column empty?") unless the screen says which is which. */}
+              <p className="text-[11px] text-muted-foreground">
+                Read from the PDF — <span className="font-medium">not saved yet</span>. “Apply to referral”
+                writes these onto the referral and fills the inbox columns.
+              </p>
+              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                {ROWS.map(([k, v]) => (
+                  <div key={k} className="contents">
+                    <dt className="text-muted-foreground whitespace-nowrap">{k}</dt>
+                    <dd className="font-medium break-words">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
           )}
 
           {/* A lane the LC states but we hold no port code for. Saying so beats

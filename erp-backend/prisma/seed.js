@@ -16,9 +16,11 @@
  */
 import bcrypt from "bcrypt";
 import { pathToFileURL } from "url";
+import { Prisma } from "@prisma/client";
 import prisma from "../config/prisma.js";
 import { DEFAULT_CURRENCY } from "../utils/currency.js";
 import { deriveTaskTemplateData } from "../utils/taskTemplates.js";
+import { allocateRef } from "../utils/referenceNumber.js";
 import { seedDemoLcReferral } from "../modules/lc/lc.seed.js";
 
 const DEPARTMENTS = [
@@ -416,6 +418,10 @@ const RATE_CARDS = [
 ];
 
 const DAY = 24 * 60 * 60 * 1000;
+// How long a seeded posting stays on the board past its departure date. These are
+// deliberately TEMPORARY: the storefront hides anything past `validUntil`, so the
+// board empties itself and re-running --loadboard-only refreshes it.
+const POSTING_TTL_DAYS = 14;
 // Load board postings shown on the public storefront (CRM_MASTER §5.20).
 // indicativeRate is in DEFAULT_CURRENCY (PKR), same basis as RATE_CARDS above.
 const LOAD_BOARD_POSTINGS = [
@@ -517,27 +523,71 @@ async function assertWipeAllowed() {
 // ── Wipe all business + account data (departments/templates/reference are
 // re-upserted below). FK-safe order: children first, then break the
 // department→user head FK, then users/employees/customers, then sequences.
+const CLEAR_STEPS = [
+  "rateCard", "loadBoardPosting", "publicInquiry", "bankLcReferral",
+  "auditLog", "outboxEvent", "notificationDelivery", "notification", "notificationPreference",
+  "chatMessage", "chatChannelMember", "chatChannel", "document",
+  "payment", "invoiceLine", "invoice",
+  "otcMilestone", "otdStep", "shipmentStatusHistory", "shipmentException", "task", "shipment",
+  // The buy side hangs off the query (vendor_rfqs.query_id is RESTRICT), so it has
+  // to go before queries — and off the vendor, so it goes before vendors too.
+  "vendorQuoteLine", "vendorQuote", "vendorRfq",
+  "quotationChargeLine", "quotation", "query",
+  "visitPlan", "outreach", "leadStatusHistory", "lead",
+  "refreshToken", "activationToken", "loginActivity",
+  "user", "customer", "contact", "company", "employee",
+  "vendor", "driver", "fleetVehicle", "chargeType",
+  "referenceSequence",
+];
+
+// Models a wipe deliberately leaves alone, because main() re-upserts them right
+// after (catalogs and reference data) or they are template rows owned by
+// seedTemplates(). Anything NOT in this set and NOT in CLEAR_STEPS is drift.
+const PRESERVED_ON_CLEAR = new Set([
+  "Department",           // headUserId is nulled above, rows are re-upserted
+  "OtdStepTemplate", "OtdStepActionTemplate", "TaskTemplate", "DocumentType", // seedTemplates()
+  "Port", "ContainerType", // reference data, re-upserted
+  "OtdStepAction",         // cascades from OtdStep (schema onDelete: Cascade)
+]);
+
+/**
+ * Guard against the failure that produced a half-wiped database: a model gets
+ * added to schema.prisma, nobody adds it to CLEAR_STEPS, and the wipe dies
+ * mid-way on its foreign key — after tens of tables are already gone, because
+ * these deletes are separate statements, not one transaction. Checking the list
+ * against the live datamodel BEFORE deleting anything turns a partial wipe into
+ * a clean refusal.
+ */
+function assertClearListComplete() {
+  const listed = new Set(
+    CLEAR_STEPS.map((m) => m.charAt(0).toUpperCase() + m.slice(1)),
+  );
+  const missing = Prisma.dmmf.datamodel.models
+    .map((m) => m.name)
+    .filter((name) => !listed.has(name) && !PRESERVED_ON_CLEAR.has(name));
+
+  if (missing.length) {
+    console.error(
+      `Refusing to wipe: ${missing.length} model(s) in schema.prisma are neither cleared\n` +
+      `nor explicitly preserved:\n\n  ${missing.join("\n  ")}\n\n` +
+      "Add each to CLEAR_STEPS in prisma/seed.js (children before parents), or to\n" +
+      "PRESERVED_ON_CLEAR if a wipe should leave it standing. Stopping BEFORE any\n" +
+      "delete runs — the deletes are not transactional, so a mid-way failure leaves\n" +
+      "the database half-wiped and unrecoverable.",
+    );
+    process.exit(1);
+  }
+}
+
 async function clearData() {
+  assertClearListComplete();
   await assertWipeAllowed();
   await prisma.department.updateMany({ data: { headUserId: null } });
 
-  const steps = [
-    "rateCard", "loadBoardPosting", "publicInquiry", "bankLcReferral",
-    "auditLog", "outboxEvent", "notificationDelivery", "notification", "notificationPreference",
-    "chatMessage", "chatChannelMember", "chatChannel", "document",
-    "payment", "invoiceLine", "invoice",
-    "otcMilestone", "otdStep", "shipmentStatusHistory", "shipmentException", "task", "shipment",
-    "quotationChargeLine", "quotation", "query",
-    "visitPlan", "outreach", "leadStatusHistory", "lead",
-    "refreshToken", "activationToken", "loginActivity",
-    "user", "customer", "contact", "company", "employee",
-    "vendor", "chargeType",
-    "referenceSequence",
-  ];
-  for (const model of steps) {
+  for (const model of CLEAR_STEPS) {
     await prisma[model].deleteMany();
   }
-  console.log(`✓ cleared ${steps.length} tables`);
+  console.log(`✓ cleared ${CLEAR_STEPS.length} tables`);
 }
 
 /**
@@ -654,6 +704,64 @@ export async function seedTemplates() {
   console.log(`✓ ${CHARGE_TYPES.length} charge types`);
 }
 
+/**
+ * Temporary load board postings for the public storefront (CRM_MASTER §5.20).
+ *
+ * The internal management panel is gone, so this seed is the ONLY way postings
+ * reach the board — which means it has to be safe to run against a database that
+ * already holds real work. It is therefore INSERT-IF-ABSENT: no deletes, no
+ * upserts over existing rows, and a live posting on the same lane is left alone
+ * rather than duplicated. Reference numbers come from `allocateRef`, so seeded
+ * and runtime-created postings share one gap-free LB-YYYY-NNNNN sequence.
+ */
+async function seedLoadBoardPostings() {
+  const now = Date.now();
+  let created = 0;
+  let skipped = 0;
+
+  for (const posting of LOAD_BOARD_POSTINGS) {
+    const { departureInDays, ...rest } = posting;
+
+    // Same mode, same lane, same equipment, still valid → that offer is already
+    // on the board. Re-running must refresh a lapsed board, not stack duplicates
+    // onto a live one.
+    const live = await prisma.loadBoardPosting.findFirst({
+      where: {
+        mode: rest.mode,
+        originPort: rest.originPort,
+        destinationPort: rest.destinationPort,
+        equipment: rest.equipment ?? null,
+        isActive: true,
+        validUntil: { gt: new Date(now) },
+      },
+      select: { id: true },
+    });
+    if (live) {
+      skipped++;
+      continue;
+    }
+
+    // allocateRef bumps reference_sequences, so it must share the create's tx.
+    await prisma.$transaction(async (tx) => {
+      const referenceNo = await allocateRef(tx, "load_board");
+      await tx.loadBoardPosting.create({
+        data: {
+          ...rest,
+          referenceNo,
+          currency: DEFAULT_CURRENCY,
+          departureDate: new Date(now + departureInDays * DAY),
+          validUntil: new Date(now + (departureInDays + POSTING_TTL_DAYS) * DAY),
+        },
+      });
+    });
+    created++;
+  }
+
+  console.log(
+    `✓ load board: ${created} posting(s) created, ${skipped} already live and left alone`,
+  );
+}
+
 async function main() {
   // 0 — Wipe existing data first
   await clearData();
@@ -690,29 +798,12 @@ async function main() {
   });
   console.log(`✓ ${VENDORS.length} vendors`);
 
-  // 4b — Storefront config: rate cards + load board postings (CRM_MASTER §5.20)
+  // 4b — Storefront config: rate cards + load board postings (CRM_MASTER §5.20).
+  // The postings go through the same seeder as --loadboard-only, so there is one
+  // code path and refs come from the allocator rather than manual numbering.
   await prisma.rateCard.createMany({ data: RATE_CARDS });
-  const year = new Date().getFullYear();
-  for (let i = 0; i < LOAD_BOARD_POSTINGS.length; i++) {
-    const p = LOAD_BOARD_POSTINGS[i];
-    const { departureInDays, ...rest } = p;
-    await prisma.loadBoardPosting.create({
-      data: {
-        ...rest,
-        referenceNo: `LB-${year}-${String(i + 1).padStart(5, "0")}`,
-        currency: DEFAULT_CURRENCY,
-        departureDate: new Date(Date.now() + departureInDays * DAY),
-        validUntil: new Date(Date.now() + (departureInDays + 14) * DAY),
-      },
-    });
-  }
-  // Keep the runtime allocator in step with the manually-numbered seed refs.
-  await prisma.referenceSequence.upsert({
-    where: { entity_year: { entity: "load_board", year } },
-    update: { lastValue: LOAD_BOARD_POSTINGS.length },
-    create: { entity: "load_board", year, lastValue: LOAD_BOARD_POSTINGS.length },
-  });
-  console.log(`✓ ${RATE_CARDS.length} rate cards, ${LOAD_BOARD_POSTINGS.length} load board postings`);
+  console.log(`✓ ${RATE_CARDS.length} rate cards`);
+  await seedLoadBoardPostings();
 
   // 5 — Bootstrap accounts (one active login per role + CEO reporting tree + heads)
   await seedAccounts();
@@ -742,12 +833,17 @@ if (isEntryPoint) {
   //   --accounts-only                   role logins, reporting tree, dept heads (upserts)
   //   --lc-only                         demo bank-LC referral + the SWIFT advice PDF
   //                                     (insert-if-absent; safe on a live database)
+  //   --loadboard-only                  temporary storefront load board postings
+  //                                     (insert-if-absent; safe on a live database)
   //   --force-wipe                      override the guard and clear everything
   const templatesOnly = process.argv.includes("--templates-only");
   const accountsOnly = process.argv.includes("--accounts-only");
   // The demo LC is pure insert-if-absent — no deletes, no upserts over existing rows —
   // so it is safe to run on its own against a database that already holds real work.
   const lcOnly = process.argv.includes("--lc-only");
+  // Same contract as --lc-only. This is now the only way postings reach the public
+  // board, so it has to be runnable against a live database on demand.
+  const loadboardOnly = process.argv.includes("--loadboard-only");
 
   // Since ADR-051 the step catalog is edited LIVE in the Workflow admin panel, so a
   // template reseed is no longer harmless: it REPLACES every step/sub-action row with
@@ -764,19 +860,25 @@ if (isEntryPoint) {
     process.exit(1);
   }
 
-  const run = lcOnly && !templatesOnly && !accountsOnly
-    ? seedDemoLcReferral()
-    : templatesOnly && accountsOnly
-      ? seedTemplates().then(seedAccounts)
-      : templatesOnly
-        ? seedTemplates()
-        : accountsOnly
-          ? seedAccounts()
-          : main();
+  // Each flag selects one non-destructive seeder; any combination of them runs in
+  // this order (templates before accounts, because dept heads need the catalogs).
+  // No flag at all means the full, destructive main().
+  const partials = [
+    [templatesOnly, seedTemplates],
+    [accountsOnly, seedAccounts],
+    [lcOnly, seedDemoLcReferral],
+    [loadboardOnly, seedLoadBoardPostings],
+  ]
+    .filter(([enabled]) => enabled)
+    .map(([, seeder]) => seeder);
+
+  const run = partials.length
+    ? partials.reduce((chain, seeder) => chain.then(seeder), Promise.resolve())
+    : main();
 
   run
     .then(() => {
-      if (templatesOnly || accountsOnly || lcOnly) console.log("Partial seed complete (no data was cleared).");
+      if (partials.length) console.log("Partial seed complete (no data was cleared).");
     })
     .catch((e) => {
       console.error("Seed failed:", e);

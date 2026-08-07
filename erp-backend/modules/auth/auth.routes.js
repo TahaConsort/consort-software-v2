@@ -5,11 +5,7 @@ import {
   register,
   refresh,
   logout,
-  logoutAll,
   me,
-  listSessions,
-  revokeSession,
-  loginActivity,
   activate,
   forgotPassword,
   resetPassword,
@@ -63,10 +59,6 @@ router.post("/bootstrap-admin", validate(bootstrapAdminSchema), bootstrapAdmin);
 
 /* ── Authenticated ── */
 router.post("/logout", protect, logout);
-router.post("/logout-all", protect, logoutAll);
 router.get("/me", protect, me);
-router.get("/sessions", protect, listSessions);
-router.delete("/sessions/:id", protect, revokeSession);
-router.get("/login-activity", protect, loginActivity);
 
 export default router;

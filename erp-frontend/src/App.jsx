@@ -42,17 +42,14 @@ import VendorsListPage from "./pages/VendorsPages/VendorsListPage";
 import DriversListPage from "./pages/VendorsPages/DriversListPage";
 import VehiclesListPage from "./pages/VendorsPages/VehiclesListPage";
 import ActionEngineListPage from "./pages/ActionEnginePages/ActionEngineListPage";
-import ReportsListPage from "./pages/ReportsPages/ReportsListPage";
 import AuditListPage from "./pages/AuditPages/AuditListPage";
 import ChatPage from "./pages/ChatPages/ChatPage";
 import NotificationsPage from "./pages/NotificationsPages/NotificationsPage";
-import SecurityPage from "./pages/SecurityPages/SecurityPage";
 
 // Public storefront + intake channels (§5.20/§5.21)
 import StorefrontPage from "./pages/PublicPages/StorefrontPage";
 import InquiriesListPage from "./pages/InquiryPages/InquiriesListPage";
 import LcInboxPage from "./pages/LcPages/LcInboxPage";
-import LoadBoardManagePage from "./pages/LoadBoardPages/LoadBoardManagePage";
 import WorkflowManagePage from "./pages/WorkflowPages/WorkflowManagePage";
 
 // Role groups (Management passes every gate via RoleGuard, ADR-044).
@@ -62,10 +59,8 @@ const QUERY_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manage
 const QUOTATION_ROLES = ["asm", "ops_manager", "ops_exec"];
 const SHIPMENT_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
 const FINANCE_ROLES = ["accounts"]; // + Management via RoleGuard (ADR-044)
-const REPORT_ROLES = ["hr", "asm", "bdo", "ops_manager", "compliance_manager", "transport_manager", "accounts"]; // report.read (§2.2)
 const INQUIRY_ROLES = ["asm", "bdo"]; // direct-channel triage (§5.20)
 const LC_ROLES = ["ops_manager", "ops_exec"]; // bank-LC inbox (§5.21)
-const LOADBOARD_ROLES = ["ops_manager", "transport_manager"]; // load board management (§5.20)
 const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"]; // vendor.read (freight-forwarding OTC)
 const RFQ_ROLES = ["ops_manager", "ops_exec"]; // rfq.read — the buy side stays with Ops
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // fleet.read — own drivers & vehicles
@@ -100,17 +95,11 @@ const App = () => {
                 <Route index element={<DashboardHome />} />
                 <Route path="chat" element={<ChatPage />} />
                 <Route path="notifications" element={<NotificationsPage />} />
-                <Route path="security" element={<SecurityPage />} />
               </Route>
 
               {/* Employee management — HR + Management */}
               <Route element={<RoleGuard allowedRoles={["hr"]} />}>
                 <Route path="users" element={<ManageUsersPage />} />
-              </Route>
-
-              {/* Reports — report.read roles + Management */}
-              <Route element={<RoleGuard allowedRoles={REPORT_ROLES} />}>
-                <Route path="reports" element={<ReportsListPage />} />
               </Route>
 
               {/* Management-only — settings + Action Engine (§5.12) + Audit (§5.19) +
@@ -142,9 +131,6 @@ const App = () => {
               </Route>
               <Route element={<RoleGuard allowedRoles={LC_ROLES} />}>
                 <Route path="lc-inbox" element={<LcInboxPage />} />
-              </Route>
-              <Route element={<RoleGuard allowedRoles={LOADBOARD_ROLES} />}>
-                <Route path="loadboard" element={<LoadBoardManagePage />} />
               </Route>
 
               {/* Rate requests — the buy side: ask vendors, compare, award, then quote */}

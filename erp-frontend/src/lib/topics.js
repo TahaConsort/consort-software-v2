@@ -32,10 +32,8 @@ export const TOPICS = {
   EMPLOYEES: "employees",
   VENDORS: "vendors",
   RFQS: "rfqs",
-  LOADBOARD: "loadboard",
   AUDIT: "audit",
   ACTION_ENGINE: "actionEngine",
-  REPORTS: "reports",
   DASHBOARD: "dashboard",
   CHAT: "chat",
 

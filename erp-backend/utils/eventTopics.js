@@ -200,7 +200,6 @@ export const EVENT_TOPICS = {
   "rfq.updated": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
   "rfq.quote_received": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
   "rfq.awarded": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...MGMT] },
-  "loadboard.changed": { topics: () => [TOPICS.LOADBOARD], roles: [...SALES, ...OPS] },
 
   /* ── Observability ─────────────────────────────────────────────────────── */
   "action.unroutable": { topics: () => [TOPICS.ACTION_ENGINE, TOPICS.NOTIFICATIONS], roles: MGMT },

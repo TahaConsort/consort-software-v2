@@ -111,8 +111,13 @@ export const seedDemoLcReferral = async ({
     });
   }
 
-  log(`✓ demo LC ${referral.referenceNo} (${referral.status}) — ${fields.lcNumber}, `
-    + `${fields.currency} ${Number(fields.amount ?? 0).toLocaleString()}, ${fields.commodity ?? "?"}`);
+  // Report what was STORED, then what is only readable in the PDF. The old line
+  // printed the PDF's amount and commodity next to the reference number, which
+  // reads as "these are on the referral" — they are not, by design, and the
+  // inbox correctly shows them blank until someone presses "Read LC".
+  log(`✓ demo LC ${referral.referenceNo} (${referral.status}) — ${fields.lcNumber}, ${fields.issuingBankName}`);
+  log(`  trade fields left blank by design (${fields.currency} ${Number(fields.amount ?? 0).toLocaleString()}, `
+    + `${fields.commodity ?? "?"}) — press "Read LC" in the inbox to extract them from the PDF`);
 
   return { referral, document, fields };
 };

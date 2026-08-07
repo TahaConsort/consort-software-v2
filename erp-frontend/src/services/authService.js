@@ -37,30 +37,6 @@ export const logout = async () => {
   return res.data;
 };
 
-// POST /auth/logout-all — revoke every session (bumps token_version)
-export const logoutAll = async () => {
-  const res = await api.post("/auth/logout-all");
-  return res.data;
-};
-
-// GET /auth/sessions — active devices (ADR-033)
-export const listSessions = async () => {
-  const res = await api.get("/auth/sessions");
-  return res.data;
-};
-
-// DELETE /auth/sessions/:id — revoke a specific device
-export const revokeSession = async (id) => {
-  const res = await api.delete(`/auth/sessions/${id}`);
-  return res.data;
-};
-
-// GET /auth/login-activity — login trail (self, or all for Management)
-export const getLoginActivity = async () => {
-  const res = await api.get("/auth/login-activity");
-  return res.data;
-};
-
 // POST /auth/activate — set password from an activation token
 export const activate = async (token, password) => {
   const res = await api.post("/auth/activate", { token, password });

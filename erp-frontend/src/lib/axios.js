@@ -24,7 +24,7 @@ const api = axios.create({
 
 // Endpoints that must NOT trigger a refresh-retry (would loop). Public storefront
 // calls (§5.20) are anonymous, so a stray 401 must not force-logout a visitor.
-const NO_REFRESH = ["/auth/login", "/auth/refresh", "/auth/logout", "/auth/logout-all", "/public/"];
+const NO_REFRESH = ["/auth/login", "/auth/refresh", "/auth/logout", "/public/"];
 
 // ─── Request Interceptor ──────────────────────────────────────────────────────
 api.interceptors.request.use(

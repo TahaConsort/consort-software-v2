@@ -22,10 +22,8 @@ import chatRoutes from "./modules/chat/chat.routes.js";
 import dashboardRoutes from "./modules/dashboard/dashboard.routes.js";
 import notificationRoutes from "./modules/notification/notification.routes.js";
 import actionRoutes from "./modules/action/action.routes.js";
-import reportRoutes from "./modules/report/report.routes.js";
 import auditRoutes from "./modules/audit/audit.routes.js";
 import storefrontRoutes from "./modules/storefront/storefront.routes.js";
-import loadboardRoutes from "./modules/loadboard/loadboard.routes.js";
 import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
@@ -115,13 +113,11 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/action-engine", actionRoutes);
-app.use("/api/reports", reportRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/workflow", workflowRoutes); // Management-only catalog admin (ADR-051)
 
 // Intake channels & public storefront (CRM_MASTER §5.20/§5.21)
 app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calc + inquiry
-app.use("/api/loadboard", loadboardRoutes); // internal: posting management
 app.use("/api/inquiries", inquiryRoutes); // internal: direct-channel triage
 app.use("/api/lc-referrals", lcInboxRoutes); // internal: bank-LC inbox
 
