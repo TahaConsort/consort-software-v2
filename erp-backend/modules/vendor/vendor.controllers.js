@@ -57,6 +57,15 @@ export const createVendor = catchAsync(async (req, res) => {
         taxId: b.taxId || null,
         paymentTermsDays: b.paymentTermsDays ?? null,
         currency: b.currency || null,
+        strn: b.strn || null,
+        rexNo: b.rexNo || null,
+        vatNo: b.vatNo || null,
+        bankName: b.bankName || null,
+        bankBranch: b.bankBranch || null,
+        iban: b.iban || null,
+        swiftCode: b.swiftCode || null,
+        accountTitle: b.accountTitle || null,
+        website: b.website || null,
         notes: b.notes || null,
       },
     });
@@ -74,7 +83,7 @@ export const updateVendor = catchAsync(async (req, res, next) => {
   const data = { ...b };
   if (b.name) data.normalizedName = normalize(b.name);
   // Normalise empty strings to null for optional contact fields.
-  for (const k of ["contactName", "email", "phone", "address", "country", "city", "taxId", "currency"]) {
+  for (const k of ["contactName", "email", "phone", "address", "country", "city", "taxId", "currency", "strn", "rexNo", "vatNo", "bankName", "bankBranch", "iban", "swiftCode", "accountTitle", "website"]) {
     if (data[k] === "") data[k] = null;
   }
 
@@ -95,4 +104,16 @@ export const deactivateVendor = catchAsync(async (req, res, next) => {
     await emitVendorChanged(tx, existing.id);
   });
   res.json({ success: true, message: "Vendor deactivated" });
+});
+
+/* ── DELETE /api/vendors/:id ── (hard delete) */
+export const deleteVendor = catchAsync(async (req, res, next) => {
+  const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
+  if (!existing) return next(new AppError("Vendor not found", 404));
+  
+  await prisma.$transaction(async (tx) => {
+    await tx.vendor.delete({ where: { id: existing.id } });
+    await emitVendorChanged(tx, existing.id);
+  });
+  res.json({ success: true, message: "Vendor deleted" });
 });

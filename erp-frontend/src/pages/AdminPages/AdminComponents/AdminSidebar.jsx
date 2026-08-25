@@ -65,16 +65,6 @@ const NAV_ITEMS = [
     icon: Truck,
     path: "/admin/vendors",
     roles: VENDOR_ROLES,
-    // The counterparty masters and the own-fleet masters live under one menu
-    // because they answer one question — who and what moves this cargo.
-    children: [
-      { name: "All Vendors", path: "/admin/vendors", roles: VENDOR_ROLES, end: true },
-      { name: "Drivers", path: "/admin/vendors/drivers", roles: FLEET_ROLES },
-      { name: "Trucks", path: "/admin/vendors/trucks", roles: FLEET_ROLES },
-      { name: "Dumpers", path: "/admin/vendors/dumpers", roles: FLEET_ROLES },
-      { name: "Shipping Lines", path: "/admin/vendors/shipping-lines", roles: VENDOR_ROLES },
-      { name: "Transporters", path: "/admin/vendors/transporters", roles: VENDOR_ROLES },
-    ],
   },
   { name: "Chat", icon: MessagesSquare, path: "/admin/chat", roles: NON_MGMT_INTERNAL },
   { name: "Notifications", icon: Bell, path: "/admin/notifications", roles: NON_MGMT_INTERNAL, badge: "unread" },

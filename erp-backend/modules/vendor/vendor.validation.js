@@ -14,6 +14,12 @@ export const VENDOR_TYPES = [
   "destination_agent",
   "port_terminal",
   "rail_operator",
+  "freight_forwarder",
+  "ocean_carrier",
+  "exporter",
+  "buyer",
+  "bank",
+  "driver",
   "other",
 ];
 
@@ -29,6 +35,15 @@ export const createVendorSchema = z.object({
   taxId: z.string().max(50).optional(),
   paymentTermsDays: z.coerce.number().int().min(0).max(365).optional(),
   currency: z.string().length(3).optional(),
+  strn: z.string().max(50).optional(),
+  rexNo: z.string().max(50).optional(),
+  vatNo: z.string().max(50).optional(),
+  bankName: z.string().max(100).optional(),
+  bankBranch: z.string().max(100).optional(),
+  iban: z.string().max(50).optional(),
+  swiftCode: z.string().max(11).optional(),
+  accountTitle: z.string().max(100).optional(),
+  website: z.string().max(200).optional(),
   notes: z.string().max(1000).optional(),
 });
 

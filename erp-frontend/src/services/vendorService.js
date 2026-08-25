@@ -17,3 +17,5 @@ export const createVendor = async (payload) => (await api.post("/vendors", paylo
 export const updateVendor = async (id, payload) => (await api.patch(`/vendors/${id}`, payload)).data;
 
 export const deactivateVendor = async (id) => (await api.post(`/vendors/${id}/deactivate`)).data;
+
+export const deleteVendor = async (id) => (await api.delete(`/vendors/${id}`)).data;

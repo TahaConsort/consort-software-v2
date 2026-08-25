@@ -2,7 +2,7 @@ import express from "express";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { validate } from "../../middleware/validate.middleware.js";
 import { createVendorSchema, updateVendorSchema } from "./vendor.validation.js";
-import { listVendors, getVendor, createVendor, updateVendor, deactivateVendor } from "./vendor.controllers.js";
+import { listVendors, getVendor, createVendor, updateVendor, deactivateVendor, deleteVendor } from "./vendor.controllers.js";
 
 /**
  * Vendor master (freight-forwarding OTC upgrade). Read: `vendor.read`.
@@ -17,5 +17,6 @@ router.get("/:id", requirePermission("vendor.read"), getVendor);
 router.post("/", requirePermission("vendor.manage"), validate(createVendorSchema), createVendor);
 router.patch("/:id", requirePermission("vendor.manage"), validate(updateVendorSchema), updateVendor);
 router.post("/:id/deactivate", requirePermission("vendor.manage"), deactivateVendor);
+router.delete("/:id", requirePermission("vendor.manage"), deleteVendor);
 
 export default router;

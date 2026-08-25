@@ -308,6 +308,12 @@ export const VENDOR_TYPE_LABELS = {
   destination_agent: "Destination Agent",
   port_terminal: "Port Terminal",
   rail_operator: "Rail Operator",
+  freight_forwarder: "Freight Forwarder",
+  ocean_carrier: "Ocean Carrier",
+  exporter: "Exporter",
+  buyer: "Buyer",
+  bank: "Bank",
+  driver: "Driver",
   other: "Other",
 };
 

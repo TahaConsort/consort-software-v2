@@ -373,6 +373,12 @@ enum VendorType {
   destination_agent
   port_terminal
   rail_operator
+  freight_forwarder
+  ocean_carrier
+  exporter
+  buyer
+  bank
+  driver
   other
 }
 
@@ -1080,6 +1086,15 @@ model Vendor {
   taxId            String?          @map("tax_id") // NTN / STRN
   paymentTermsDays Int?             @map("payment_terms_days")
   currency         String?          @db.Char(3)
+  strn             String?          @map("strn") // Sindh Sales Tax Registration No.
+  rexNo            String?          @map("rex_no") // REX Registration No. (exporters)
+  vatNo            String?          @map("vat_no") // VAT/TVA No. (foreign buyers)
+  bankName         String?          @map("bank_name")
+  bankBranch       String?          @map("bank_branch")
+  iban             String?          @map("iban")
+  swiftCode        String?          @map("swift_code") @db.VarChar(11)
+  accountTitle     String?          @map("account_title")
+  website          String?          @map("website")
   notes            String?
   isActive         Boolean          @default(true) @map("is_active")
   invoices         Invoice[]
