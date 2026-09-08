@@ -41,29 +41,34 @@ const RequestRatesDialog = ({ busy, query, onClose, onSubmit }) => {
 
   // lc_finance is a bank instrument — there is no vendor to ask for a rate. A rail
   // query's transport service expands into its three legs, each priced separately.
+  // The query no longer records an inland mode, so splitting the transport service into
+  // first/middle/last mile is an explicit Ops choice — made here, when the ask goes out.
+  const [splitLegs, setSplitLegs] = useState(false);
+
   const groups = useMemo(
     () =>
       (query.services ?? [])
         .filter((s) => RFQ_SERVICES.includes(s))
         .flatMap((s) =>
-          s === "local_transport" && query.inlandMode === "rail"
+          s === "local_transport" && splitLegs
             ? RFQ_LEGS.map((leg) => ({ service: s, leg, key: `${s}:${leg}` }))
             : [{ service: s, leg: null, key: s }],
         ),
-    [query.services, query.inlandMode],
+    [query.services, splitLegs],
   );
 
-  // What each rail leg actually covers, so ops sees the stretch they're pricing.
+  // What each leg covers, so ops sees the stretch they're pricing. A query carries only
+  // the two doors, so the middle mile is named by the leg label rather than a terminal.
   const legRoute = (leg) => {
-    const pickup = query.pickupAddress || query.senderAddress;
-    const delivery = query.deliveryAddress || query.receiverAddress;
+    const pickup = query.pickupAddress;
+    const delivery = query.destinationAddress;
     switch (leg) {
       case "first_mile":
-        return [pickup, query.originRailTerminal].filter(Boolean).join(" → ");
+        return pickup ?? "";
       case "middle_mile":
-        return [query.originRailTerminal, query.destinationRailTerminal].filter(Boolean).join(" → ");
+        return [pickup, delivery].filter(Boolean).join(" → ");
       case "last_mile":
-        return [query.destinationRailTerminal, delivery].filter(Boolean).join(" → ");
+        return delivery ?? "";
       default:
         return "";
     }
@@ -120,12 +125,21 @@ const RequestRatesDialog = ({ busy, query, onClose, onSubmit }) => {
           <DialogDescription>
             {query.customerCompany}
             {route ? ` · ${route}` : ""} — pick who to ask for each service. One rate
-            request is created per service{query.inlandMode === "rail" ? ", and one per rail leg" : ""}.
+            request is created per service{splitLegs ? ", and one per inland leg" : ""}.
           </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={submit} className="flex flex-1 min-h-0 flex-col gap-4">
           <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
+            {(query.services ?? []).includes("local_transport") && (
+              <label className="flex items-center gap-2 text-sm cursor-pointer rounded-lg border p-3">
+                <Checkbox checked={splitLegs} onCheckedChange={(v) => setSplitLegs(!!v)} />
+                <span>
+                  Price the inland leg per leg
+                  <span className="text-muted-foreground"> — first mile, middle mile, last mile, one vendor each</span>
+                </span>
+              </label>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div className="space-y-1.5 min-w-0">
                 <Label htmlFor="rr-needed">Rates needed by (optional)</Label>

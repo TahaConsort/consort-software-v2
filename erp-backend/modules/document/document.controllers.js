@@ -156,20 +156,6 @@ export const uploadDocument = catchAsync(async (req, res, next) => {
         ),
       );
     }
-    if (docType === "cro" || docType === "lc") {
-      const shipment = await prisma.shipment.findUnique({
-        where: { id: ownerId },
-        select: { croHandledBy: true, lcHandledBy: true },
-      });
-      if (docType === "cro" && shipment?.croHandledBy !== "customer") {
-        safeUnlink(req.file.path);
-        return next(new AppError("Consort is arranging the CRO for this shipment", 409));
-      }
-      if (docType === "lc" && shipment?.lcHandledBy !== "customer") {
-        safeUnlink(req.file.path);
-        return next(new AppError("Consort is managing the LC for this shipment", 409));
-      }
-    }
   }
 
   // A step link is only meaningful on a shipment, and the step must be on it.

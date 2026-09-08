@@ -3,12 +3,6 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { deriveTaskTemplateData } from "../../utils/taskTemplates.js";
 import { composeOtdPath, composeStepActions } from "../../utils/composition.js";
-import {
-  SERVICE_PACKAGES,
-  allowedCroModes,
-  allowedLcModes,
-  resolveServices,
-} from "../../utils/servicePackage.js";
 import { invalidateDocTypes } from "../document/docTypes.cache.js";
 
 /**
@@ -94,11 +88,6 @@ export const createStep = async (body, actorId) => {
         title: body.title,
         hint: body.hint ?? null,
         ownerDepartment: body.ownerDepartment,
-        always: body.always ?? false,
-        packages: body.packages ?? [],
-        croModes: body.croModes ?? [],
-        lcModes: body.lcModes ?? [],
-        services: body.services ?? [],
         requiredDocTypes: body.requiredDocTypes ?? [],
         dueOffsetHours: body.dueOffsetHours ?? 48,
         derivedStatus: body.derivedStatus,
@@ -171,10 +160,6 @@ export const replaceActions = async (stepCode, actions, actorId) => {
           docType: a.kind === "document" ? a.docType : null,
           sortOrder: a.sortOrder,
           required: a.required ?? true,
-          packages: a.packages ?? [],
-          croModes: a.croModes ?? [],
-          lcModes: a.lcModes ?? [],
-          services: a.services ?? [],
         })),
       });
     }
@@ -272,33 +257,16 @@ export const validateCatalog = async () => {
   ]);
   const known = new Set(docTypes.map((d) => d.code));
 
-  const combos = [];
-  const composedCodes = new Set();
-  for (const servicePackage of SERVICE_PACKAGES) {
-    for (const croHandledBy of allowedCroModes(servicePackage)) {
-      for (const lcHandledBy of allowedLcModes(servicePackage)) {
-        const extraSets = servicePackage === "international" ? [[], ["destination_services"]] : [[]];
-        for (const extras of extraSets) {
-          const services = resolveServices({ servicePackage, services: extras, lcHandledBy });
-          const path = composeOtdPath(templates, { services, servicePackage, croHandledBy, lcHandledBy });
-          path.forEach((s) => composedCodes.add(s.stepCode));
-          const deliveredSteps = path.filter((s) => s.derivedStatus === "delivered").length;
-          const issues = [];
-          if (path.length === 0) issues.push("empty path");
-          if (deliveredSteps === 0) issues.push("no step derives 'delivered' — this path can never settle");
-          combos.push({
-            servicePackage,
-            croHandledBy,
-            lcHandledBy,
-            withDownstream: extras.length > 0,
-            stepCount: path.length,
-            deliveredSteps,
-            issues,
-          });
-        }
-      }
-    }
-  }
+  // There is one path now — every active template, in canonical order — so the old
+  // package x CRO x LC matrix collapses to a single row. Kept as an array so the admin
+  // panel and its callers keep the same shape.
+  const path = composeOtdPath(templates);
+  const composedCodes = new Set(path.map((s) => s.stepCode));
+  const deliveredSteps = path.filter((s) => s.derivedStatus === "delivered").length;
+  const issues = [];
+  if (path.length === 0) issues.push("empty path");
+  if (deliveredSteps === 0) issues.push("no step derives 'delivered' — this path can never settle");
+  const combos = [{ stepCount: path.length, deliveredSteps, issues }];
 
   const danglingDocTypes = [];
   for (const t of templates) {

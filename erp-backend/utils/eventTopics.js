@@ -33,7 +33,9 @@ import {
 // Exactly the role keys in auth.middleware.js ROLE_PERMISSIONS — a typo here would
 // broadcast to a room nobody is in, which is silent. verifyEventTopics.js checks them.
 const OPS = ["ops_manager", "ops_exec"];
-const SALES = ["asm", "bdo"];
+// web_manager rides with sales: it owns the website query channel, so every
+// query/quotation event sales hears about, it must hear too (topics carry no data).
+const SALES = ["asm", "bdo", "web_manager"];
 const MGMT = ["ceo", "project_director", "director", "cfo", "gm"];
 const FINANCE = ["accounts"];
 const COMPLIANCE = ["compliance_manager", "compliance_exec"];
@@ -83,8 +85,8 @@ export const EVENT_TOPICS = {
   /* ── Queries ───────────────────────────────────────────────────────────── */
   "query.created": { topics: () => [TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
   "query.updated": { topics: () => [TOPICS.QUERIES, TOPICS.DASHBOARD], roles: OPS },
+  "query.claimed": { topics: () => [TOPICS.QUERIES, TOPICS.CUSTOMERS], roles: SALES },
   "query.cancelled": { topics: () => [TOPICS.QUERIES, TOPICS.QUOTATIONS, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
-  "query.hazardous": { topics: () => [TOPICS.QUERIES, TOPICS.TASKS, TOPICS.DASHBOARD], roles: [...OPS, ...COMPLIANCE] },
   "query.stale": { topics: () => [TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
   "query.expired": { topics: () => [TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
 
@@ -97,6 +99,8 @@ export const EVENT_TOPICS = {
     // The customer is being shown a quote — this is precisely their business.
     scoped: (p) => (p.customerId ? [`customer:${p.customerId}`] : []),
   },
+  // BDO recorded giving the sent quote to the customer (mail/phone/WhatsApp).
+  "quotation.shared": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES], roles: [...OPS, ...SALES] },
   "quotation.rejected": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
   // RULE-QT-07: approval creates the shipment, composes the OTD path and seeds tasks.
   // The widest fan-out in the app.
@@ -120,6 +124,40 @@ export const EVENT_TOPICS = {
   "shipment.closed": { topics: (p) => [...shipmentTopics(p), TOPICS.INVOICES], roles: ALL_INTERNAL, scoped: shipmentScoped },
   "shipment.scheduled": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS], roles: ALL_INTERNAL, scoped: shipmentScoped },
   "shipment.eta_breached": { topics: shipmentTopics, roles: [...OPS, ...MGMT], scoped: shipmentScoped },
+  // Export Shipment Workflow roadmap §2/§7 — the party list feeds the shipment header,
+  // the trade-document panels (a B/L needs its carrier, a GD its clearing agent) and the
+  // vendor detail page, so it invalidates the shipment room and the vendor list alike.
+  "shipment.parties.changed": {
+    topics: (p) => [...shipmentTopics(p), TOPICS.VENDORS],
+    roles: ALL_INTERNAL,
+    scoped: shipmentScoped,
+  },
+
+  /* ── Export trade documents (roadmap §4) ─────────────────────────────────── */
+  // A trade document changes the derived stage, the alert list and often the invoice
+  // ledger, so each invalidates the shipment room plus the trade topic.
+  "trade.contract.created": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
+  "fi.registered": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
+  "fi.drawdown.recorded": {
+    topics: (p) => [TOPICS.TRADE, TOPICS.INVOICES, ...(p.shipmentId ? shipmentTopics(p) : [])],
+    roles: ALL_INTERNAL,
+  },
+  "fi.closed": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
+  "fi.expiring": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: [...FINANCE, ...MGMT] },
+  "fi.da_due": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: [...FINANCE, ...MGMT] },
+  "trade.container.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "packing_list.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "packing_list.confirmed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "trade_invoice.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "trade_invoice.issued": {
+    topics: (p) => [...shipmentTopics(p), TOPICS.TRADE, TOPICS.INVOICES],
+    roles: ALL_INTERNAL,
+    scoped: shipmentScoped,
+  },
+  "bol.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "gd.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "shipment.trade_stage.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  "trade.mismatch_detected": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
 
   /* ── OTD steps ─────────────────────────────────────────────────────────── */
   // A step's sub-action tick or notes edit changes only that shipment's gating.
@@ -171,12 +209,6 @@ export const EVENT_TOPICS = {
   "invoice.overdue": { topics: () => [TOPICS.INVOICES, TOPICS.DASHBOARD], roles: [...FINANCE, ...MGMT] },
 
   /* ── Intake channels ───────────────────────────────────────────────────── */
-  "inquiry.received": { topics: () => [TOPICS.INQUIRIES, TOPICS.DASHBOARD], roles: [...SALES, ...MGMT] },
-  "inquiry.updated": { topics: () => [TOPICS.INQUIRIES], roles: SALES },
-  "inquiry.converted": {
-    topics: () => [TOPICS.INQUIRIES, TOPICS.LEADS, TOPICS.QUERIES, TOPICS.CUSTOMERS, TOPICS.DASHBOARD],
-    roles: [...SALES, ...OPS],
-  },
   "lc.received": { topics: () => [TOPICS.LC_REFERRALS, TOPICS.DASHBOARD], roles: [...OPS, ...COMPLIANCE] },
   "lc.updated": { topics: () => [TOPICS.LC_REFERRALS], roles: [...OPS, ...COMPLIANCE] },
   "lc.converted": {

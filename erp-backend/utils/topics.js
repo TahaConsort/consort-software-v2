@@ -26,7 +26,6 @@ export const TOPICS = {
   INVOICES: "invoices",
   VISITS: "visits",
   OUTREACH: "outreach",
-  INQUIRIES: "inquiries",
   LC_REFERRALS: "lcReferrals",
   NOTIFICATIONS: "notifications",
   EMPLOYEES: "employees",
@@ -37,6 +36,8 @@ export const TOPICS = {
   DASHBOARD: "dashboard",
   CHAT: "chat",
   WORKFLOW: "workflow",
+  // Export trade documents (roadmap §4) — the register pages and the trade panel
+  TRADE: "trade",
 
   // Entity-scoped prefixes — always used via the builders below.
   SHIPMENT: "shipment",

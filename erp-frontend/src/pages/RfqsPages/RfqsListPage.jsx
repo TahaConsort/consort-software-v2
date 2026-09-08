@@ -211,10 +211,6 @@ const RfqsListPage = () => {
               <tr key={r.id} className="group hover:bg-muted/30">
                 <td className="p-3">
                   <span className="font-medium text-primary">{r.referenceNo}</span>
-                  <span className="ml-1.5 inline-flex gap-1 align-middle">
-                    {r.query?.isHazardous && <Flame className="w-3.5 h-3.5 text-red-500" title="Hazardous" />}
-                    {r.query?.isReefer && <Snowflake className="w-3.5 h-3.5 text-sky-500" title="Reefer" />}
-                  </span>
                 </td>
                 <td className="p-3">
                   <span className="font-medium">{r.customerCompany}</span>{" "}

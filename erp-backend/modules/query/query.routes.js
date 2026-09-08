@@ -1,5 +1,5 @@
 import express from "express";
-import { listQueries, createQuery, getQuery, updateQuery, cancelQuery } from "./query.controllers.js";
+import { listQueries, createQuery, getQuery, updateQuery, cancelQuery, claimQuery } from "./query.controllers.js";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireQueryAccess, attachQueryScope } from "./query.middleware.js";
 import { validate } from "../../middleware/validate.middleware.js";
@@ -17,5 +17,8 @@ router.post("/", requirePermission("query.create"), validate(createQuerySchema),
 router.get("/:id", requirePermission("query.read"), getQuery);
 router.put("/:id", requirePermission("query.update"), validate(updateQuerySchema), updateQuery);
 router.post("/:id/cancel", requirePermission("query.cancel"), validate(cancelQuerySchema), cancelQuery);
+// Pick up an unclaimed storefront signup (§5.20). Sales-only: Management is read-only
+// on queries, and re-assignment stays on PUT /customers/:id.
+router.post("/:id/claim", requirePermission("query.claim"), claimQuery);
 
 export default router;

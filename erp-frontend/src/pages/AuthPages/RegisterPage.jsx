@@ -31,10 +31,17 @@ const INITIAL = {
  */
 export default function RegisterPage() {
   const navigate = useNavigate();
-  const [form, setForm] = useState(INITIAL);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [draft] = useState(() => readQuoteDraft());
+  // The storefront query form parks the contact block alongside the selection, so the
+  // three fields the visitor already typed there open prefilled here.
+  const [form, setForm] = useState(() => ({
+    ...INITIAL,
+    contactName: draft?.contactName ?? "",
+    email: draft?.contactEmail ?? "",
+    phone: draft?.contactPhone ?? "",
+  }));
 
   const set = (e) => setForm((p) => ({ ...p, [e.target.name]: e.target.value }));
 
@@ -73,11 +80,8 @@ export default function RegisterPage() {
           const q = await createQuery({
             customerId: data.user.customerId,
             services: draft.services,
-            originPort: draft.originPort || undefined,
-            destinationPort: draft.destinationPort || undefined,
-            containerTypeCode: draft.containerTypeCode || undefined,
-            weightKg: draft.weightKg || undefined,
-            cargoDescription: draft.cargoDescription || undefined,
+            pickupAddress: draft.pickupAddress,
+            destinationAddress: draft.destinationAddress,
           });
           clearQuoteDraft();
           toast.success(`Request ${q?.data?.referenceNo ?? ""} sent — our team will quote it shortly`.trim());
@@ -149,8 +153,8 @@ export default function RegisterPage() {
                   <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
                 ))}
               </div>
-              {draft.originPort && draft.destinationPort && (
-                <p className="text-xs text-muted-foreground">{draft.originPort} → {draft.destinationPort}</p>
+              {draft.pickupAddress && draft.destinationAddress && (
+                <p className="text-xs text-muted-foreground">{draft.pickupAddress} → {draft.destinationAddress}</p>
               )}
               <p className="text-[11px] text-muted-foreground">We'll send it to our pricing team as soon as you finish signing up.</p>
             </div>

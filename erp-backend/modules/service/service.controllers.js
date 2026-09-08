@@ -2,33 +2,16 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { composeOtdPath, composeStepActions, departmentsOnPath } from "../../utils/composition.js";
-import {
-  allowedCroModes,
-  allowedLcModes,
-  CRO_HANDLING_LABELS,
-  inferPackageFromServices,
-  LC_HANDLING_LABELS,
-  PACKAGE_SERVICES,
-  packageUsesDeliveryAddress,
-  packageUsesDestinationPort,
-  packageUsesImportTerms,
-  packageUsesPickupAddress,
-  packageUsesPorts,
-  resolveCroMode,
-  resolveLcMode,
-  resolveServices,
-  SERVICE_PACKAGE_DESCRIPTIONS,
-  SERVICE_PACKAGE_LABELS,
-  SERVICE_PACKAGES,
-} from "../../utils/servicePackage.js";
 
 /**
  * Service Selection — the service-driven core (CRM_MASTER §5.6a, ADR-040/041).
  *
- * Read-only: it exposes the closed service catalog and PREVIEWS the composed
- * OTD path for a chosen service set — the same composition the shipment gets at
- * quote approval (RULE-SVC-01). The frontend uses this to show "a local order
- * runs 4 short steps; sea-freight + customs + LC runs the full 14".
+ * Read-only: it exposes the closed service catalog and PREVIEWS the composed OTD path —
+ * the same composition the shipment gets at quote approval (RULE-SVC-01).
+ *
+ * Since the service-package / CRO / LC dimension was removed there is only ONE path:
+ * every active step template, in canonical order. The preview therefore takes no
+ * inputs, and `GET /api/services/packages` is gone with the packages it described.
  */
 
 // Human metadata for the services (mirrors CRM_MASTER §5.6a table).
@@ -46,7 +29,7 @@ export const getCatalog = catchAsync(async (req, res) => {
   res.json({ success: true, data: CATALOG });
 });
 
-/* ── GET /api/services/reference ── ports + container types (query form data) */
+/* ── GET /api/services/reference ── ports + container types (shipment/trade form data) */
 export const getReference = catchAsync(async (req, res) => {
   const [ports, containerTypes] = await Promise.all([
     prisma.port.findMany({ orderBy: { name: "asc" } }),
@@ -55,29 +38,16 @@ export const getReference = catchAsync(async (req, res) => {
   res.json({ success: true, data: { ports, containerTypes } });
 });
 
-/* ── POST /api/services/compose  { servicePackage, croHandledBy?, lcHandledBy?, services? } ── */
-// Previews the OTD path a shipment with this package would run — the same composition
-// it gets at quote approval. Powers the "your shipment will run N steps" preview on the
-// enquiry form, so the customer sees what they are buying before they commit.
+/* ── POST /api/services/compose ── */
+// Previews the OTD path every shipment runs. Powers the "your shipment will run N steps"
+// preview so the customer sees what they are buying before they commit.
 export const composePreview = catchAsync(async (req, res, next) => {
   const templates = await prisma.otdStepTemplate.findMany();
   if (templates.length === 0) {
     return next(new AppError("OTD step templates are not seeded — run `node prisma/seed.js`", 503));
   }
 
-  // Accepts a package (the modern shape) or a bare service list (older callers), for
-  // which a package is inferred rather than composing a half-path. The LC mode resolves
-  // before the services because consort mode sells lc_finance (ADR-050).
-  const servicePackage = req.body.servicePackage ?? inferPackageFromServices(req.body.services ?? []);
-  const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: req.body.croHandledBy });
-  const lcHandledBy = resolveLcMode({
-    servicePackage,
-    lcHandledBy: req.body.lcHandledBy,
-    services: req.body.services,
-  });
-  const services = resolveServices({ servicePackage, services: req.body.services, lcHandledBy });
-
-  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy, lcHandledBy });
+  const path = composeOtdPath(templates);
 
   // Fold each step's checklist into the preview. Without this the preview would
   // under-report badly: `order_confirmed` keeps its document pack in sub-actions, so its
@@ -85,7 +55,7 @@ export const composePreview = catchAsync(async (req, res, next) => {
   // all for the step that asks for the most (ADR-048).
   const actionTemplates = await prisma.otdStepActionTemplate.findMany();
   const steps = path.map((s) => {
-    const actions = composeStepActions(actionTemplates, s.stepCode, { services, servicePackage, croHandledBy, lcHandledBy });
+    const actions = composeStepActions(actionTemplates, s.stepCode);
     return {
       ...s,
       actions,
@@ -98,40 +68,11 @@ export const composePreview = catchAsync(async (req, res, next) => {
   res.json({
     success: true,
     data: {
-      servicePackage,
-      servicePackageLabel: SERVICE_PACKAGE_LABELS[servicePackage],
-      croHandledBy,
-      lcHandledBy,
-      lcHandledByLabel: LC_HANDLING_LABELS[lcHandledBy],
-      services,
       steps,
       stepCount: steps.length,
       departments: departmentsOnPath(path), // departments with a role on this shipment (RULE-SVC-02)
       // Everything the customer will be asked to upload across the whole path.
       requiredDocTypes: [...new Set(steps.flatMap((s) => s.requiredDocTypes))],
     },
-  });
-});
-
-/* ── GET /api/services/packages ── the offerings + their CRO options and route shape */
-export const getPackages = catchAsync(async (req, res) => {
-  res.json({
-    success: true,
-    data: SERVICE_PACKAGES.map((code) => ({
-      code,
-      label: SERVICE_PACKAGE_LABELS[code],
-      description: SERVICE_PACKAGE_DESCRIPTIONS[code],
-      services: PACKAGE_SERVICES[code],
-      croModes: allowedCroModes(code).map((m) => ({ code: m, label: CRO_HANDLING_LABELS[m] })),
-      lcModes: allowedLcModes(code).map((m) => ({ code: m, label: LC_HANDLING_LABELS[m] })), // ADR-050
-      usesPorts: packageUsesPorts(code),
-      usesDestinationPort: packageUsesDestinationPort(code),
-      // Which door fields the intake form should ask for. port_to_consignee is the
-      // first package to want a port AND an address, so a client cannot infer these
-      // from usesPorts alone any more.
-      usesPickupAddress: packageUsesPickupAddress(code),
-      usesDeliveryAddress: packageUsesDeliveryAddress(code),
-      usesImportTerms: packageUsesImportTerms(code),
-    })),
   });
 });

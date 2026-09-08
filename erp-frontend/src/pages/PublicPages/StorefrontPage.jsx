@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Ship, Truck, Plane, Train, Calculator, Package, ArrowRight, Loader2,
-  MapPin, CalendarClock, Clock, LogIn, Anchor, CheckCircle2, UserPlus,
+  MapPin, CalendarClock, Clock, LogIn, Anchor, CheckCircle2, UserPlus, Send, User, Mail, Phone,
 } from "lucide-react";
 import toast from "react-hot-toast";
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,14 @@ export default function StorefrontPage() {
     destinationPort: ANY,
     containerTypeCode: ANY,
     weightKg: "",
+    // A query records two free-text doors; the ports above still drive the rate calculator.
+    pickupAddress: "",
+    destinationAddress: "",
+    // Who is asking. Nothing is persisted anonymously — these ride along in the parked
+    // draft and prefill the signup form so the visitor never types them twice.
+    contactName: "",
+    contactEmail: "",
+    contactPhone: "",
   });
   const [estimate, setEstimate] = useState(null);
   const [calcBusy, setCalcBusy] = useState(false);
@@ -53,6 +61,7 @@ export default function StorefrontPage() {
 
   // Quote request (signup-gated — §5.20)
   const [requestBusy, setRequestBusy] = useState(false);
+  const queryFormRef = useRef(null);
   const navigate = useNavigate();
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const user = useAuthStore((s) => s.user);
@@ -93,6 +102,10 @@ export default function StorefrontPage() {
 
   const clean = (v) => (v && v !== ANY ? v : undefined);
 
+  const scrollToQueryForm = () => {
+    queryFormRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const calculate = async () => {
     if (!form.services.length) return toast.error("Select at least one service");
     setCalcBusy(true);
@@ -113,50 +126,67 @@ export default function StorefrontPage() {
   };
 
   /**
-   * "Get a quote" is signup-gated (§5.20): a formal quotation needs a real
-   * customer account. A signed-in customer's request goes straight into the
-   * pipeline as a Query; everyone else is sent to sign up with their selection
+   * "Send my query" is auth-gated (§5.20): a Query belongs to a customer record, so
+   * there has to be an account behind it. A signed-in customer's request goes straight
+   * into the pipeline; everyone else is sent to sign in OR sign up with their selection
    * parked, and it is submitted for them the moment their portal exists.
+   *
+   * `via` picks the door for a visitor who is not signed in — "register" for a first-time
+   * caller, "login" for someone who already has an account. Both pages read the same
+   * parked draft, so the query lands either way.
    */
-  const requestQuote = async (posting) => {
+  const requestQuote = async (posting, via = "register") => {
     // A posting's lane/services override whatever the calculator holds.
+    // A query carries the two doors and the services. The posting's lane stands in for
+    // an address the visitor did not type, so a load-board request still has both ends.
     const selection = posting
       ? {
           services: posting.services?.length ? posting.services : form.services,
-          originPort: posting.originPort || clean(form.originPort),
-          destinationPort: posting.destinationPort || clean(form.destinationPort),
-          containerTypeCode: posting.containerTypeCode || clean(form.containerTypeCode),
-          weightKg: form.weightKg ? Number(form.weightKg) : undefined,
+          pickupAddress: form.pickupAddress || posting.originPort || clean(form.originPort) || "",
+          destinationAddress:
+            form.destinationAddress || posting.destinationPort || clean(form.destinationPort) || "",
         }
       : {
           services: form.services,
-          originPort: clean(form.originPort),
-          destinationPort: clean(form.destinationPort),
-          containerTypeCode: clean(form.containerTypeCode),
-          weightKg: form.weightKg ? Number(form.weightKg) : undefined,
+          pickupAddress: form.pickupAddress || clean(form.originPort) || "",
+          destinationAddress: form.destinationAddress || clean(form.destinationPort) || "",
         };
 
     if (!selection.services.length) {
       return toast.error("Select at least one service first");
     }
+    if (!selection.pickupAddress || !selection.destinationAddress) {
+      return toast.error("Tell us where it moves from and to");
+    }
 
-    // Not signed in → park the selection and gate on signup.
+    // Not signed in → park the selection and gate on auth.
     if (!isAuthenticated || user?.role !== "customer") {
-      saveQuoteDraft(selection);
+      // The contact block is parked too, so the signup form opens already filled in.
+      saveQuoteDraft({
+        ...selection,
+        contactName: form.contactName || undefined,
+        contactEmail: form.contactEmail || undefined,
+        contactPhone: form.contactPhone || undefined,
+      });
       if (isAuthenticated) {
         // An internal user is browsing the storefront — send them to the CRM.
         toast("Staff accounts raise queries inside the CRM", { icon: "ℹ️" });
         return navigate("/admin/queries");
       }
-      toast("Create your account to receive a formal quote", { icon: "🔒" });
-      return navigate("/register");
+      toast(
+        via === "login"
+          ? "Sign in and we'll send your query straight through"
+          : "Create your account and your query goes out with it",
+        { icon: "🔒" },
+      );
+      return navigate(via === "login" ? "/login" : "/register");
     }
 
     // Signed-in customer → straight into the pipeline.
     setRequestBusy(true);
     try {
       const r = await createQuery({ customerId: user.customerId, ...selection });
-      toast.success(`Request ${r?.data?.referenceNo ?? ""} sent — our team will quote it shortly`.trim());
+      toast.success(`Query ${r?.data?.referenceNo ?? ""} sent — our team will come back to you shortly`.trim());
       navigate("/dashboard");
     } catch (err) {
       toast.error(err?.message || "Could not submit your request");
@@ -210,8 +240,141 @@ export default function StorefrontPage() {
             Instant indicative rates for your next shipment.
           </h1>
           <p className="mt-4 text-slate-300 max-w-xl">
-            Browse available capacity, price the services you actually need, and request a quote — no account required.
+            Browse available capacity, price the services you actually need, then send us a query — we come back with a firm quote.
           </p>
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Button onClick={scrollToQueryForm} className="gap-2">
+              <Send className="w-4 h-4" /> Send us a query
+            </Button>
+            {!isAuthenticated && (
+              <Button render={<Link to="/login" />} variant="outline" className="gap-2 bg-transparent text-white border-white/30 hover:bg-white/10">
+                <LogIn className="w-4 h-4" /> I already have an account
+              </Button>
+            )}
+          </div>
+        </div>
+      </section>
+
+      {/* ── Send us a query ──
+          The direct channel's real front door (§5.20). A Query belongs to a customer
+          record, so submitting is auth-gated: a signed-in customer goes straight into
+          the pipeline, a visitor picks sign-in or sign-up and their input is parked and
+          submitted for them on the other side. Either way a BDO sees it in Queries. */}
+      <section ref={queryFormRef} className="border-b bg-muted/30 scroll-mt-16">
+        <div className="max-w-6xl mx-auto px-4 py-10">
+          <div className="rounded-2xl border bg-card shadow-sm p-6">
+            <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+              <div>
+                <h2 className="font-semibold text-lg flex items-center gap-2">
+                  <Send className="w-5 h-5 text-primary" /> Send us a query
+                </h2>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Tell us what moves and where. A business development officer picks it up and comes back with a firm quote.
+                </p>
+              </div>
+              {isAuthenticated && user?.role === "customer" && (
+                <Badge variant="secondary" className="gap-1.5">
+                  <CheckCircle2 className="w-3.5 h-3.5" /> Signed in — goes straight to our team
+                </Badge>
+              )}
+            </div>
+
+            <div className="grid lg:grid-cols-2 gap-6">
+              {/* What they need */}
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <Label>Which services do you need?</Label>
+                  <div className="grid sm:grid-cols-2 gap-1.5">
+                    {SERVICE_OPTIONS.map((s) => (
+                      <label key={s.value} className="flex items-center gap-2.5 text-sm cursor-pointer rounded-md px-2 py-1.5 hover:bg-muted">
+                        <Checkbox checked={form.services.includes(s.value)} onCheckedChange={() => toggleService(s.value)} />
+                        {s.label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="q-pickup">Pickup location</Label>
+                    <Input id="q-pickup" placeholder="Where we collect"
+                      value={form.pickupAddress} onChange={(e) => setForm((p) => ({ ...p, pickupAddress: e.target.value }))} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="q-destination">Destination</Label>
+                    <Input id="q-destination" placeholder="Where we deliver"
+                      value={form.destinationAddress} onChange={(e) => setForm((p) => ({ ...p, destinationAddress: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Who is asking. A signed-in customer already told us, so this whole
+                  block is only shown to a visitor — it prefills their signup. */}
+              <div className="space-y-4">
+                {!isAuthenticated ? (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="q-name" className="flex items-center gap-1.5">
+                        <User className="w-3.5 h-3.5 text-muted-foreground" /> Your name
+                      </Label>
+                      <Input id="q-name" placeholder="Who should we ask for?"
+                        value={form.contactName} onChange={(e) => setForm((p) => ({ ...p, contactName: e.target.value }))} />
+                    </div>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="q-email" className="flex items-center gap-1.5">
+                          <Mail className="w-3.5 h-3.5 text-muted-foreground" /> Work email
+                        </Label>
+                        <Input id="q-email" type="email" placeholder="you@company.com"
+                          value={form.contactEmail} onChange={(e) => setForm((p) => ({ ...p, contactEmail: e.target.value }))} />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="q-phone" className="flex items-center gap-1.5">
+                          <Phone className="w-3.5 h-3.5 text-muted-foreground" /> Phone
+                        </Label>
+                        <Input id="q-phone" placeholder="Direct line"
+                          value={form.contactPhone} onChange={(e) => setForm((p) => ({ ...p, contactPhone: e.target.value }))} />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      We carry these over to the next step so you only type them once.
+                    </p>
+                  </>
+                ) : (
+                  <div className="rounded-xl border bg-muted/40 p-4 text-sm text-muted-foreground">
+                    Signed in as <span className="font-medium text-foreground">{user?.email}</span>. Your query is
+                    filed against your account and answered in your portal.
+                  </div>
+                )}
+
+                <div className="pt-1 space-y-3">
+                  <Button onClick={() => requestQuote(null)} disabled={requestBusy} className="w-full gap-2">
+                    {requestBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                    Send my query
+                  </Button>
+
+                  {/* Both auth doors, right where the gate is — a returning customer
+                      should not be pushed through signup to send a second query. */}
+                  {!isAuthenticated && (
+                    <div className="flex flex-col sm:flex-row gap-2">
+                      <Button onClick={() => requestQuote(null, "login")} disabled={requestBusy} variant="outline" className="flex-1 gap-2">
+                        <LogIn className="w-4 h-4" /> Sign in &amp; send
+                      </Button>
+                      <Button onClick={() => requestQuote(null, "register")} disabled={requestBusy} variant="outline" className="flex-1 gap-2">
+                        <UserPlus className="w-4 h-4" /> Create account &amp; send
+                      </Button>
+                    </div>
+                  )}
+
+                  {!isAuthenticated && (
+                    <p className="text-[11px] text-center text-muted-foreground">
+                      A free account is what lets us quote you and track the shipment — it takes a minute.
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -324,25 +487,15 @@ export default function StorefrontPage() {
                     <span className="text-primary">{money(estimate.total, estimate.currency)}</span>
                   </div>
                   <p className="text-[11px] text-muted-foreground">{estimate.disclaimer}</p>
-                  <Button onClick={() => requestQuote(null)} disabled={requestBusy} className="w-full gap-2 mt-1">
-                    {requestBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
-                    Request a formal quote
-                  </Button>
                 </div>
               )}
 
-              {!estimate && (
-                <Button onClick={() => requestQuote(null)} disabled={requestBusy} variant="outline" className="w-full gap-2">
-                  {requestBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />}
-                  Request a quote
-                </Button>
-              )}
-
-              {!isAuthenticated && (
-                <p className="text-[11px] text-center text-muted-foreground">
-                  A free account is needed to receive a formal quote.
-                </p>
-              )}
+              {/* The calculator prices; the query form below is what actually reaches a
+                  human. The selected services carry over, so this is a scroll, not a retype. */}
+              <Button onClick={scrollToQueryForm} variant="outline" className="w-full gap-2">
+                <ArrowRight className="w-4 h-4" />
+                {estimate ? "Send this as a query" : "Send us a query instead"}
+              </Button>
             </div>
           </div>
         </div>

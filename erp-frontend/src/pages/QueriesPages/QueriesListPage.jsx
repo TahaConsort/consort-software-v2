@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, Flame, Snowflake, FileText, Send, Trash2, CheckCircle2, Check, X, Eye, Landmark, Coins } from "lucide-react";
+import { FileSearch, RefreshCw, AlertCircle, Plus, Loader2, XCircle, FileText, CheckCircle2, Check, X, Eye, Coins, Pencil, Hand, Share2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,16 +29,9 @@ import { useQuotationStore } from "@/store/quotationStore";
 import * as quotationService from "@/services/quotationService";
 import { useCustomerStore } from "@/store/customerStore";
 import { useAuthStore } from "@/store/authStore";
-import * as serviceCatalogService from "@/services/serviceCatalogService";
-import {
-  SERVICE_OPTIONS, labelForService, QUERY_STATUS_LABELS,
-  SERVICE_PACKAGE_OPTIONS, PACKAGE_PRESET_SERVICES, CRO_HANDLING_LABELS, CRO_HANDLING_SHORT,
-  LC_HANDLING_LABELS, LC_HANDLING_SHORT, packageHasLcChoice, packageHasDownstreamToggle,
-  labelForPackage, packageUsesPorts, packageUsesDestinationPort, packageHasCroChoice,
-  packageUsesDeliveryAddress, packageUsesImportTerms, routeOf, DEFAULT_CURRENCY,
-  INLAND_MODE_LABELS,
-} from "@/lib/catalog";
-import QueryLcDetails from "./QueryLcDetails";
+import { isManagement, rolesOf } from "@/lib/roles";
+import { labelForService, QUERY_STATUS_LABELS, QUERY_CHANNEL_LABELS, RAISED_VIA_TO_CHANNEL, QUOTE_SHARE_CHANNEL_LABELS, routeOf, DEFAULT_CURRENCY } from "@/lib/catalog";
+import QueryFormModal from "@/components/query/QueryFormModal";
 import GiveQuoteDialog from "./GiveQuoteDialog";
 import RequestRatesDialog from "@/pages/RfqsPages/RequestRatesDialog";
 import { useRfqStore } from "@/store/rfqStore";
@@ -55,30 +48,102 @@ const STATUS_STYLES = {
 /** Statuses a query can still be quoted from (mirrors quotation.service). */
 const QUOTABLE = ["open", "quoted", "revision_requested"];
 
+// Per-channel row badge colours (bdo / bank_lc / website buckets).
+const CHANNEL_STYLES = {
+  bdo: "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300",
+  bank_lc: "bg-violet-50 text-violet-700 border-violet-300 dark:bg-violet-950/30 dark:text-violet-300",
+  website: "bg-teal-50 text-teal-700 border-teal-300 dark:bg-teal-950/30 dark:text-teal-300",
+};
+
 const money = (n, ccy) =>
   `${ccy || DEFAULT_CURRENCY} ${Number(n ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+
+const fmtDate = (d) =>
+  d ? new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : null;
+
+/**
+ * `raisedVia` is a raw enum on the wire; the dialog shows people-readable words.
+ * The two keys are the whole `RaisedVia` enum — a storefront request lands as `portal`,
+ * since it is owned by the customer's portal account.
+ */
+const RAISED_VIA_LABELS = {
+  bdo: "Sales (phone / visit)",
+  portal: "Customer portal / storefront",
+};
+
+/**
+ * Icon-only row action. Six labelled buttons made the row scroll sideways, so only the
+ * one action that is the actual next step keeps its text — everything else is an icon
+ * whose label lives in the tooltip (and in `aria-label`, so it is not mouse-only).
+ */
+const RowAction = ({ title, onClick, disabled, danger, children }) => (
+  <Button
+    size="sm"
+    variant="ghost"
+    title={title}
+    aria-label={title}
+    disabled={disabled}
+    onClick={onClick}
+    className={`h-8 w-8 p-0 text-muted-foreground ${
+      danger ? "hover:bg-destructive/10 hover:text-destructive" : "hover:text-foreground"
+    }`}
+  >
+    {children}
+  </Button>
+);
 
 /**
  * QueriesListPage — shipping requests carrying the SELECTED SERVICES that
  * later compose the shipment's OTD path (CRM_MASTER §5.6/§5.6a, ADR-040/041).
  */
 const QueriesListPage = () => {
-  const { queries, loading, error, busy, filters, setFilter, fetchQueries, createQuery, cancelQuery } = useQueryStore();
-  const { createQuotation, sendQuotation, approveQuotation, rejectQuotation } = useQuotationStore();
+  const { queries, loading, error, busy, filters, setFilter, fetchQueries, createQuery, updateQuery, cancelQuery, claimQuery } = useQueryStore();
+  const { createQuotation, sendQuotation, shareQuotation, approveQuotation, rejectQuotation } = useQuotationStore();
   const createRfqs = useRfqStore((s) => s.createRfqs);
   const hasPermission = useAuthStore((s) => s.hasPermission);
+  const user = useAuthStore((s) => s.user);
   const location = useLocation();
   const navigate = useNavigate();
 
+  /**
+   * Mirror the server's approval rules (quotation.controllers approveQuotation) so
+   * the Review dialog only offers what the click would actually be allowed to do:
+   *  - a pure BDO approves ONLY a query they raised (RULE-QT-03 relaxation);
+   *  - every other approver (ASM / Management / Web Manager) is blocked only when
+   *    they are the customer's owning BDO (four-eyes, RULE-QT-03).
+   * Reject and share have no extra guard beyond permission + scope.
+   */
+  const bdoOnly = rolesOf(user).includes("bdo") && !rolesOf(user).includes("asm") && !isManagement(user);
+  const webManager = rolesOf(user).includes("web_manager");
+  const canApproveQuery = (q) => {
+    if (!hasPermission("quotation.approve")) return false;
+    // web_manager owns the WEBSITE channel: portal-raised quotes are theirs to
+    // decide even when they also hold bdo — only four-eyes blocks them.
+    if (webManager && q.raisedVia === "portal") return q.assignedBdoId !== user?.id;
+    return bdoOnly ? q.raisedById === user?.id : q.assignedBdoId !== user?.id;
+  };
+  const approveBlockNote = (q) => {
+    if (!hasPermission("quotation.approve") || canApproveQuery(q)) return null;
+    return bdoOnly && !(webManager && q.raisedVia === "portal")
+      ? "Only the BDO who raised this query can approve on the customer's behalf (RULE-QT-03)."
+      : "Four-eyes: the owning BDO cannot approve their own customer's quote (RULE-QT-03).";
+  };
+  const canReject = hasPermission("quotation.reject");
+  const canShare = hasPermission("quotation.share");
+
   // Customers page can deep-link here with a preselected customer.
   const [addOpen, setAddOpen] = useState(!!location.state?.customerId);
+  const [editFor, setEditFor] = useState(null);
   const [cancelFor, setCancelFor] = useState(null);
   const [quoteFor, setQuoteFor] = useState(null);
   const [decideFor, setDecideFor] = useState(null);
   const [detailFor, setDetailFor] = useState(null);
   const [ratesFor, setRatesFor] = useState(null);
 
+  const { customers, fetchCustomers } = useCustomerStore();
+
   useEffect(() => { fetchQueries(); }, [fetchQueries]);
+  useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
 
   // The stores own the refetch and the cross-screen invalidation. Approving here creates
   // a shipment and composes its OTD path (RULE-QT-07), which is why this used to be one of
@@ -89,6 +154,7 @@ const QueriesListPage = () => {
       const res = await fn();
       toast.success(msg || res?.message);
       setAddOpen(false);
+      setEditFor(null);
       setCancelFor(null);
       setQuoteFor(null);
       setDecideFor(null);
@@ -97,6 +163,17 @@ const QueriesListPage = () => {
       toast.error(err?.message || "Couldn't update the query");
     }
   };
+
+  /**
+   * Take an unclaimed query out of the shared pool. The server assigns the CUSTOMER to
+   * this BDO, so every other query for them leaves the pool in the same click — which is
+   * why the toast names the customer, not the query.
+   */
+  const onClaim = (q) =>
+    act(async () => {
+      await claimQuery(q.id);
+      return { message: `${q.customerCompany} is now yours — ${q.referenceNo} is in your pipeline` };
+    });
 
   /**
    * Quote straight from the query row — Ops doesn't have to re-find the query
@@ -147,6 +224,26 @@ const QueriesListPage = () => {
         </div>
       </div>
 
+      {/* Channel tabs — the three intake buckets: BDO-raised, bank-LC referrals,
+          website (storefront/portal). Server-filtered via ?channel= so scope still
+          applies; a web_manager simply sees an empty BDO/Bank LC tab. */}
+      <div className="flex items-center gap-1 border-b">
+        {[["", "All"], ...Object.entries(QUERY_CHANNEL_LABELS)].map(([value, label]) => (
+          <button
+            key={value || "all"}
+            type="button"
+            onClick={() => setFilter("channel", value)}
+            className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              (filters.channel || "") === value
+                ? "border-primary text-primary"
+                : "border-transparent text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
       {/* Error */}
       {error && (
         <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
@@ -156,52 +253,71 @@ const QueriesListPage = () => {
         </div>
       )}
 
-      {/* Table */}
+      {/* Table — four columns, so it no longer needs to scroll sideways on a laptop.
+          Widths sit on the headers (not a colgroup, which would reserve a phantom column
+          for Services once it hides on mobile): the identity column takes whatever the
+          fixed status and action columns leave, instead of reflowing per row. */}
       <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
         <table className="w-full text-sm">
           <thead className="bg-muted/40 text-left border-b">
             <tr>
-              <th className="p-3 font-semibold text-muted-foreground">Ref</th>
-              <th className="p-3 font-semibold text-muted-foreground">Customer</th>
-              <th className="p-3 font-semibold text-muted-foreground">Services</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden md:table-cell">Route</th>
-              <th className="p-3 font-semibold text-muted-foreground">Status</th>
-              <th className="p-3 font-semibold text-muted-foreground text-right">Actions</th>
+              <th className="px-4 py-2.5 font-medium text-xs uppercase tracking-wide text-muted-foreground">Query</th>
+              <th className="px-4 py-2.5 font-medium text-xs uppercase tracking-wide text-muted-foreground hidden sm:table-cell w-68">Services</th>
+              <th className="px-4 py-2.5 font-medium text-xs uppercase tracking-wide text-muted-foreground w-36">Status</th>
+              <th className="px-4 py-2.5 font-medium text-xs uppercase tracking-wide text-muted-foreground text-right w-px whitespace-nowrap">Actions</th>
             </tr>
           </thead>
           <tbody>
-            {loading && [...Array(3)].map((_, i) => (
+            {loading && [...Array(4)].map((_, i) => (
               <tr key={i} className="border-t animate-pulse">
-                {[...Array(6)].map((_, j) => <td key={j} className="p-3"><div className="h-4 bg-muted rounded w-3/4" /></td>)}
+                {[...Array(4)].map((_, j) => <td key={j} className="px-4 py-3"><div className="h-4 bg-muted rounded w-3/4" /></td>)}
               </tr>
             ))}
 
+            {/* Four columns only. Contact, owner, route, dates and the buy-side detail
+                all live in the detail dialog now — clicking the row opens it. */}
             {!loading && queries.map((q) => (
-              <tr key={q.id} className="border-t hover:bg-muted/30 transition-colors group">
-                <td className="p-3">
-                  <span className="font-medium text-primary">{q.referenceNo}</span>
-                  <span className="ml-1.5 inline-flex gap-1 align-middle">
-                    {q.isHazardous && <Flame className="w-3.5 h-3.5 text-red-500" title="Hazardous" />}
-                    {q.isReefer && <Snowflake className="w-3.5 h-3.5 text-sky-500" title="Reefer" />}
-                    {/* Priced against a credit, not just a lane — worth seeing in the list. */}
-                    {q.lcDetails && <Landmark className="w-3.5 h-3.5 text-primary" title={`LC ${q.lcDetails.lcNumber ?? ""}`} />}
-                  </span>
-                </td>
-                <td className="p-3">
-                  <span className="font-medium">{q.customerCompany}</span>{" "}
-                  <span className="text-xs text-muted-foreground">({q.customerRef})</span>
-                </td>
-                <td className="p-3">
-                  <div className="flex flex-wrap gap-1 max-w-xs">
-                    {q.services.map((s) => (
-                      <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
-                    ))}
+              <tr
+                key={q.id}
+                onClick={() => setDetailFor(q)}
+                className="border-t hover:bg-muted/40 transition-colors group cursor-pointer"
+              >
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-primary">{q.referenceNo}</span>
+                    {/* Which intake channel the query came through (BDO / Bank LC / Website). */}
+                    {RAISED_VIA_TO_CHANNEL[q.raisedVia] && (
+                      <Badge variant="outline" className={`text-[10px] ${CHANNEL_STYLES[RAISED_VIA_TO_CHANNEL[q.raisedVia]] ?? ""}`}>
+                        {QUERY_CHANNEL_LABELS[RAISED_VIA_TO_CHANNEL[q.raisedVia]]}
+                      </Badge>
+                    )}
+                    {/* A storefront self-signup arrives unclaimed and stays visible to every
+                        BDO until one picks it up (§5.20) — worth a flag on the row itself.
+                        The field is internal-only, so a portal customer never sees it. */}
+                    {"assignedBdoId" in q && !q.assignedBdoId && (
+                      <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300">
+                        Unassigned
+                      </Badge>
+                    )}
+                  </div>
+                  <div className="text-xs text-muted-foreground mt-0.5 truncate max-w-[30ch] md:max-w-[46ch]">
+                    {q.customerCompany}
+                    {routeOf(q) && <span className="hidden md:inline"> · {routeOf(q)}</span>}
                   </div>
                 </td>
-                <td className="p-3 text-muted-foreground hidden md:table-cell">
-                  {[q.originPort, q.destinationPort].filter(Boolean).join(" → ") || "—"}
+
+                <td className="px-4 py-3 hidden sm:table-cell align-middle">
+                  <div className="flex flex-wrap items-center gap-1 max-w-60">
+                    {q.services.slice(0, 2).map((s) => (
+                      <Badge key={s} variant="secondary" className="text-[10px] font-normal">{labelForService(s)}</Badge>
+                    ))}
+                    {q.services.length > 2 && (
+                      <span className="text-[10px] text-muted-foreground">+{q.services.length - 2} more</span>
+                    )}
+                  </div>
                 </td>
-                <td className="p-3">
+
+                <td className="px-4 py-3 align-middle">
                   <Badge variant="outline" className={`text-xs ${STATUS_STYLES[q.status] ?? ""}`}>
                     {QUERY_STATUS_LABELS[q.status]}
                   </Badge>
@@ -211,7 +327,7 @@ const QueriesListPage = () => {
                     <button
                       type="button"
                       className="mt-1 block text-[10px] text-muted-foreground hover:text-primary underline-offset-2 hover:underline"
-                      onClick={() => navigate("/admin/rfqs", { state: { queryId: q.id } })}
+                      onClick={(e) => { e.stopPropagation(); navigate("/admin/rfqs", { state: { queryId: q.id } }); }}
                       title="Open the rate requests for this query"
                     >
                       {q.rfqSummary.awarded > 0
@@ -220,63 +336,64 @@ const QueriesListPage = () => {
                     </button>
                   )}
                 </td>
-                <td className="p-3 text-right whitespace-nowrap">
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    className="h-8 px-2 text-xs gap-1"
-                    onClick={() => setDetailFor(q)}
-                  >
-                    <Eye className="w-3.5 h-3.5" /> Details
-                  </Button>
-                  {/* The buy side comes first: ask vendors, then price the sale. */}
-                  {QUOTABLE.includes(q.status) && hasPermission("rfq.manage") && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 px-2.5 text-xs gap-1 ml-1"
-                      onClick={() => setRatesFor(q)}
-                    >
-                      <Coins className="w-3.5 h-3.5" /> Request Rates
-                    </Button>
-                  )}
-                  {QUOTABLE.includes(q.status) && hasPermission("quotation.create") && (
-                    <Button
-                      size="sm"
-                      className="h-8 px-2.5 text-xs gap-1 ml-1"
-                      onClick={() => setQuoteFor(q)}
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      {q.status === "revision_requested" ? "Re-quote" : "Give Quote"}
-                    </Button>
-                  )}
-                  {q.status === "quoted" && hasPermission("quotation.approve") && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 px-2.5 text-xs gap-1 ml-1"
-                      onClick={() => setDecideFor(q)}
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" /> Review Quote
-                    </Button>
-                  )}
-                  {["open", "quoted", "revision_requested"].includes(q.status) && hasPermission("query.cancel") && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-8 px-2 text-xs gap-1 ml-1 opacity-70 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive"
-                      onClick={() => setCancelFor(q)}
-                    >
-                      <XCircle className="w-3.5 h-3.5" /> Cancel
-                    </Button>
-                  )}
+
+                {/* The row opens the dialog, so these must not bubble. Only the action that
+                    IS the next step keeps a label; the rest are icon-only to stay narrow. */}
+                <td className="px-4 py-3 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-end gap-1">
+                    {"assignedBdoId" in q && !q.assignedBdoId && hasPermission("query.claim") && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busy}
+                        className="h-8 px-2.5 text-xs gap-1"
+                        onClick={() => onClaim(q)}
+                        title="Assign this customer to you and take the query out of the shared pool"
+                      >
+                        <Hand className="w-3.5 h-3.5" /> Claim
+                      </Button>
+                    )}
+                    {QUOTABLE.includes(q.status) && hasPermission("quotation.create") && (
+                      <Button size="sm" className="h-8 px-2.5 text-xs gap-1" onClick={() => setQuoteFor(q)}>
+                        <FileText className="w-3.5 h-3.5" />
+                        {q.status === "revision_requested" ? "Re-quote" : "Give Quote"}
+                      </Button>
+                    )}
+                    {/* Anyone who can DO something with the sent quote gets Review:
+                        approve (role rules above), reject, or give it to the customer. */}
+                    {q.status === "quoted" && (canApproveQuery(q) || canReject || canShare) && (
+                      <Button size="sm" variant="outline" className="h-8 px-2.5 text-xs gap-1" onClick={() => setDecideFor(q)}>
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Review
+                      </Button>
+                    )}
+
+                    <RowAction title="View full details" onClick={() => setDetailFor(q)}>
+                      <Eye className="w-4 h-4" />
+                    </RowAction>
+                    {/* The buy side comes first: ask vendors, then price the sale. */}
+                    {QUOTABLE.includes(q.status) && hasPermission("rfq.manage") && (
+                      <RowAction title="Request rates from vendors" onClick={() => setRatesFor(q)}>
+                        <Coins className="w-4 h-4" />
+                      </RowAction>
+                    )}
+                    {q.status === "open" && hasPermission("query.update") && (
+                      <RowAction title="Edit query" onClick={() => setEditFor(q)}>
+                        <Pencil className="w-4 h-4" />
+                      </RowAction>
+                    )}
+                    {["open", "quoted", "revision_requested"].includes(q.status) && hasPermission("query.cancel") && (
+                      <RowAction title="Cancel query" danger onClick={() => setCancelFor(q)}>
+                        <XCircle className="w-4 h-4" />
+                      </RowAction>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}
 
             {!loading && queries.length === 0 && !error && (
               <tr>
-                <td colSpan="6" className="p-10 text-center">
+                <td colSpan="4" className="p-10 text-center">
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <FileSearch className="w-8 h-8 opacity-30" />
                     <p className="font-medium">No queries yet</p>
@@ -289,11 +406,23 @@ const QueriesListPage = () => {
       </div>
 
       {addOpen && (
-        <AddQueryDialog
+        <QueryFormModal
+          mode="create"
           busy={busy}
+          customers={customers}
           presetCustomerId={location.state?.customerId}
           onClose={() => { setAddOpen(false); navigate(location.pathname, { replace: true, state: null }); }}
           onSubmit={(payload) => act(() => createQuery(payload), "Query created")}
+        />
+      )}
+      {editFor && (
+        <QueryFormModal
+          mode="edit"
+          busy={busy}
+          customers={customers}
+          initial={editFor}
+          onClose={() => setEditFor(null)}
+          onSubmit={(payload) => act(() => updateQuery(editFor.id, payload), "Query updated")}
         />
       )}
       {quoteFor && (
@@ -309,6 +438,11 @@ const QueriesListPage = () => {
         <DecideQuoteDialog
           busy={busy}
           query={decideFor}
+          canApprove={canApproveQuery(decideFor)}
+          canReject={canReject}
+          approveNote={approveBlockNote(decideFor)}
+          canShare={canShare}
+          onShare={(quoteId, payload) => shareQuotation(quoteId, payload)}
           onClose={() => setDecideFor(null)}
           onApprove={(quote) =>
             act(
@@ -342,559 +476,138 @@ const QueriesListPage = () => {
   );
 };
 
-/* ── Query detail — what was asked for, and the LC it was asked against ── */
-const QueryDetailDialog = ({ query: q, onClose }) => (
-  <Dialog open onOpenChange={(v) => !v && onClose()}>
-    <DialogContent size="xl" className="overflow-hidden">
-      <DialogHeader>
-        <DialogTitle className="flex items-center gap-2">
-          {q.referenceNo}
-          <Badge variant="outline" className={`text-xs ${STATUS_STYLES[q.status] ?? ""}`}>
-            {QUERY_STATUS_LABELS[q.status]}
-          </Badge>
-        </DialogTitle>
-        <DialogDescription>
-          {q.customerCompany} ({q.customerRef}) · raised by {q.raisedByName}
-        </DialogDescription>
-      </DialogHeader>
-
-      <div className="flex-1 min-h-0 overflow-y-auto space-y-4 px-1 -mx-1 pb-1 scrollbar-thin">
-        <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2.5">
-          <div className="col-span-full">
-            <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">Services</dt>
-            <dd className="flex flex-wrap gap-1 mt-1">
-              {q.services.map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
-            </dd>
-          </div>
-          {[
-            ["Package", q.servicePackage ? labelForPackage(q.servicePackage) : null],
-            ["Route", routeOf(q) || [q.originPort, q.destinationPort].filter(Boolean).join(" → ")],
-            ["Incoterm", q.incoterm],
-            ["Cargo", q.cargoDescription],
-            ["Weight", q.weightKg != null ? `${Number(q.weightKg).toLocaleString()} kg` : null],
-            ["Container", q.containerTypeCode],
-            ["CRO handling", q.croHandledBy && q.croHandledBy !== "not_applicable" ? CRO_HANDLING_LABELS[q.croHandledBy] : null],
-            ["LC handling", q.lcHandledBy && q.lcHandledBy !== "not_applicable" ? LC_HANDLING_LABELS[q.lcHandledBy] : null],
-            ["Pickup", q.pickupAddress],
-            ["Delivery", q.deliveryAddress],
-            // Truck is the default — only rail is news worth a row.
-            ["Inland mode", q.inlandMode === "rail" ? INLAND_MODE_LABELS.rail : null],
-            ["Rail leg", [q.originRailTerminal, q.destinationRailTerminal].filter(Boolean).join(" → ")],
-            ["Sender", [q.senderName, q.senderPhone].filter(Boolean).join(" · ")],
-            ["Sender address", q.senderAddress],
-            ["Receiver", [q.receiverName, q.receiverPhone].filter(Boolean).join(" · ")],
-            ["Receiver address", q.receiverAddress],
-            ["Free days", q.freeDays != null ? `${q.freeDays} days` : null],
-            ["Empty return", q.emptyReturnLocation],
-            ["Cancelled because", q.cancelReason],
-          ].filter(([, v]) => v).map(([label, value]) => (
-            <div key={label}>
-              <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</dt>
-              <dd className="text-sm font-medium break-words">{value}</dd>
-            </div>
-          ))}
-          {(q.isHazardous || q.isReefer) && (
-            <div className="col-span-full flex gap-1.5">
-              {q.isHazardous && <Badge variant="outline" className="text-[10px] border-red-400 text-red-600 gap-1"><Flame className="w-3 h-3" /> Hazardous</Badge>}
-              {q.isReefer && <Badge variant="outline" className="text-[10px] border-sky-400 text-sky-600 gap-1"><Snowflake className="w-3 h-3" /> Reefer</Badge>}
-            </div>
-          )}
-        </dl>
-
-        <QueryLcDetails query={q} />
-      </div>
-
-      <DialogFooter>
-        <Button variant="outline" onClick={onClose}>Close</Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>
+/* ── Query detail — everything the table no longer shows ──
+      The list is down to four columns, so this dialog is the only place the contact
+      block, sales owner, addresses, buy-side progress and timestamps are readable.
+      Grouped into sections rather than one flat grid, because it now carries roughly
+      twice what it used to. ── */
+const DetailSection = ({ title, children }) => (
+  <section className="space-y-2">
+    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</h3>
+    {children}
+  </section>
 );
 
-/* ── New query — service multi-select is the core (RULE-QRY-05) ── */
-const AddQueryDialog = ({ busy, presetCustomerId, onClose, onSubmit }) => {
-  const { customers, fetchCustomers } = useCustomerStore();
-  const [ref, setRef] = useState({ ports: [], containerTypes: [] });
-  const [form, setForm] = useState({
-    customerId: presetCustomerId ?? "",
-    servicePackage: "",
-    croHandledBy: "consort",
-    lcHandledBy: "not_applicable",
-    // Additive extras ON TOP of the package preset — Ops fine-tune, not the whole set.
-    extraServices: [],
-    originPort: "",
-    destinationPort: "",
-    pickupAddress: "",
-    deliveryAddress: "",
-    senderName: "",
-    senderPhone: "",
-    senderAddress: "",
-    receiverName: "",
-    receiverPhone: "",
-    receiverAddress: "",
-    inlandMode: "truck",
-    originRailTerminal: "",
-    destinationRailTerminal: "",
-    freeDays: "",
-    emptyReturnLocation: "",
-    containerTypeCode: "",
-    incoterm: "",
-    cargoDescription: "",
-    weightKg: "",
-    isHazardous: false,
-    isReefer: false,
-  });
+/** Renders the [label, value] pairs that actually have a value; nothing if none do. */
+const DetailGrid = ({ rows }) => {
+  const present = rows.filter(([, v]) => v);
+  if (!present.length) return null;
+  return (
+    <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+      {present.map(([label, value]) => (
+        <div key={label}>
+          <dt className="text-[11px] text-muted-foreground">{label}</dt>
+          <dd className="text-sm font-medium wrap-break-word">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+};
 
-  useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
-  useEffect(() => {
-    serviceCatalogService.getReference().then((res) => setRef(res.data ?? { ports: [], containerTypes: [] })).catch(() => {});
-  }, []);
+const QueryDetailDialog = ({ query: q, onClose }) => {
+  // `assignedBdoId` is internal-only (the server withholds it from portal customers),
+  // so its absence and a null value mean different things — check for the key itself.
+  const owner = "assignedBdoId" in q
+    ? q.assignedBdoName ?? "Unassigned — in the shared pool"
+    : null;
 
-  const toggleService = (code) =>
-    setForm((p) => ({
-      ...p,
-      extraServices: p.extraServices.includes(code)
-        ? p.extraServices.filter((s) => s !== code)
-        : [...p.extraServices, code],
-    }));
-
-  const choosePackage = (code) =>
-    setForm((p) => ({
-      ...p,
-      servicePackage: code,
-      croHandledBy: packageHasCroChoice(code) || code === "international" ? "consort" : "not_applicable",
-      // A bank-LC customer's trade is LC-financed by definition, so default their LC
-      // to Consort-managed (the server coerces the same way — RULE-SVC-04/ADR-050).
-      lcHandledBy:
-        packageHasLcChoice(code) && selectedCustomer?.source === "bank_lc" ? "consort" : "not_applicable",
-      // Clear the fields the new package cannot carry.
-      ...(code === "local_transport" ? { originPort: "", destinationPort: "", incoterm: "" } : {}),
-      ...(code === "loading_point_to_port" ? { destinationPort: "" } : {}),
-      // Import delivery starts AT the terminal, so there is no loading point and no
-      // destination port; free days only mean anything here.
-      ...(code === "port_to_consignee" ? { destinationPort: "", pickupAddress: "" } : { freeDays: "", emptyReturnLocation: "" }),
-    }));
-
-  const selectedCustomer = customers.find((c) => c.id === form.customerId);
-  const pkg = form.servicePackage;
-  const usesPorts = packageUsesPorts(pkg);
-  const needsDestPort = packageUsesDestinationPort(pkg);
-  const isLocal = pkg === "local_transport";
-  const isImport = packageUsesImportTerms(pkg);
-  // The services the package will preset server-side, shown read-only so Ops can see
-  // what they're adding to.
-  const presetServices = PACKAGE_PRESET_SERVICES[pkg] ?? [];
-
-  const submit = (e) => {
-    e.preventDefault();
-    if (!form.customerId) return toast.error("Pick a customer");
-    if (!pkg) return toast.error("Pick a service package");
-    onSubmit({
-      customerId: form.customerId,
-      servicePackage: pkg,
-      croHandledBy: form.croHandledBy,
-      lcHandledBy: packageHasLcChoice(pkg) ? form.lcHandledBy : undefined,
-      services: form.extraServices.length ? form.extraServices : undefined,
-      originPort: usesPorts ? form.originPort || undefined : undefined,
-      destinationPort: needsDestPort ? form.destinationPort || undefined : undefined,
-      pickupAddress: isImport ? undefined : form.pickupAddress || undefined,
-      deliveryAddress: packageUsesDeliveryAddress(pkg) ? form.deliveryAddress || undefined : undefined,
-      freeDays: isImport && form.freeDays !== "" ? Number(form.freeDays) : undefined,
-      emptyReturnLocation: isImport ? form.emptyReturnLocation || undefined : undefined,
-      senderName: form.senderName || undefined,
-      senderPhone: form.senderPhone || undefined,
-      senderAddress: form.senderAddress || undefined,
-      receiverName: form.receiverName || undefined,
-      receiverPhone: form.receiverPhone || undefined,
-      receiverAddress: form.receiverAddress || undefined,
-      inlandMode: form.inlandMode,
-      originRailTerminal: form.inlandMode === "rail" ? form.originRailTerminal || undefined : undefined,
-      destinationRailTerminal: form.inlandMode === "rail" ? form.destinationRailTerminal || undefined : undefined,
-      containerTypeCode: form.containerTypeCode || undefined,
-      incoterm: usesPorts ? form.incoterm || undefined : undefined,
-      cargoDescription: form.cargoDescription || undefined,
-      weightKg: form.weightKg ? Number(form.weightKg) : undefined,
-      isHazardous: form.isHazardous,
-      isReefer: form.isReefer,
-    });
-  };
+  const rfq = q.rfqSummary
+    ? q.rfqSummary.awarded > 0
+      ? `${q.rfqSummary.awarded} of ${q.rfqSummary.rfqs} awarded`
+      : `${q.rfqSummary.quotesIn} of ${q.rfqSummary.quotesTotal} rates in`
+    : null;
 
   return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="lg" className="max-h-[90vh] overflow-y-auto">
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent size="xl" className="overflow-hidden">
         <DialogHeader>
-          <DialogTitle>New Query</DialogTitle>
+          <DialogTitle className="flex items-center gap-2">
+            {q.referenceNo}
+            <Badge variant="outline" className={`text-xs ${STATUS_STYLES[q.status] ?? ""}`}>
+              {QUERY_STATUS_LABELS[q.status]}
+            </Badge>
+          </DialogTitle>
           <DialogDescription>
-            The service package composes the shipment's step path later — Local Transport
-            gets the short trucking path, International the full one.
+            {q.customerCompany} ({q.customerRef}) · raised by {q.raisedByName}
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={submit} className="space-y-4 py-2">
-          <div className="space-y-1.5">
-            <Label>Customer</Label>
-            <Select value={form.customerId} onValueChange={(v) => setForm((p) => ({ ...p, customerId: v }))} items={customers.filter((c) => c.isActive).map((c) => ({ value: c.id, label: `${c.referenceNo} — ${c.companyName}` }))}>
-              <SelectTrigger><SelectValue placeholder="Select customer…" /></SelectTrigger>
-              <SelectContent>
-                {customers.filter((c) => c.isActive).map((c) => (
-                  <SelectItem key={c.id} value={c.id}>{c.referenceNo} — {c.companyName}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {selectedCustomer?.source === "bank_lc" && (
-              <p className="text-xs text-primary">
-                Bank-LC customer — LC / Trade Finance is included automatically.
-              </p>
-            )}
-          </div>
-
-          {/* Service package — presets the ServiceCode set server-side */}
-          <div className="space-y-1.5">
-            <Label>Service package</Label>
-            <Select value={pkg} onValueChange={choosePackage}
-              items={SERVICE_PACKAGE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}>
-              <SelectTrigger><SelectValue placeholder="Select a package…" /></SelectTrigger>
-              <SelectContent>
-                {SERVICE_PACKAGE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            {pkg && (
-              <p className="text-xs text-muted-foreground">
-                Includes: {presetServices.map(labelForService).join(", ")}
-              </p>
-            )}
-          </div>
-
-          {/* CRO sub-option — only Loading Point → Port offers the choice */}
-          {packageHasCroChoice(pkg) && (
-            <div className="space-y-1.5">
-              <Label>Container Release Order</Label>
-              <Select value={form.croHandledBy} onValueChange={(v) => setForm((p) => ({ ...p, croHandledBy: v }))}
-                items={[
-                  { value: "consort", label: CRO_HANDLING_LABELS.consort },
-                  { value: "customer", label: CRO_HANDLING_LABELS.customer },
-                ]}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="consort">{CRO_HANDLING_LABELS.consort}</SelectItem>
-                  <SelectItem value="customer">{CRO_HANDLING_LABELS.customer}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {form.croHandledBy === "customer"
-                  ? "The customer uploads their CRO copy from the portal; we don't apply to the line."
-                  : "We apply to the shipping line — the CRO application doc pack will be required."}
-              </p>
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-5 px-1 -mx-1 pb-1 scrollbar-thin">
+          <DetailSection title="Services requested">
+            <div className="flex flex-wrap gap-1">
+              {q.services.map((s) => (
+                <Badge key={s} variant="secondary" className="text-[10px] font-normal">{labelForService(s)}</Badge>
+              ))}
             </div>
-          )}
+          </DetailSection>
 
-          {/* LC sub-option (ADR-050) — both export packages ask who manages the LC */}
-          {packageHasLcChoice(pkg) && (
-            <div className="space-y-1.5">
-              <Label>Letter of Credit</Label>
-              <Select value={form.lcHandledBy} onValueChange={(v) => setForm((p) => ({ ...p, lcHandledBy: v }))}
-                items={[
-                  { value: "not_applicable", label: LC_HANDLING_LABELS.not_applicable },
-                  { value: "customer", label: LC_HANDLING_LABELS.customer },
-                  { value: "consort", label: LC_HANDLING_LABELS.consort },
-                ]}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="not_applicable">{LC_HANDLING_LABELS.not_applicable}</SelectItem>
-                  <SelectItem value="customer">{LC_HANDLING_LABELS.customer}</SelectItem>
-                  <SelectItem value="consort">{LC_HANDLING_LABELS.consort}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                {form.lcHandledBy === "customer"
-                  ? "The customer runs the LC with their bank — we'll chase them for the LC copy."
-                  : form.lcHandledBy === "consort"
-                    ? "We manage the LC end-to-end — LC / Trade Finance is added to the services."
-                    : "Open-account trade — no LC steps will be composed."}
-              </p>
-              {selectedCustomer?.source === "bank_lc" && form.lcHandledBy === "not_applicable" && (
-                <p className="text-xs text-amber-600">
-                  Bank-LC customer — the server will default this to Consort-managed unless the customer provides the LC.
-                </p>
-              )}
-            </div>
-          )}
+          <DetailSection title="Route">
+            <DetailGrid rows={[
+              ["Pickup", q.pickupAddress],
+              ["Destination", q.destinationAddress],
+              ["Lane", routeOf(q)],
+            ]} />
+          </DetailSection>
 
-          {/* Downstream add-on (ADR-050) — international only: the destination agent's
-              DO / pickup / empty-return leg, driven by the destination_services code */}
-          {packageHasDownstreamToggle(pkg) && (
-            <label className="flex items-start gap-2 text-sm cursor-pointer border rounded-lg p-3">
-              <Checkbox
-                checked={form.extraServices.includes("destination_services")}
-                onCheckedChange={() => toggleService("destination_services")}
-              />
-              <span>
-                Add destination delivery (Downstream)
-                <span className="block text-xs text-muted-foreground font-normal">
-                  Our destination agent obtains the delivery order & gate pass, picks the container up,
-                  delivers to the consignee and returns the empty.
-                </span>
-              </span>
-            </label>
-          )}
+          <DetailSection title="Contact">
+            <DetailGrid rows={[
+              ["Name", q.customerName],
+              ["Email", q.customerEmail],
+              ["Phone", q.customerPhone],
+            ]} />
+          </DetailSection>
 
-          {/* Additive extras on top of the package preset (ADR-041 catalog). The
-              destination add-on has its own toggle above on international, so it is
-              filtered out here rather than rendered twice. */}
-          {pkg && (
-            <div className="space-y-1.5">
-              <Label>Add-on services <span className="text-muted-foreground font-normal">(optional)</span></Label>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 border rounded-lg p-3">
-                {SERVICE_OPTIONS.filter(
-                  (s) =>
-                    !presetServices.includes(s.value) &&
-                    !(packageHasDownstreamToggle(pkg) && s.value === "destination_services"),
-                ).map((s) => (
-                  <label key={s.value} className="flex items-center gap-2 text-sm cursor-pointer">
-                    <Checkbox
-                      checked={form.extraServices.includes(s.value)}
-                      onCheckedChange={() => toggleService(s.value)}
-                    />
-                    {s.label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
+          <DetailSection title="Ownership & progress">
+            <DetailGrid rows={[
+              ["Sales owner", owner],
+              ["Raised via", RAISED_VIA_LABELS[q.raisedVia] ?? q.raisedVia],
+              ["Rate requests", rfq],
+              ["Created", fmtDate(q.createdAt)],
+              ["Last updated", fmtDate(q.updatedAt)],
+              ["Cancelled because", q.cancelReason],
+            ]} />
+          </DetailSection>
+        </div>
 
-          {/* Local jobs move door to door; port jobs use reference port codes. */}
-          {isLocal ? (
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="q-pickup">Pickup address</Label>
-                <Input id="q-pickup" required value={form.pickupAddress} onChange={(e) => setForm((p) => ({ ...p, pickupAddress: e.target.value }))} placeholder="Collection point" />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-deliv">Delivery address</Label>
-                <Input id="q-deliv" required value={form.deliveryAddress} onChange={(e) => setForm((p) => ({ ...p, deliveryAddress: e.target.value }))} placeholder="Delivery point" />
-              </div>
-            </div>
-          ) : isImport ? (
-            /* Import delivery runs port → door: a terminal code out, a street address in. */
-            <>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label>Port / terminal holding the container</Label>
-                  <Select value={form.originPort || "none"} onValueChange={(v) => setForm((p) => ({ ...p, originPort: v === "none" ? "" : v }))}
-                    items={[{ value: "none", label: "—" }, ...ref.ports.map((p) => ({ value: p.code, label: `${p.name} (${p.code})` }))]}>
-                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">—</SelectItem>
-                      {ref.ports.map((p) => <SelectItem key={p.code} value={p.code}>{p.name} ({p.code})</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="q-consignee">Consignee delivery address</Label>
-                  <Input id="q-consignee" required value={form.deliveryAddress} onChange={(e) => setForm((p) => ({ ...p, deliveryAddress: e.target.value }))} placeholder="Where the container is delivered" />
-                </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="q-freedays">Free days <span className="text-muted-foreground font-normal">(optional)</span></Label>
-                  <Input id="q-freedays" type="number" min="0" max="365" value={form.freeDays} onChange={(e) => setForm((p) => ({ ...p, freeDays: e.target.value }))} placeholder="e.g. 7" />
-                  <p className="text-[11px] text-muted-foreground">Detention-free window the line granted the consignee.</p>
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="q-return">Empty return location <span className="text-muted-foreground font-normal">(optional)</span></Label>
-                  <Input id="q-return" value={form.emptyReturnLocation} onChange={(e) => setForm((p) => ({ ...p, emptyReturnLocation: e.target.value }))} placeholder="Dry port / yard address" />
-                </div>
-              </div>
-            </>
-          ) : usesPorts ? (
-            <>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-pickup2">Loading point address <span className="text-muted-foreground font-normal">(optional)</span></Label>
-                <Input id="q-pickup2" value={form.pickupAddress} onChange={(e) => setForm((p) => ({ ...p, pickupAddress: e.target.value }))} placeholder="Factory / loading point" />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                {/* Selects, not free text — the API validates these against the Port table. */}
-                <div className="space-y-1.5">
-                  <Label>{needsDestPort ? "Origin Port" : "Port of handover"}</Label>
-                  <Select value={form.originPort || "none"} onValueChange={(v) => setForm((p) => ({ ...p, originPort: v === "none" ? "" : v }))}
-                    items={[{ value: "none", label: "—" }, ...ref.ports.map((p) => ({ value: p.code, label: `${p.name} (${p.code})` }))]}>
-                    <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">—</SelectItem>
-                      {ref.ports.map((p) => <SelectItem key={p.code} value={p.code}>{p.name} ({p.code})</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {needsDestPort && (
-                  <div className="space-y-1.5">
-                    <Label>Destination Port</Label>
-                    <Select value={form.destinationPort || "none"} onValueChange={(v) => setForm((p) => ({ ...p, destinationPort: v === "none" ? "" : v }))}
-                      items={[{ value: "none", label: "—" }, ...ref.ports.map((p) => ({ value: p.code, label: `${p.name} (${p.code})` }))]}>
-                      <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">—</SelectItem>
-                        {ref.ports.map((p) => <SelectItem key={p.code} value={p.code}>{p.name} ({p.code})</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                )}
-              </div>
-            </>
-          ) : null}
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="space-y-1.5">
-              <Label>Container</Label>
-              <Select value={form.containerTypeCode || "none"} onValueChange={(v) => setForm((p) => ({ ...p, containerTypeCode: v === "none" ? "" : v }))}
-                items={[{ value: "none", label: "—" }, ...ref.containerTypes.map((c) => ({ value: c.code, label: c.label }))]}>
-                <SelectTrigger><SelectValue placeholder="—" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">—</SelectItem>
-                  {ref.containerTypes.map((c) => <SelectItem key={c.code} value={c.code}>{c.label}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            {usesPorts && (
-              <div className="space-y-1.5">
-                <Label htmlFor="q-incoterm">Incoterm</Label>
-                <Input id="q-incoterm" value={form.incoterm} onChange={(e) => setForm((p) => ({ ...p, incoterm: e.target.value }))} placeholder="FOB" />
-              </div>
-            )}
-            <div className="space-y-1.5">
-              <Label htmlFor="q-weight">Weight (kg)</Label>
-              <Input id="q-weight" type="number" min="0" value={form.weightKg} onChange={(e) => setForm((p) => ({ ...p, weightKg: e.target.value }))} />
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <Label htmlFor="q-cargo">Cargo Description</Label>
-            <Input id="q-cargo" value={form.cargoDescription} onChange={(e) => setForm((p) => ({ ...p, cargoDescription: e.target.value }))} placeholder="Optional" />
-          </div>
-
-          {/* Inland transport — every package moves inland; rail splits the leg into
-              first/middle/last mile and the RFQ module prices each leg separately. */}
-          {pkg && (
-            <div className="rounded-lg border p-3 space-y-3">
-              <div className="space-y-1.5">
-                <Label>Inland transport</Label>
-                <Select
-                  value={form.inlandMode}
-                  onValueChange={(v) =>
-                    setForm((p) => ({
-                      ...p,
-                      inlandMode: v,
-                      ...(v === "truck" ? { originRailTerminal: "", destinationRailTerminal: "" } : {}),
-                    }))
-                  }
-                  items={Object.entries(INLAND_MODE_LABELS).map(([value, label]) => ({ value, label }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(INLAND_MODE_LABELS).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>{label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              {form.inlandMode === "rail" && (
-                <>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="q-rail-origin">Origin rail terminal</Label>
-                      <Input
-                        id="q-rail-origin"
-                        value={form.originRailTerminal}
-                        onChange={(e) => setForm((p) => ({ ...p, originRailTerminal: e.target.value }))}
-                        placeholder="e.g. Karachi Cantt Dry Port"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="q-rail-dest">Destination rail terminal</Label>
-                      <Input
-                        id="q-rail-dest"
-                        value={form.destinationRailTerminal}
-                        onChange={(e) => setForm((p) => ({ ...p, destinationRailTerminal: e.target.value }))}
-                        placeholder="e.g. Lahore Dry Port"
-                      />
-                    </div>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Rail journeys are priced in three legs — first mile (truck), rail, last mile
-                    (truck) — each with its own vendors when rates are requested.
-                  </p>
-                </>
-              )}
-            </div>
-          )}
-
-          {/* Sender / receiver — the people at the doors, printed on rate confirmations
-              as operational contacts. Optional but encouraged. */}
-          <div className="rounded-lg border p-3 space-y-3">
-            <Label className="text-muted-foreground">Sender / Receiver (optional)</Label>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="q-sender-name">Sender name</Label>
-                <Input id="q-sender-name" value={form.senderName} onChange={(e) => setForm((p) => ({ ...p, senderName: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-sender-phone">Sender phone</Label>
-                <Input id="q-sender-phone" value={form.senderPhone} onChange={(e) => setForm((p) => ({ ...p, senderPhone: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-sender-addr">Sender address</Label>
-                <Input id="q-sender-addr" value={form.senderAddress} onChange={(e) => setForm((p) => ({ ...p, senderAddress: e.target.value }))} />
-              </div>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="q-recv-name">Receiver name</Label>
-                <Input id="q-recv-name" value={form.receiverName} onChange={(e) => setForm((p) => ({ ...p, receiverName: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-recv-phone">Receiver phone</Label>
-                <Input id="q-recv-phone" value={form.receiverPhone} onChange={(e) => setForm((p) => ({ ...p, receiverPhone: e.target.value }))} />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="q-recv-addr">Receiver address</Label>
-                <Input id="q-recv-addr" value={form.receiverAddress} onChange={(e) => setForm((p) => ({ ...p, receiverAddress: e.target.value }))} />
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <Checkbox checked={form.isHazardous} onCheckedChange={(v) => setForm((p) => ({ ...p, isHazardous: !!v }))} />
-              <Flame className="w-4 h-4 text-red-500" /> Hazardous
-            </label>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <Checkbox checked={form.isReefer} onCheckedChange={(v) => setForm((p) => ({ ...p, isReefer: !!v }))} />
-              <Snowflake className="w-4 h-4 text-sky-500" /> Reefer
-            </label>
-          </div>
-          {(form.isHazardous || form.isReefer) && (
-            <p className="text-xs text-amber-600">A Compliance pre-check task will be created automatically.</p>
-          )}
-
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Create Query
-            </Button>
-          </DialogFooter>
-        </form>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 };
 
-/* ── Review a sent quote and decide — approve or reject on the customer's behalf
-      after confirming with them (e.g. on a call). A BDO sees this only for their
-      OWN queries; the backend enforces the same scope (RULE-QT-03 relaxation). ── */
-const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
+/* ── Review a sent quote — what each role can DO here is decided by the parent
+      (canApprove / canReject / canShare mirror the server's RULE-QT-03 guards):
+      approve or reject on the customer's behalf after confirming with them, and/or
+      GIVE the quote to the customer (record it went out over email/phone/WhatsApp)
+      before they decide. `approveNote` explains a role-blocked approval. ── */
+const DecideQuoteDialog = ({ busy, query, canApprove, canReject, approveNote, canShare, onShare, onClose, onApprove, onReject }) => {
   const [quote, setQuote] = useState(null);
   const [loading, setLoading] = useState(true);
   const [mode, setMode] = useState("view"); // "view" | "reject"
   const [reason, setReason] = useState("");
+  const [shareChannel, setShareChannel] = useState("");
+  const [shareNote, setShareNote] = useState("");
+  const [sharing, setSharing] = useState(false);
+
+  // Record the give-out without closing the dialog — the BDO often approves
+  // right after relaying the quote on the same call.
+  const doShare = async () => {
+    if (!shareChannel) return toast.error("Pick how you gave the quote to the customer");
+    setSharing(true);
+    try {
+      const res = await onShare(quote.id, { channel: shareChannel, note: shareNote.trim() || undefined });
+      setQuote((q) => ({ ...q, ...res.data }));
+      setShareChannel("");
+      setShareNote("");
+      toast.success(res?.message || "Recorded — quote given to the customer");
+    } catch (err) {
+      toast.error(err?.message || "Couldn't record it");
+    } finally {
+      setSharing(false);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
@@ -923,7 +636,10 @@ const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
         <DialogHeader>
           <DialogTitle>Review quote · {query.referenceNo}</DialogTitle>
           <DialogDescription>
-            {query.customerCompany}{route ? ` · ${route}` : ""} — confirm the customer's decision, then approve or reject on their behalf.
+            {query.customerCompany}{route ? ` · ${route}` : ""} —{" "}
+            {canApprove || canReject
+              ? "confirm the customer's decision, then record it on their behalf."
+              : "give the quote to the customer and record how."}
           </DialogDescription>
         </DialogHeader>
 
@@ -968,6 +684,43 @@ const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
               <p className="text-xs text-red-600">This quote has passed its validity date — Ops must revise it before it can be approved.</p>
             )}
 
+            {/* Give the quote to the customer (mail/phone/WhatsApp) and record how.
+                Purely informational — the decision buttons below stay independent. */}
+            {canShare && mode === "view" && (
+              <div className="border rounded-lg p-3 space-y-2 bg-muted/20">
+                <div className="flex items-center justify-between gap-2 flex-wrap">
+                  <span className="text-sm font-medium flex items-center gap-1.5">
+                    <Share2 className="w-3.5 h-3.5" /> Give quote to customer
+                  </span>
+                  {quote.sharedAt && (
+                    <span className="text-xs text-muted-foreground">
+                      Given via {QUOTE_SHARE_CHANNEL_LABELS[quote.sharedVia] ?? quote.sharedVia} on{" "}
+                      {new Date(quote.sharedAt).toLocaleDateString()}
+                      {quote.shareNote ? ` — ${quote.shareNote}` : ""}
+                    </span>
+                  )}
+                </div>
+                <div className="flex gap-2 flex-wrap sm:flex-nowrap">
+                  <Select value={shareChannel} onValueChange={setShareChannel}
+                    items={Object.entries(QUOTE_SHARE_CHANNEL_LABELS).map(([value, label]) => ({ value, label }))}>
+                    <SelectTrigger className="h-9 w-32 shrink-0"><SelectValue placeholder="How?" /></SelectTrigger>
+                    <SelectContent>
+                      {Object.entries(QUOTE_SHARE_CHANNEL_LABELS).map(([v, l]) => (
+                        <SelectItem key={v} value={v}>{l}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input className="h-9 flex-1 min-w-32" placeholder="Note (optional)" maxLength={500}
+                    value={shareNote} onChange={(e) => setShareNote(e.target.value)} />
+                  <Button type="button" variant="outline" className="h-9 gap-1.5 shrink-0"
+                    disabled={busy || sharing} onClick={doShare}>
+                    {sharing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Share2 className="w-3.5 h-3.5" />}
+                    {quote.sharedAt ? "Record again" : "Mark as given"}
+                  </Button>
+                </div>
+              </div>
+            )}
+
             {mode === "reject" && (
               <div className="space-y-1.5">
                 <Label htmlFor="dq-reason">Rejection reason</Label>
@@ -975,22 +728,31 @@ const DecideQuoteDialog = ({ busy, query, onClose, onApprove, onReject }) => {
               </div>
             )}
 
+            {/* Why this role sees no Approve button, in the server's words. */}
+            {approveNote && mode === "view" && (
+              <p className="text-xs text-muted-foreground">{approveNote}</p>
+            )}
+
             <DialogFooter className="gap-2">
               {mode === "view" ? (
                 <>
                   <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Close</Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    className="gap-2 text-destructive"
-                    disabled={busy}
-                    onClick={() => setMode("reject")}
-                  >
-                    <X className="w-4 h-4" /> Reject
-                  </Button>
-                  <Button type="button" className="gap-2" disabled={busy || expired} onClick={() => onApprove(quote)}>
-                    {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Approve by customer
-                  </Button>
+                  {canReject && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      className="gap-2 text-destructive"
+                      disabled={busy}
+                      onClick={() => setMode("reject")}
+                    >
+                      <X className="w-4 h-4" /> Reject
+                    </Button>
+                  )}
+                  {canApprove && (
+                    <Button type="button" className="gap-2" disabled={busy || expired} onClick={() => onApprove(quote)}>
+                      {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />} Approve by customer
+                    </Button>
+                  )}
                 </>
               ) : (
                 <>

@@ -32,8 +32,8 @@ const MANAGEMENT_PERMS = [
   "document.upload", "document.read", "document.publish", "document.delete",
   "chat.read", "chat.send",
   "report.read", "audit.read", "dashboard.read",
-  // Intake channels & storefront (CRM_MASTER §5.20/§5.21)
-  "inquiry.read", "inquiry.convert", "lc.read", "lc.convert",
+  // Intake channel (CRM_MASTER §5.21)
+  "lc.read", "lc.convert",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
   // Vendor rate requests — the buy side of a query
@@ -42,6 +42,11 @@ const MANAGEMENT_PERMS = [
   "fleet.read", "fleet.manage",
   // Workflow catalog admin (ADR-051) — steps, checklists, document types
   "workflow.manage",
+  // Export trade documents (roadmap §4) — Management sees and does everything
+  "trade.read", "trade.party.manage", "trade.contract.manage",
+  "trade.cargo.manage", "trade.transport.manage", "trade.customs.manage",
+  "trade.invoice.manage", "trade.invoice.issue",
+  "fi.manage", "fi.close",
 ];
 
 export const PERMISSIONS_BY_ROLE = {
@@ -60,28 +65,35 @@ export const PERMISSIONS_BY_ROLE = {
     "lead.create", "lead.read", "lead.update", "lead.convert", "lead.reopen",
     "visit.create", "visit.read", "visit.update", "visit.complete",
     "query.create", "query.read", "query.update", "query.cancel",
+    // Pick up a storefront self-signup nobody owns yet (§5.20).
+    "query.claim",
     "quotation.read", "quotation.approve", "quotation.reject",
     "shipment.read",
     "task.read", "task.update", "task.complete", "task.reassign",
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "inquiry.read", "inquiry.convert",
     "vendor.read",
+    // Sales owns the customer relationship behind a trade contract, not the cargo
+    "trade.read", "trade.contract.manage",
   ],
 
   bdo: [
     "lead.create", "lead.read", "lead.update", "lead.convert", "lead.reopen",
     "visit.create", "visit.read", "visit.update", "visit.complete",
     "query.create", "query.read", "query.update", "query.cancel",
+    // Pick up a storefront self-signup nobody owns yet (§5.20).
+    "query.claim",
     // Decide on quotes on the customer's behalf (verbal acceptance on a call),
     // scoped to the BDO's OWN queries — deliberate relaxation of RULE-QT-03.
-    "quotation.read", "quotation.approve", "quotation.reject",
+    // quotation.share: give a SENT quote to the customer over mail/phone/WhatsApp
+    // and record how — for any customer origin (form / bank LC / BDO).
+    "quotation.read", "quotation.share", "quotation.approve", "quotation.reject",
     "shipment.read",
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "report.read", "dashboard.read",
-    "inquiry.read", "inquiry.convert",
     "vendor.read",
+    "trade.read",
   ],
 
   ops_manager: [
@@ -97,6 +109,11 @@ export const PERMISSIONS_BY_ROLE = {
     "vendor.read", "vendor.manage",
     "rfq.read", "rfq.manage", "rfq.award",
     "fleet.read", "fleet.manage",
+    // Operations owns the cargo-side paperwork: parties, containers, packing list,
+    // B/L, and the PURCHASE commercial invoice (the vendor billing Consort).
+    // Issuing the SALE invoice is deliberately withheld — that is Accounts (four-eyes).
+    "trade.read", "trade.party.manage", "trade.contract.manage",
+    "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
   ],
 
   ops_exec: [
@@ -114,6 +131,21 @@ export const PERMISSIONS_BY_ROLE = {
     // Ops executives keep the fleet masters current — they are the people who
     // meet the driver and the truck, so they add them, not just read them.
     "fleet.read", "fleet.manage",
+    // Same cargo-side scope as ops_manager: the executive is the one keying the
+    // packing list and the B/L off the vendor's paperwork.
+    "trade.read", "trade.party.manage", "trade.contract.manage",
+    "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
+  ],
+
+  // Owns the WEBSITE query channel (queries raised via the storefront/portal).
+  // Sales-shaped but channel-scoped: query/quotation middleware limits every read
+  // and write to raisedVia = portal queries. No lead/visit/claim surface — the
+  // channel is theirs by role, not by claiming customers.
+  web_manager: [
+    "query.read", "query.update", "query.cancel",
+    "quotation.read", "quotation.share", "quotation.approve", "quotation.reject",
+    "document.upload", "document.read",
+    "chat.read", "chat.send", "report.read", "dashboard.read",
   ],
 
   compliance_manager: [
@@ -124,6 +156,9 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "vendor.read",
+    // Compliance files the Goods Declaration — mirrors step 95 customs_clearance
+    // being compliance-owned (RULE-SH-04).
+    "trade.read", "trade.party.manage", "trade.customs.manage",
   ],
 
   compliance_exec: [
@@ -132,6 +167,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
+    "trade.read", "trade.customs.manage",
   ],
 
   transport_manager: [
@@ -142,6 +178,7 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "vendor.read", "vendor.manage",
     "fleet.read", "fleet.manage",
+    "trade.read",
   ],
 
   // Mirrors compliance_exec. Transport owns 5 of the 6 steps on a Local Transport job,
@@ -152,6 +189,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
+    "trade.read",
   ],
 
   accounts: [
@@ -161,6 +199,12 @@ export const PERMISSIONS_BY_ROLE = {
     "document.upload", "document.read", "document.publish", "document.delete",
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "vendor.read", "vendor.manage",
+    // The Financial Instrument is a bank instrument with a ceiling, an expiry and a
+    // balance — the same department that owns invoices and payments owns it. Accounts
+    // also ISSUES the sale commercial invoice, which drafts the receivable and
+    // completes OTC milestone 1 (RULE-FI-02).
+    "trade.read", "trade.invoice.manage", "trade.invoice.issue",
+    "fi.manage", "fi.close",
   ],
 
   customer: [
@@ -174,6 +218,10 @@ export const PERMISSIONS_BY_ROLE = {
     // or `document.delete` — a customer can never expose or remove a document.
     "document.upload", "document.read",
     "dashboard.read",
+    // Read-only, and hard-filtered server-side: a customer never sees a PURCHASE
+    // invoice (what Consort paid the vendor), the Financial Instrument, the goods
+    // margin, GD assessed values, or any party's bank details.
+    "trade.read",
   ],
 };
 

@@ -174,7 +174,7 @@ const getTypeColor = (type) => {
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* Premium Header */}
-      <div className="p-4">
+      <div className="p-2">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 max-w-7xl mx-auto">
           <div className="flex items-center gap-3">
             <div className="p-3 bg-primary/10 rounded-xl">
@@ -197,7 +197,7 @@ const getTypeColor = (type) => {
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4 max-w-7xl mx-auto w-full space-y-6">
+      <div className="flex-1 overflow-auto p-2 max-w-7xl mx-auto w-full space-y-6">
         {/* Filters & Search */}
         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
           {!lockedType && (

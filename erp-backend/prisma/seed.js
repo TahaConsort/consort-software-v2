@@ -36,16 +36,9 @@ const DEPARTMENTS = [
 // The DB form of WORKFLOW §4a.1 / DATABASE §8 — the composition source of truth
 // (ADR-001/040). utils/composition.js reads this table and never re-encodes the mapping.
 //
-// GATES, evaluated package → CRO mode → LC mode → service, each EMPTY-MEANS-DON'T-GATE:
-//   packages  restrict to those service packages ("always: true" + packages reads
-//             "always, on these packages"). A shipment with servicePackage = null was
-//             composed before packages existed and skips this gate entirely.
-//   croModes  select exactly one of the two mutually exclusive CRO rows (50 vs 55).
-//   lcModes   ADR-050. Only row 35 (lc_received_from_customer) carries it: the
-//             Consort-managed LC steps (30/130) compose via the lc_finance SERVICE
-//             gate exactly as before ADR-050, which is what keeps pre-LC selections
-//             reproducing byte-for-byte. Rows omit the key when empty (defaults []).
-//   services  the original ADR-040 rule.
+// There are NO composition gates: every ACTIVE row composes onto every shipment, in
+// canonical order. A step that should no longer appear is marked `active: false` — never
+// deleted — so shipments composed while it was live still resolve it by step code.
 //
 // Canonical numbers are stable reporting keys and are RE-SPACED to multiples of 10 so
 // future steps can be inserted without renumbering. This is safe because every
@@ -55,15 +48,6 @@ const DEPARTMENTS = [
 // utils/composition.js — OUT_OF_ORDER_PAIRS — precisely so this re-spacing is safe.
 //
 // `dueOffsetHours` seeds each step's TaskTemplate SLA; the trucking leg is hours, not days.
-const LOCAL = "local_transport";
-const LP_PORT = "loading_point_to_port";
-const INTL = "international";
-const PORT_CONSIGNEE = "port_to_consignee";
-// The two EXPORT packages that run a full origin leg (empty pickup → stuffing → inland
-// transit → terminal gate-in). Deliberately excludes port_to_consignee, which moves in
-// the opposite direction: it starts at the terminal instead of ending there.
-const ALL_PORT_PACKAGES = [LP_PORT, INTL];
-
 const OTD_STEP_TEMPLATES = [
   // ── Every package ──────────────────────────────────────────────────────────────
   // The order is locked against a signed RATE CONFIRMATION, on every package — the
@@ -73,10 +57,10 @@ const OTD_STEP_TEMPLATES = [
   // renders an upload item on its checklist; missingRequiredDocs unions both
   // sources, so RULE-SH-06 blocks completion either way.
   { canonicalNo: 10, stepCode: "order_lock", title: "Order Lock (Rate Confirmation)",
-    ownerDepartment: "operations", always: true, packages: [], croModes: [], services: [],
+    ownerDepartment: "operations", 
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "order_confirmed" },
 
-  // ── Trade-doc pack: port-bound packages only. A local trucking job needs no
+  // ── Trade-doc pack. A local trucking job needs no
   //    commercial invoice / packing list / authority letterhead.
   //
   //    ONE step, a package-dependent checklist (ADR-048). `requiredDocTypes` is empty
@@ -84,59 +68,58 @@ const OTD_STEP_TEMPLATES = [
   //    package — international collects a seven-document pack, loading-point-to-port the
   //    original three. missingRequiredDocs unions both sources, so RULE-SH-06 is unchanged.
   { canonicalNo: 20, stepCode: "order_confirmed", title: "Customer Doc Pack & Order Confirmation",
-    ownerDepartment: "operations", always: true, packages: [...ALL_PORT_PACKAGES, PORT_CONSIGNEE], croModes: [], services: [],
+    ownerDepartment: "operations", 
     requiredDocTypes: [],
     dueOffsetHours: 48, derivedStatus: "order_confirmed" },
 
   // ── Package #1: the pure-local trucking leg. No container, no port, no trade docs.
   //    Transport-owned end to end so the job never 403s across a department handoff.
   { canonicalNo: 22, stepCode: "transporter_assigned", title: "Transporter Assigned & Rate Agreed",
-    ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
-    requiredDocTypes: [], dueOffsetHours: 8, derivedStatus: "transporter_assigned" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: [], dueOffsetHours: 8, derivedStatus: "transporter_assigned", active: false },
   { canonicalNo: 24, stepCode: "vehicle_dispatched", title: "Vehicle Dispatched to Loading Point",
-    ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
-    requiredDocTypes: [], dueOffsetHours: 12, derivedStatus: "vehicle_dispatched" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: [], dueOffsetHours: 12, derivedStatus: "vehicle_dispatched", active: false },
   { canonicalNo: 26, stepCode: "goods_loaded", title: "Goods Loaded at Pickup Point",
-    ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
-    requiredDocTypes: ["proof"], dueOffsetHours: 12, derivedStatus: "goods_loaded" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: ["proof"], dueOffsetHours: 12, derivedStatus: "goods_loaded", active: false },
   { canonicalNo: 28, stepCode: "in_transit", title: "In Transit to Delivery Point",
-    ownerDepartment: "transport", always: true, packages: [LOCAL], croModes: [], services: [],
-    requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "in_transit" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "in_transit", active: false },
 
   // ── Trade finance / vessel booking (the permitted out-of-order pairs) ──────────
-  // Two mutually exclusive LC rows, selected by lcHandledBy (ADR-050) the way croModes
-  // selects rows 50/55. Row 30 composes when Consort SELLS the LC legwork (lc_finance —
-  // added by resolveServices for lcHandledBy=consort and for bank-LC customers); row 35
-  // composes when the customer runs their own LC and we only chase the copy. A no-LC
-  // trade composes neither.
+  // Row 30 is the LC step on the path: Consort obtains the advice. Row 35 (the
+  // customer-supplied-copy variant) is retained but inactive — with no LC-mode gate
+  // there is nothing left to choose between the two.
   { canonicalNo: 30, stepCode: "lc_generated", title: "SWIFT / LC Advice",
-    ownerDepartment: "compliance", always: false, packages: [], croModes: [], services: ["lc_finance"],
+    ownerDepartment: "compliance", 
     requiredDocTypes: ["lc"], dueOffsetHours: 48, derivedStatus: "lc_generated" },
   { canonicalNo: 35, stepCode: "lc_received_from_customer", title: "LC Copy Received from Customer",
-    ownerDepartment: "compliance", always: true, packages: ALL_PORT_PACKAGES, croModes: [], lcModes: ["customer"], services: [],
-    requiredDocTypes: ["lc"], dueOffsetHours: 48, derivedStatus: "lc_generated" },
+    ownerDepartment: "compliance", 
+    requiredDocTypes: ["lc"], dueOffsetHours: 48, derivedStatus: "lc_generated", active: false },
   { canonicalNo: 40, stepCode: "vessel_booked", title: "Vessel Slot Booking (Shipping Line)",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["sea_freight"],
+    ownerDepartment: "operations", 
     requiredDocTypes: [], dueOffsetHours: 48, derivedStatus: "vessel_booked" },
 
-  // ── CRO: two mutually exclusive rows selected by croHandledBy ─────────────────
+  // ── CRO. Row 50 (customer-supplied CRO) is retained but inactive; with no CRO-mode
+  // gate, row 55 — Consort obtains it — is the one that composes. ──────────────────
   { canonicalNo: 50, stepCode: "cro_received_from_customer", title: "CRO Received from Customer",
-    ownerDepartment: "operations", always: true, packages: ALL_PORT_PACKAGES, croModes: ["customer"], services: [],
-    requiredDocTypes: ["cro"], dueOffsetHours: 48, derivedStatus: "cro_released" },
+    ownerDepartment: "operations", 
+    requiredDocTypes: ["cro"], dueOffsetHours: 48, derivedStatus: "cro_released", active: false },
   { canonicalNo: 55, stepCode: "cro_released", title: "Apply & Obtain CRO from Line",
-    ownerDepartment: "operations", always: true, packages: ALL_PORT_PACKAGES, croModes: ["consort"], services: [],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["commercial_invoice", "packing_list", "authority_letterhead", "cro"],
     dueOffsetHours: 48, derivedStatus: "cro_released" },
 
-  // ── Container + inland leg: port-bound packages that bought local transport ───
+  // ── Container + inland leg ─────────────────────────────────────────────────────
   { canonicalNo: 60, stepCode: "empty_container_pickup", title: "Empty Container Pickup — LOLO (Yard)",
-    ownerDepartment: "transport", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: [LOCAL],
+    ownerDepartment: "transport", 
     requiredDocTypes: ["eir_out"], dueOffsetHours: 24, derivedStatus: "empty_container_pickup" },
   { canonicalNo: 70, stepCode: "cargo_pickup", title: "Cargo Pickup & Stuffing (Shipper Seal)",
-    ownerDepartment: "transport", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: [LOCAL],
+    ownerDepartment: "transport", 
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "cargo_pickup" },
   { canonicalNo: 80, stepCode: "inland_transit", title: "Inland Transit (Origin → Port)",
-    ownerDepartment: "transport", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: [LOCAL],
+    ownerDepartment: "transport", 
     requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "inland_transit" },
 
   // ── Customs ───────────────────────────────────────────────────────────────────
@@ -145,42 +128,42 @@ const OTD_STEP_TEMPLATES = [
   // Its two predecessors stay as `active: false` rows — never composed again, but still
   // resolvable by stepCode for shipments that already ran them.
   { canonicalNo: 95, stepCode: "customs_clearance", title: "Customs Clearance",
-    ownerDepartment: "compliance", always: false, packages: [], croModes: [], services: ["customs_clearance"],
+    ownerDepartment: "compliance", 
     requiredDocTypes: [], dueOffsetHours: 72, derivedStatus: "inspected_sealed" },
   { canonicalNo: 90, stepCode: "customs_entry", title: "Customs Declaration (GD Filing)",
-    ownerDepartment: "compliance", always: false, packages: [], croModes: [], services: ["customs_clearance"],
+    ownerDepartment: "compliance", 
     requiredDocTypes: ["gd"], dueOffsetHours: 48, derivedStatus: "customs_entry", active: false },
   { canonicalNo: 100, stepCode: "inspected_sealed", title: "Customs Inspection & Seal",
-    ownerDepartment: "compliance", always: false, packages: [], croModes: [], services: ["customs_clearance"],
+    ownerDepartment: "compliance", 
     requiredDocTypes: ["inspection_cert"], dueOffsetHours: 48, derivedStatus: "inspected_sealed", active: false },
 
   // ── Terminal + ocean ──────────────────────────────────────────────────────────
-  // Package-gated to the export packages: this is the ORIGIN gate-in, and
+  // The ORIGIN gate-in, and
   // port_to_consignee also buys `port_handling` (it pays terminal charges to get the
   // box OUT). Without the gate that package would compose a gate-in it never performs.
   { canonicalNo: 110, stepCode: "port_handover", title: "Port Gate-In / Terminal Handover (EIR)",
-    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["port_handling", "sea_freight"],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["eir_in"], dueOffsetHours: 24, derivedStatus: "port_handover" },
   { canonicalNo: 120, stepCode: "bol_issued", title: "Bill of Lading Issuance",
-    ownerDepartment: "operations", always: false, packages: [], croModes: [], services: ["sea_freight"],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["bol"], dueOffsetHours: 48, derivedStatus: "bol_issued" },
   { canonicalNo: 130, stepCode: "bol_submitted", title: "Document Submission to Bank",
-    ownerDepartment: "finance", always: false, packages: [], croModes: [], services: ["lc_finance"],
+    ownerDepartment: "finance", 
     requiredDocTypes: ["bank_receipt"], dueOffsetHours: 48, derivedStatus: "bol_submitted" },
   { canonicalNo: 140, stepCode: "telex_released", title: "Telex Release / BL Surrender",
-    ownerDepartment: "finance", always: false, packages: [], croModes: [], services: ["sea_freight"],
+    ownerDepartment: "finance", 
     requiredDocTypes: ["telex"], dueOffsetHours: 48, derivedStatus: "telex_released" },
 
   // ── Destination agent (add-on: Ops adds `destination_services`) ───────────────
-  // Package-gated to the export packages. These are the FAR end of an export job, run
+  // The FAR end of an export job, run
   // by an overseas agent; port_to_consignee does the same physical work at home with
   // our own trucks and has its own Transport-owned steps below. Without the gate,
   // adding `destination_services` to an import job would compose both sets.
   { canonicalNo: 150, stepCode: "destination_do", title: "Delivery Order & Gate Pass (Dest. Agent)",
-    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["delivery_order", "gate_pass"], dueOffsetHours: 48, derivedStatus: "destination_do" },
   { canonicalNo: 160, stepCode: "destination_pickup", title: "Destination Container Pickup (EIR)",
-    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["eir_pickup"], dueOffsetHours: 48, derivedStatus: "destination_pickup" },
 
   // ── Package #4: the import delivery leg (port → consignee). Transport-owned end to
@@ -188,33 +171,34 @@ const OTD_STEP_TEMPLATES = [
   //    a department handoff mid-run only produces 403s. The customer's BOL / delivery
   //    order / gate pass are collected earlier, on the order_confirmed checklist.
   { canonicalNo: 152, stepCode: "import_container_pickup", title: "Container Pickup from Terminal (EIR)",
-    ownerDepartment: "transport", always: true, packages: [PORT_CONSIGNEE], croModes: [], services: [],
-    requiredDocTypes: ["eir_pickup"], dueOffsetHours: 24, derivedStatus: "destination_pickup" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: ["eir_pickup"], dueOffsetHours: 24, derivedStatus: "destination_pickup", active: false },
 
   // ── Terminal steps, one per package. Each derives `delivered`, which is what
   //    maybeSettleTx (otc.service.js) requires before a shipment can settle — so a
   //    package that never composes `delivered` still needs one of these.
   { canonicalNo: 170, stepCode: "delivered", title: "Final Delivery / POD",
-    ownerDepartment: "operations", always: true, packages: [INTL], croModes: [], services: [],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["pod"], dueOffsetHours: 48, derivedStatus: "delivered" },
   // Shared by the local trucking job and the import delivery leg — both are our own
   // vehicle arriving at a door and collecting a signature.
   { canonicalNo: 172, stepCode: "local_delivered", title: "Delivered & POD Collected",
-    ownerDepartment: "transport", always: true, packages: [LOCAL, PORT_CONSIGNEE], croModes: [], services: [],
-    requiredDocTypes: ["pod"], dueOffsetHours: 24, derivedStatus: "delivered" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: ["pod"], dueOffsetHours: 24, derivedStatus: "delivered", active: false },
   { canonicalNo: 175, stepCode: "port_job_completed", title: "Port Handover Confirmed / Job Complete",
-    ownerDepartment: "operations", always: true, packages: [LP_PORT], croModes: [], services: [],
-    requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "delivered" },
+    ownerDepartment: "operations", 
+    requiredDocTypes: [], dueOffsetHours: 24, derivedStatus: "delivered", active: false },
 
-  // Empty return — two rows because the two packages return the box for different
+  // Empty return. The import-side variant is retained but inactive; row 180 is the one
+  // that composes. Historically two rows because the two packages returned the box for different
   // reasons and different departments do it. Both derive `delivered` (there is no
   // later status) and both sit AFTER their delivery step, which maybeSettleTx already
   // accounts for: it refuses to settle while any step is still pending.
   { canonicalNo: 178, stepCode: "import_empty_return", title: "Empty Container Return (EIR)",
-    ownerDepartment: "transport", always: true, packages: [PORT_CONSIGNEE], croModes: [], services: [],
-    requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
+    ownerDepartment: "transport", 
+    requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered", active: false },
   { canonicalNo: 180, stepCode: "empty_return", title: "Empty Container Return (EIR)",
-    ownerDepartment: "operations", always: false, packages: ALL_PORT_PACKAGES, croModes: [], services: ["destination_services"],
+    ownerDepartment: "operations", 
     requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
 ];
 
@@ -309,45 +293,45 @@ const DOCUMENT_TYPES = [
 // the shipment (same rule as RULE-SH-06), never ticked by hand. `kind: "manual"` items
 // are ticked by a member of the step's owning department.
 const OTD_STEP_ACTION_TEMPLATES = [
-  // ── Order lock — EVERY package. Empty packages/croModes/services means no gate,
+  // ── Order lock. No gates anywhere any more,
   //    so local trucking, loading-point-to-port and international all carry it.
   //    The order cannot lock until the signed RC is on the shipment.
-  { stepCode: "order_lock", actionCode: "rate_confirmation", title: "Rate Confirmation (RC)", kind: "document", docType: "rate_confirmation", sortOrder: 10, required: true, packages: [], croModes: [], services: [] },
+  { stepCode: "order_lock", actionCode: "rate_confirmation", title: "Rate Confirmation (RC)", kind: "document", docType: "rate_confirmation", sortOrder: 10, required: true, services: [] },
 
   // Order confirmation — INTERNATIONAL. The full export document pack the customer
   // must hand over before the order is confirmed.
-  { stepCode: "order_confirmed", actionCode: "packing_list",         title: "Packing List",           kind: "document", docType: "packing_list",          sortOrder: 10, required: true, packages: [INTL],    croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "gd",                   title: "GD / Customs Declaration", kind: "document", docType: "gd",                  sortOrder: 20, required: true, packages: [INTL],    croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "packing_list",         title: "Packing List",           kind: "document", docType: "packing_list",          sortOrder: 10, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "gd",                   title: "GD / Customs Declaration", kind: "document", docType: "gd",                  sortOrder: 20, required: true, services: [] },
   // Auto-satisfied: the approved quotation is rendered to PDF and attached to the
   // shipment at approval (shipment.service.js), so this item is already ticked.
-  { stepCode: "order_confirmed", actionCode: "quotation",            title: "Quotation (auto-attached)", kind: "document", docType: "quotation",          sortOrder: 30, required: true, packages: [INTL],    croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "undertaking",          title: "Undertaking",            kind: "document", docType: "undertaking",           sortOrder: 40, required: true, packages: [INTL],    croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "sales_tax_invoice",    title: "Sales Tax Invoice",      kind: "document", docType: "sales_tax_invoice",     sortOrder: 50, required: true, packages: [INTL],    croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "commercial_invoice",   title: "Commercial Invoice",     kind: "document", docType: "commercial_invoice",    sortOrder: 60, required: true, packages: [INTL],    croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "certificate_of_origin", title: "Certificate of Origin", kind: "document", docType: "certificate_of_origin", sortOrder: 70, required: true, packages: [INTL],    croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "quotation",            title: "Quotation (auto-attached)", kind: "document", docType: "quotation",          sortOrder: 30, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "undertaking",          title: "Undertaking",            kind: "document", docType: "undertaking",           sortOrder: 40, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "sales_tax_invoice",    title: "Sales Tax Invoice",      kind: "document", docType: "sales_tax_invoice",     sortOrder: 50, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "commercial_invoice",   title: "Commercial Invoice",     kind: "document", docType: "commercial_invoice",    sortOrder: 60, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "certificate_of_origin", title: "Certificate of Origin", kind: "document", docType: "certificate_of_origin", sortOrder: 70, required: true, services: [] },
 
   // Order confirmation — LOADING POINT → PORT. The job stops at the terminal gate, so
   // it needs the shipping pack, not the full export/trade pack.
-  { stepCode: "order_confirmed", actionCode: "lp_packing_list",       title: "Packing List",          kind: "document", docType: "packing_list",          sortOrder: 10, required: true, packages: [LP_PORT], croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "lp_commercial_invoice", title: "Commercial Invoice",    kind: "document", docType: "commercial_invoice",    sortOrder: 20, required: true, packages: [LP_PORT], croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "lp_authority_letter",   title: "Authority Letterhead",  kind: "document", docType: "authority_letterhead",  sortOrder: 30, required: true, packages: [LP_PORT], croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "lp_packing_list",       title: "Packing List",          kind: "document", docType: "packing_list",          sortOrder: 10, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "lp_commercial_invoice", title: "Commercial Invoice",    kind: "document", docType: "commercial_invoice",    sortOrder: 20, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "lp_authority_letter",   title: "Authority Letterhead",  kind: "document", docType: "authority_letterhead",  sortOrder: 30, required: true, services: [] },
 
   // Order confirmation — PORT → CONSIGNEE. What the customer must hand over before we
   // can take their container off the terminal. The BOL proves title, the delivery order
   // is the line's release, the gate pass is what the terminal actually wants at the
   // gate, and the free days tell us the clock we are racing before detention starts.
-  { stepCode: "order_confirmed", actionCode: "pc_bol",           title: "Bill of Lading (BOL)",              kind: "document", docType: "bol",            sortOrder: 10, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_delivery_order", title: "Delivery Order (DO)",              kind: "document", docType: "delivery_order", sortOrder: 20, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_gate_pass",     title: "Gate Pass",                         kind: "document", docType: "gate_pass",      sortOrder: 30, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_free_days",     title: "Free days confirmed with customer", kind: "manual",   docType: null,             sortOrder: 40, required: true, packages: [PORT_CONSIGNEE], croModes: [], services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_bol",           title: "Bill of Lading (BOL)",              kind: "document", docType: "bol",            sortOrder: 10, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_delivery_order", title: "Delivery Order (DO)",              kind: "document", docType: "delivery_order", sortOrder: 20, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_gate_pass",     title: "Gate Pass",                         kind: "document", docType: "gate_pass",      sortOrder: 30, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_free_days",     title: "Free days confirmed with customer", kind: "manual",   docType: null,             sortOrder: 40, required: true, services: [] },
 
   // Customs clearance — the merged step's working checklist.
-  { stepCode: "customs_clearance", actionCode: "gd_filed",         title: "GD filed in WeBOC / PSW",        kind: "manual",   docType: null,               sortOrder: 10, required: true, packages: [], croModes: [], services: [] },
-  { stepCode: "customs_clearance", actionCode: "duty_paid",        title: "Duty & taxes paid",              kind: "manual",   docType: null,               sortOrder: 20, required: true, packages: [], croModes: [], services: [] },
-  { stepCode: "customs_clearance", actionCode: "gd_doc",           title: "GD document attached",           kind: "document", docType: "gd",               sortOrder: 30, required: true, packages: [], croModes: [], services: [] },
-  { stepCode: "customs_clearance", actionCode: "exam_scheduled",   title: "Examination scheduled",          kind: "manual",   docType: null,               sortOrder: 40, required: true, packages: [], croModes: [], services: [] },
-  { stepCode: "customs_clearance", actionCode: "cargo_examined",   title: "Cargo examined & seal applied",  kind: "manual",   docType: null,               sortOrder: 50, required: true, packages: [], croModes: [], services: [] },
-  { stepCode: "customs_clearance", actionCode: "inspection_cert",  title: "Inspection certificate attached", kind: "document", docType: "inspection_cert", sortOrder: 60, required: true, packages: [], croModes: [], services: [] },
+  { stepCode: "customs_clearance", actionCode: "gd_filed",         title: "GD filed in WeBOC / PSW",        kind: "manual",   docType: null,               sortOrder: 10, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "duty_paid",        title: "Duty & taxes paid",              kind: "manual",   docType: null,               sortOrder: 20, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "gd_doc",           title: "GD document attached",           kind: "document", docType: "gd",               sortOrder: 30, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "exam_scheduled",   title: "Examination scheduled",          kind: "manual",   docType: null,               sortOrder: 40, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "cargo_examined",   title: "Cargo examined & seal applied",  kind: "manual",   docType: null,               sortOrder: 50, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "inspection_cert",  title: "Inspection certificate attached", kind: "document", docType: "inspection_cert", sortOrder: 60, required: true, services: [] },
 ];
 
 // Admin-extensible charge catalog. `defaultDirection`/`defaultStepCode`/`service` are hints
@@ -446,6 +430,8 @@ const ACCOUNTS = [
   { role: "hr",                 first: "Harper",  last: "People",     dept: "hr",         email: "hr@consort.test" },
   { role: "asm",                first: "Alex",    last: "Sales",      dept: "sales",      email: "asm@consort.test" },
   { role: "bdo",                first: "Bailey",  last: "Dev",        dept: "sales",      email: "bdo@consort.test" },
+  // Owns the website query channel (raisedVia = portal) — sits in sales.
+  { role: "web_manager",        first: "Wren",    last: "Webb",       dept: "sales",      email: "web.manager@consort.test" },
   { role: "ops_manager",        first: "Omar",    last: "Ops",        dept: "operations", email: "ops.manager@consort.test" },
   { role: "ops_exec",          first: "Olive",   last: "Ops",        dept: "operations", email: "ops.exec@consort.test" },
   { role: "compliance_manager", first: "Cameron", last: "Compliance", dept: "compliance", email: "compliance.manager@consort.test" },
@@ -524,11 +510,20 @@ async function assertWipeAllowed() {
 // re-upserted below). FK-safe order: children first, then break the
 // department→user head FK, then users/employees/customers, then sequences.
 const CLEAR_STEPS = [
-  "rateCard", "loadBoardPosting", "publicInquiry", "bankLcReferral",
+  "rateCard", "loadBoardPosting", "bankLcReferral",
   "auditLog", "outboxEvent", "notificationDelivery", "notification", "notificationPreference",
   "chatMessage", "chatChannelMember", "chatChannel", "document",
   "payment", "invoiceLine", "invoice",
-  "otcMilestone", "otdStep", "shipmentStatusHistory", "shipmentException", "task", "shipment",
+  // Export trade documents — children before parents; all of them before `shipment`
+  // and `vendor`, and after `invoice` (a logistics bill points at the B/L, the GD, the
+  // FI and the container).
+  "goodsDeclarationLine", "goodsDeclaration",
+  "billOfLadingContainer", "billOfLading",
+  "tradeInvoiceLine", "tradeInvoice",
+  "packingListItem", "packingList",
+  "shipmentContainer", "shipmentTradeStageHistory",
+  "financialInstrumentDrawdown", "financialInstrument", "tradeContract",
+  "otcMilestone", "otdStep", "shipmentStatusHistory", "shipmentException", "shipmentParty", "task", "shipment",
   // The buy side hangs off the query (vendor_rfqs.query_id is RESTRICT), so it has
   // to go before queries — and off the vendor, so it goes before vendors too.
   "vendorQuoteLine", "vendorQuote", "vendorRfq",

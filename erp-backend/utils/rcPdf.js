@@ -37,23 +37,20 @@ const LEG_LABELS = {
   last_mile: "Last mile — rail terminal to delivery (by truck)",
 };
 
-// The stretch of road (or track) this RC pays for. Falls back through the query's
-// address vocabulary the same way rfqMessage does.
+// The stretch of road this RC pays for. A query carries only the two doors now, so a
+// legged RC names the door it touches and leaves the far end to the leg label.
 const routeForLeg = (leg, query = {}) => {
-  const pickup = query.pickupAddress || query.senderAddress;
-  const delivery = query.deliveryAddress || query.receiverAddress;
+  const pickup = query.pickupAddress;
+  const delivery = query.destinationAddress;
   switch (leg) {
     case "first_mile":
-      return [pickup, query.originRailTerminal].filter(Boolean).join("  →  ");
+      return pickup ?? "";
     case "middle_mile":
-      return [query.originRailTerminal, query.destinationRailTerminal].filter(Boolean).join("  →  ");
+      return [pickup, delivery].filter(Boolean).join("  →  ");
     case "last_mile":
-      return [query.destinationRailTerminal, delivery].filter(Boolean).join("  →  ");
+      return delivery ?? "";
     default:
-      return (
-        [query.originPort, query.destinationPort].filter(Boolean).join("  →  ") ||
-        [pickup, delivery].filter(Boolean).join("  →  ")
-      );
+      return [pickup, delivery].filter(Boolean).join("  →  ");
   }
 };
 
@@ -121,13 +118,9 @@ const drawChargeTable = (doc, left, lines, total, ccy) => {
   doc.text("Agreed total", cols[2], doc.y, { continued: true }).text(`   ${money(total, ccy)}`);
 };
 
-const cargoFacts = (query = {}) =>
-  [
-    query.containerTypeCode && `Container: ${query.containerTypeCode}`,
-    query.cargoDescription && `Cargo: ${query.cargoDescription}`,
-    query.weightKg != null && `Weight: ${Number(query.weightKg).toLocaleString()} kg`,
-    query.incoterm && `Incoterm: ${query.incoterm}`,
-  ].filter(Boolean);
+// A query no longer records container, cargo, weight or incoterm — those live on the
+// shipment once one exists, and an RC is raised before that. Nothing left to print.
+const cargoFacts = () => [];
 
 /**
  * The buy-side RC: what Consort will pay the awarded vendor for this job/leg.
@@ -167,14 +160,9 @@ export const renderVendorRcPdf = async ({ rfq, quote, vendor, query }) => {
     // paying customer's identity never appears on vendor paperwork.
     const touchesPickup = !rfq.leg || rfq.leg === "first_mile";
     const touchesDelivery = !rfq.leg || rfq.leg === "last_mile";
-    if (touchesPickup && (query?.senderName || query?.senderPhone)) {
-      doc.text(`Pickup contact: ${[query.senderName, query.senderPhone].filter(Boolean).join(" · ")}`);
+    if ((touchesPickup || touchesDelivery) && (query?.customerName || query?.customerPhone)) {
+      doc.text(`Site contact: ${[query.customerName, query.customerPhone].filter(Boolean).join(" · ")}`);
     }
-    if (touchesDelivery && (query?.receiverName || query?.receiverPhone)) {
-      doc.text(`Delivery contact: ${[query.receiverName, query.receiverPhone].filter(Boolean).join(" · ")}`);
-    }
-    const flags = [query?.isHazardous && "HAZARDOUS / DG CARGO", query?.isReefer && "REEFER — TEMPERATURE CONTROLLED"].filter(Boolean);
-    if (flags.length) doc.font("Helvetica-Bold").text(flags.join("   ·   ")).font("Helvetica");
     doc.moveDown(1);
 
     drawChargeTable(doc, left, quote.lines, quote.totalAmount, ccy);
@@ -227,38 +215,21 @@ export const renderCustomerRcPdf = async ({ quotation, query, customer, shipment
     doc.moveDown(0.6);
 
     // The doors, as the customer described them.
-    if (query?.senderName || query?.senderAddress) {
-      doc.font("Helvetica-Bold").text("Sender / Shipper");
-      doc.font("Helvetica");
-      const who = [query.senderName, query.senderPhone].filter(Boolean).join(" · ");
-      if (who) doc.text(who);
-      if (query.senderAddress) doc.text(query.senderAddress);
+    if (query?.pickupAddress) {
+      doc.font("Helvetica-Bold").text("Pickup");
+      doc.font("Helvetica").text(query.pickupAddress);
       doc.moveDown(0.6);
     }
-    if (query?.receiverName || query?.receiverAddress) {
-      doc.font("Helvetica-Bold").text("Receiver / Consignee");
-      doc.font("Helvetica");
-      const who = [query.receiverName, query.receiverPhone].filter(Boolean).join(" · ");
-      if (who) doc.text(who);
-      if (query.receiverAddress) doc.text(query.receiverAddress);
+    if (query?.destinationAddress) {
+      doc.font("Helvetica-Bold").text("Destination");
+      doc.font("Helvetica").text(query.destinationAddress);
       doc.moveDown(0.6);
     }
 
     doc.font("Helvetica-Bold").text("Scope");
     doc.font("Helvetica");
-    const lane = [query?.originPort, query?.destinationPort].filter(Boolean).join(" → ")
-      || [query?.pickupAddress, query?.deliveryAddress].filter(Boolean).join(" → ");
+    const lane = [query?.pickupAddress, query?.destinationAddress].filter(Boolean).join(" → ");
     if (lane) doc.text(`Route: ${lane}`);
-    if (query?.inlandMode === "rail") {
-      doc.text(
-        `Inland by rail${
-          query.originRailTerminal || query.destinationRailTerminal
-            ? ` via ${[query.originRailTerminal, query.destinationRailTerminal].filter(Boolean).join(" → ")}`
-            : ""
-        }`,
-      );
-    }
-    for (const fact of cargoFacts(query)) doc.text(fact);
     doc.text(`Services: ${(quotation.services ?? []).join(", ") || "—"}`);
     doc.text(`Confirmed: ${fmtDate(quotation.decidedAt ?? new Date())}   ·   Valid to: ${fmtDate(quotation.validityDate)}`);
     doc.moveDown(1);

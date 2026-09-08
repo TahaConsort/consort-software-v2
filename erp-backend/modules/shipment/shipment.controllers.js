@@ -2,7 +2,15 @@ import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { scopedShipmentWhere, shipmentInScope } from "./shipment.middleware.js";
-import { emitShipmentEvent, auditShipment, withStepActions } from "./shipment.service.js";
+import {
+  emitShipmentEvent,
+  auditShipment,
+  withStepActions,
+  assertShipmentUnlocked,
+  createTradeShipmentTx,
+} from "./shipment.service.js";
+import { recomputeTradeStage } from "../trade/trade.service.js";
+import { PARTY_CONFIDENTIAL_FIELDS, EXPECTED_EXPORT_ROLES } from "../../utils/partyRoles.js";
 
 /**
  * Shipment (CRM_MASTER §5.8, WORKFLOW §5.2/§11, RULE-SH).
@@ -52,14 +60,25 @@ export const getShipmentPnl = catchAsync(async (req, res, next) => {
   });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
 
-  const [invoices, quotation] = await Promise.all([
+  const [invoices, quotation, tradeInvoices] = await Promise.all([
     prisma.invoice.findMany({
       where: { shipmentId, status: { not: "void" } },
       select: { kind: true, status: true, totalAmount: true, currency: true, fxRate: true, payments: { select: { amount: true } } },
     }),
-    prisma.quotation.findUnique({
-      where: { id: shipment.quotationId },
-      select: { currency: true, fxRate: true, chargeLines: { select: { amount: true, costAmount: true } } },
+    // A trade shipment has no quotation (roadmap Step 1), so this is simply null and
+    // the estimate reads 0 — the goods figures below carry the picture instead.
+    shipment.quotationId
+      ? prisma.quotation.findUnique({
+          where: { id: shipment.quotationId },
+          select: { currency: true, fxRate: true, chargeLines: { select: { amount: true, costAmount: true } } },
+        })
+      : null,
+    // Goods economics (decision #1): what Consort sells the cargo for, less what it
+    // paid the vendor for it. Distinct from the freight margin above, which is the
+    // service side of the same job.
+    prisma.tradeInvoice.findMany({
+      where: { shipmentId, status: "issued" },
+      select: { side: true, totalValue: true, currency: true },
     }),
   ]);
 
@@ -89,6 +108,17 @@ export const getShipmentPnl = catchAsync(async (req, res, next) => {
   );
   const currencies = [...new Set(invoices.map((i) => i.currency).filter(Boolean))];
 
+  // Goods side. No FX conversion here: a trade shipment is invoiced in one currency on
+  // both legs (the sample set is EUR throughout), and inventing a rate would be worse
+  // than reporting the figures as they were billed.
+  const goodsRevenue = round2(
+    tradeInvoices.filter((t) => t.side === "sale").reduce((s, t) => s + num(t.totalValue), 0),
+  );
+  const goodsCost = round2(
+    tradeInvoices.filter((t) => t.side === "purchase").reduce((s, t) => s + num(t.totalValue), 0),
+  );
+  const goodsCurrencies = [...new Set(tradeInvoices.map((t) => t.currency).filter(Boolean))];
+
   res.json({
     success: true,
     data: {
@@ -100,6 +130,17 @@ export const getShipmentPnl = catchAsync(async (req, res, next) => {
         estimated: round2(quoted.revenue - quoted.cost),
         actual: round2(revenue.invoiced - cost.invoiced),
       },
+      // Present only when the shipment actually trades goods; a forwarding job leaves
+      // this null rather than showing three zeroes that mean nothing.
+      goods: tradeInvoices.length
+        ? {
+            revenue: goodsRevenue,
+            cost: goodsCost,
+            margin: round2(goodsRevenue - goodsCost),
+            currencies: goodsCurrencies,
+            mixedCurrency: goodsCurrencies.length > 1,
+          }
+        : null,
       openPayables: {
         count: openPayables.length,
         amount: round2(
@@ -361,4 +402,272 @@ export const closeShipment = catchAsync(async (req, res, next) => {
     ? `Shipment closed — note ${openPayables._count} open payable(s) were locked at close`
     : "Shipment closed";
   res.json({ success: true, message: closeMsg, data: { openPayables: { count: openPayables._count, amount: openPayables._sum.estimatedAmount ?? 0 } } });
+});
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * Per-shipment party roles (Export Shipment Workflow roadmap §2/§3/§7)
+ *
+ * The roadmap's core modelling rule: a party's contact and banking details live once
+ * on the party record, while the ROLE is per shipment. `Vendor.type` stays a default
+ * hint for the picker and is never consulted here — any party may hold any role, which
+ * is exactly what lets Consort be Manufacturer on an export and Freight Forwarder on
+ * an import (roadmap §1, Examples 1 & 2).
+ * ═════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Load the shipment for a party operation, or fail the way the rest of the module
+ * does: out of scope reads 404, never 403 (BUSINESS_RULES §2.3).
+ */
+const loadShipmentForParty = async (req) => {
+  const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
+  if (!shipment || !(await shipmentInScope(req, shipment))) return null;
+  return shipment;
+};
+
+/**
+ * Attach each party's identity to its row. Bank and tax fields are stripped for a
+ * portal customer: a trade shipment carries the vendor's IBAN and NTN alongside the
+ * customer's own record, and none of that is theirs to see (ADR-047, portal containment).
+ */
+const hydrateParties = async (rows, viewerIsCustomer) => {
+  const vendorIds = [...new Set(rows.map((r) => r.vendorId).filter(Boolean))];
+  const customerIds = [...new Set(rows.map((r) => r.customerId).filter(Boolean))];
+
+  const [vendors, customers] = await Promise.all([
+    vendorIds.length
+      ? prisma.vendor.findMany({
+          where: { id: { in: vendorIds } },
+          select: {
+            id: true, referenceNo: true, name: true, type: true, isActive: true,
+            contactName: true, email: true, phone: true, address: true, city: true, country: true,
+            taxId: true, strn: true, rexNo: true, vatNo: true,
+            bankName: true, bankBranch: true, iban: true, swiftCode: true, accountTitle: true,
+            paymentTermsDays: true, currency: true,
+          },
+        })
+      : [],
+    customerIds.length
+      ? prisma.customer.findMany({
+          where: { id: { in: customerIds } },
+          select: { id: true, referenceNo: true, companyId: true },
+        })
+      : [],
+  ]);
+
+  // `Customer` carries a scalar company_id with no Prisma relation field, so the company
+  // is a second lookup — the same two-step the module's own hydrate() does.
+  const companies = customers.length
+    ? await prisma.company.findMany({
+        where: { id: { in: [...new Set(customers.map((c) => c.companyId))] } },
+        select: { id: true, name: true, country: true, city: true, address: true },
+      })
+    : [];
+
+  const vById = new Map(vendors.map((v) => [v.id, v]));
+  const cById = new Map(customers.map((c) => [c.id, c]));
+  const coById = new Map(companies.map((c) => [c.id, c]));
+
+  return rows.map((r) => {
+    if (r.vendorId) {
+      const v = vById.get(r.vendorId);
+      const party = v ? { ...v } : null;
+      if (party && viewerIsCustomer) for (const f of PARTY_CONFIDENTIAL_FIELDS) delete party[f];
+      return { ...r, partyKind: "vendor", party };
+    }
+    const c = cById.get(r.customerId);
+    const co = c ? coById.get(c.companyId) : null;
+    return {
+      ...r,
+      partyKind: "customer",
+      party: c
+        ? { id: c.id, referenceNo: c.referenceNo, name: co?.name ?? "—", country: co?.country ?? null, city: co?.city ?? null, address: co?.address ?? null }
+        : null,
+    };
+  });
+};
+
+/* ── GET /api/shipments/:id/parties ── */
+export const listShipmentParties = catchAsync(async (req, res, next) => {
+  const shipment = await loadShipmentForParty(req);
+  if (!shipment) return next(new AppError("Shipment not found", 404));
+
+  const rows = await prisma.shipmentParty.findMany({
+    where: { shipmentId: shipment.id },
+    orderBy: [{ role: "asc" }, { createdAt: "asc" }],
+  });
+  const parties = await hydrateParties(rows, req.user.role === "customer");
+
+  // Which roadmap roles are still unfilled — reported, never enforced: a shipment is
+  // assembled over weeks and the carrier is unknown when the contract is signed.
+  const filled = new Set(rows.map((r) => r.role));
+  const missingRoles =
+    shipment.kind === "trade" ? EXPECTED_EXPORT_ROLES.filter((r) => !filled.has(r)) : [];
+
+  res.json({ success: true, data: { shipmentId: shipment.id, parties, missingRoles } });
+});
+
+/* ── POST /api/shipments/:id/parties ── */
+export const addShipmentParty = catchAsync(async (req, res, next) => {
+  const shipment = await loadShipmentForParty(req);
+  if (!shipment) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "change its parties");
+
+  const { role, vendorId, customerId, notes } = req.body;
+
+  // Resolve the target first so a bad id is a clean 404 rather than an FK violation.
+  if (vendorId) {
+    const vendor = await prisma.vendor.findUnique({ where: { id: vendorId }, select: { id: true, isActive: true, name: true } });
+    if (!vendor) return next(new AppError("Vendor not found", 404));
+    if (!vendor.isActive) {
+      return next(new AppError(vendor.name + " is deactivated — reactivate it before putting it on a shipment", 409));
+    }
+  } else {
+    const customer = await prisma.customer.findUnique({ where: { id: customerId }, select: { id: true } });
+    if (!customer) return next(new AppError("Customer not found", 404));
+  }
+
+  const duplicate = await prisma.shipmentParty.findFirst({
+    where: { shipmentId: shipment.id, role, vendorId: vendorId ?? null, customerId: customerId ?? null },
+    select: { id: true },
+  });
+  if (duplicate) return next(new AppError("That party already holds this role on this shipment", 409));
+
+  const created = await prisma.$transaction(async (tx) => {
+    const party = await tx.shipmentParty.create({
+      data: { shipmentId: shipment.id, role, vendorId: vendorId ?? null, customerId: customerId ?? null, notes: notes ?? null },
+    });
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: "shipment.party.added",
+      resourceType: "shipment_party",
+      resourceId: party.id,
+      diff: { shipmentId: shipment.id, role, vendorId: vendorId ?? null, customerId: customerId ?? null },
+    });
+    await emitShipmentEvent(tx, "shipment.parties.changed", { shipmentId: shipment.id, role });
+    return party;
+  });
+
+  const [hydrated] = await hydrateParties([created], req.user.role === "customer");
+  res.status(201).json({ success: true, message: "Party added", data: hydrated });
+});
+
+/* ── PATCH /api/shipments/:id/parties/:partyId ── */
+export const updateShipmentParty = catchAsync(async (req, res, next) => {
+  const shipment = await loadShipmentForParty(req);
+  if (!shipment) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "change its parties");
+
+  const existing = await prisma.shipmentParty.findFirst({
+    where: { id: req.params.partyId, shipmentId: shipment.id },
+  });
+  if (!existing) return next(new AppError("Party not found on this shipment", 404));
+
+  const data = {};
+  if (req.body.role !== undefined) data.role = req.body.role;
+  if (req.body.notes !== undefined) data.notes = req.body.notes;
+
+  if (data.role && data.role !== existing.role) {
+    const clash = await prisma.shipmentParty.findFirst({
+      where: {
+        shipmentId: shipment.id,
+        role: data.role,
+        vendorId: existing.vendorId,
+        customerId: existing.customerId,
+        id: { not: existing.id },
+      },
+      select: { id: true },
+    });
+    if (clash) return next(new AppError("That party already holds this role on this shipment", 409));
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const party = await tx.shipmentParty.update({ where: { id: existing.id }, data });
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: "shipment.party.updated",
+      resourceType: "shipment_party",
+      resourceId: party.id,
+      diff: {
+        shipmentId: shipment.id,
+        before: { role: existing.role, notes: existing.notes },
+        after: { role: party.role, notes: party.notes },
+      },
+    });
+    await emitShipmentEvent(tx, "shipment.parties.changed", { shipmentId: shipment.id, role: party.role });
+    return party;
+  });
+
+  const [hydrated] = await hydrateParties([updated], req.user.role === "customer");
+  res.json({ success: true, message: "Party updated", data: hydrated });
+});
+
+/* ── DELETE /api/shipments/:id/parties/:partyId ── */
+export const removeShipmentParty = catchAsync(async (req, res, next) => {
+  const shipment = await loadShipmentForParty(req);
+  if (!shipment) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "change its parties");
+
+  const existing = await prisma.shipmentParty.findFirst({
+    where: { id: req.params.partyId, shipmentId: shipment.id },
+  });
+  if (!existing) return next(new AppError("Party not found on this shipment", 404));
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shipmentParty.delete({ where: { id: existing.id } });
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: "shipment.party.removed",
+      resourceType: "shipment_party",
+      resourceId: existing.id,
+      diff: { shipmentId: shipment.id, role: existing.role, vendorId: existing.vendorId, customerId: existing.customerId },
+    });
+    await emitShipmentEvent(tx, "shipment.parties.changed", { shipmentId: shipment.id, role: existing.role });
+  });
+
+  res.json({ success: true, message: "Party removed" });
+});
+
+/* ── POST /api/shipments/trade ── (roadmap Step 1; supersedes INV-03 for kind=trade) */
+export const createTradeShipment = catchAsync(async (req, res, next) => {
+  const [contract, customer] = await Promise.all([
+    prisma.tradeContract.findUnique({ where: { id: req.body.contractId } }),
+    prisma.customer.findUnique({ where: { id: req.body.customerId } }),
+  ]);
+  if (!contract) return next(new AppError("Contract not found", 404));
+  if (!customer) return next(new AppError("Customer not found", 404));
+  if (contract.status === "cancelled") return next(new AppError("That contract is cancelled", 409));
+
+  let financialInstrument = null;
+  if (req.body.financialInstrumentId) {
+    financialInstrument = await prisma.financialInstrument.findUnique({ where: { id: req.body.financialInstrumentId } });
+    if (!financialInstrument) return next(new AppError("Financial instrument not found", 404));
+    if (financialInstrument.status === "closed") return next(new AppError("That instrument is closed", 409));
+    // One instrument, one shipment (roadmap §7) — a second shipment would draw twice
+    // against the same registration.
+    const taken = await prisma.shipment.findFirst({
+      where: { financialInstrumentId: financialInstrument.id },
+      select: { referenceNo: true },
+    });
+    if (taken) return next(new AppError(`That instrument is already on shipment ${taken.referenceNo}`, 409));
+  }
+
+  const { shipment, stepCount } = await prisma.$transaction(async (tx) => {
+    const created = await createTradeShipmentTx(tx, {
+      contract,
+      financialInstrument,
+      customer,
+      body: req.body,
+      actorId: req.user.id,
+    });
+    // The contract link alone already puts the shipment at `contract_registered`, and an
+    // active instrument at `fi_active` (roadmap §7.1) — derived here, never written.
+    await recomputeTradeStage(tx, created.shipment.id, req.user.id);
+    return created;
+  });
+
+  res.status(201).json({
+    success: true,
+    message: `Trade shipment ${shipment.referenceNo} created with ${stepCount} step(s)`,
+    data: shipment,
+  });
 });

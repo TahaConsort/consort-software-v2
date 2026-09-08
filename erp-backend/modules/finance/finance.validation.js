@@ -10,12 +10,22 @@ export const createInvoiceSchema = z.object({
   counterparty: z.string().min(1).max(200).optional(),
   currency: z.string().length(3).optional(),
   dueDate: z.coerce.date().optional(),
+  // Roadmap §6 — what this bill relates to, as foreign keys rather than free text in
+  // the description: the B/L, the declaration, the instrument, the container.
+  billOfLadingId: z.string().uuid().optional(),
+  goodsDeclarationId: z.string().uuid().optional(),
+  financialInstrumentId: z.string().uuid().optional(),
+  containerId: z.string().uuid().optional(),
   lines: z
     .array(
       z.object({
         description: z.string().min(1, "A line description is required"),
         quantity: z.coerce.number().positive().default(1),
         unitPrice: z.coerce.number().nonnegative("Unit price can't be negative"),
+        // Roadmap §4.7 — a terminal bill is a list of named charges, each carrying 15%
+        // Sindh Sales Tax. The tax AMOUNT is computed server-side from this rate.
+        chargeCode: z.string().max(60).optional(),
+        taxPercent: z.coerce.number().min(0).max(100).optional(),
         sortOrder: z.number().int().optional(),
       }),
     )

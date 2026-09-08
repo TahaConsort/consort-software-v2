@@ -6,7 +6,7 @@ import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
 import { materializeCustomerAndQuery } from "../intake/intake.service.js";
 import { absPathFor } from "../document/document.service.js";
-import { readLcPdf, parseQuantityKg } from "./lc.extract.js";
+import { readLcPdf } from "./lc.extract.js";
 import { webhookLcSchema } from "./lc.validation.js";
 
 const IS_PROD = process.env.NODE_ENV === "production";
@@ -326,50 +326,8 @@ export const convertReferral = catchAsync(async (req, res, next) => {
       services,
       originPort,
       destinationPort,
-      // The Query has no free-text field, and "IRON ORE PELLETS" alone does not tell
-      // the person quoting how much of it there is. Quantity and price term ride along
-      // here because this is the only place on the query they can be read.
-      cargoDescription: [
-        pick(referral.commodity, f.commodity),
-        f.quantity,
-        f.priceTerm,
-      ].filter(Boolean).join(" · ") || null,
-      incoterm: pick(referral.incoterm, f.incoterm),
-      // "2500MT" is a number the LC states plainly; leaving it in prose means every
-      // downstream weight calculation starts by re-reading the description.
-      weightKg: parseQuantityKg(f.quantity),
       note: lcSummary,
     });
-
-    // The credit's terms, kept on the query itself so the person quoting sees what
-    // the bank actually wrote — expiry, latest shipment, partial/transhipment rules
-    // and the documents demanded all change what a job costs. Snapshot semantics are
-    // explained on the schema field.
-    if (read) {
-      await tx.query.update({
-        where: { id: materialized.query.id },
-        data: {
-          lcDetails: {
-            ...f,
-            // Dates go in as ISO strings — JSON has no date type, and a Date here
-            // would come back as an object nobody downstream expects.
-            issueDate: f.issueDate?.toISOString() ?? null,
-            expiryDate: f.expiryDate?.toISOString() ?? null,
-            latestShipmentDate: f.latestShipmentDate?.toISOString() ?? null,
-            referralRef: referral.referenceNo,
-            // What the lane resolved to, and what it did not — an unresolved port is
-            // a fact the quoting user needs, not a blank to be discovered later.
-            resolvedOriginPort: originPort,
-            resolvedDestinationPort: destinationPort,
-            unresolvedPorts: [
-              !originPort && f.originPort ? f.originPort : null,
-              !destinationPort && f.destinationPort ? f.destinationPort : null,
-            ].filter(Boolean),
-            readAt: new Date().toISOString(),
-          },
-        },
-      });
-    }
 
     // Put the advice itself on the query. Quoting an LC shipment means reading the
     // LC — its documents-required list decides half the charges — and making the ops

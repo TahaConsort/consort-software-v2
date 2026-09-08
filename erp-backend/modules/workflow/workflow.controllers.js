@@ -1,12 +1,7 @@
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
-import { ShipmentStatus, DepartmentCode, ServicePackage, CroHandling, LcHandling, ServiceCode, StepActionKind } from "@prisma/client";
-import {
-  SERVICE_PACKAGE_LABELS,
-  CRO_HANDLING_LABELS,
-  LC_HANDLING_LABELS,
-} from "../../utils/servicePackage.js";
+import { ShipmentStatus, StepActionKind } from "@prisma/client";
 import { STEP_CODE_RE } from "./workflow.validation.js";
 import * as svc from "./workflow.service.js";
 
@@ -15,17 +10,6 @@ import * as svc from "./workflow.service.js";
  * step catalog, its checklists and the document vocabulary. Edits shape NEW shipments
  * only: a composed path is frozen at approval (INV-14) and never recomposed.
  */
-
-// Service-code labels for admin selects. Presentation only — the CATALOG in
-// modules/service carries the customer-facing prose.
-const SERVICE_LABELS = {
-  local_transport: "Local Transport / Inland",
-  customs_clearance: "Customs Clearance",
-  sea_freight: "Sea Freight (Ocean)",
-  port_handling: "Port Handling / Terminal",
-  lc_finance: "LC / Trade Finance",
-  destination_services: "Destination Services / Agent",
-};
 
 /* ── GET /api/workflow/meta ── everything the admin UI's selects need */
 export const getMeta = catchAsync(async (req, res) => {
@@ -36,10 +20,6 @@ export const getMeta = catchAsync(async (req, res) => {
   res.json({
     success: true,
     data: {
-      packages: Object.values(ServicePackage).map((code) => ({ code, label: SERVICE_PACKAGE_LABELS[code] ?? code })),
-      croModes: Object.values(CroHandling).map((code) => ({ code, label: CRO_HANDLING_LABELS[code] ?? code })),
-      lcModes: Object.values(LcHandling).map((code) => ({ code, label: LC_HANDLING_LABELS[code] ?? code })),
-      services: Object.values(ServiceCode).map((code) => ({ code, label: SERVICE_LABELS[code] ?? code })),
       departments: departments.map((d) => ({ code: d.code, name: d.name })),
       statuses: Object.values(ShipmentStatus),
       actionKinds: Object.values(StepActionKind),

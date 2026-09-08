@@ -16,7 +16,7 @@ import * as quotationService from "@/services/quotationService";
 import * as queryService from "@/services/queryService";
 import * as chargeService from "@/services/chargeService";
 import * as vendorService from "@/services/vendorService";
-import { QUOTATION_STATUS_LABELS, labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
+import { QUOTATION_STATUS_LABELS, QUOTE_SHARE_CHANNEL_LABELS, labelForService, DEFAULT_CURRENCY } from "@/lib/catalog";
 
 const STATUS_STYLES = {
   draft: "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-300",
@@ -380,6 +380,14 @@ const QuotationDetailDialog = ({ quotation, onClose }) => {
             </table>
           </div>
           <div className="text-right font-semibold">Total: {money(full.totalAmount, full.currency)}</div>
+          {/* BDO's relay record — how the quote reached the customer (mail/phone/…) */}
+          {full.sharedAt && (
+            <p className="text-xs text-muted-foreground">
+              Given to the customer via {QUOTE_SHARE_CHANNEL_LABELS[full.sharedVia] ?? full.sharedVia} on{" "}
+              {new Date(full.sharedAt).toLocaleDateString()}
+              {full.shareNote ? ` — ${full.shareNote}` : ""}
+            </p>
+          )}
         </div>
         <DialogFooter><Button variant="outline" onClick={onClose}>Close</Button></DialogFooter>
       </DialogContent>

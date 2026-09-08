@@ -4,8 +4,13 @@
  */
 import api from "@/lib/axios";
 
-export const listQueries = async (status) => {
-  const res = await api.get(`/queries${status ? `?status=${status}` : ""}`);
+// params: { status?, channel? } — channel is one of bdo | bank_lc | website.
+// A bare string still works for old callers that only ever passed a status.
+export const listQueries = async (params = {}) => {
+  if (typeof params === "string") params = { status: params };
+  const clean = Object.fromEntries(Object.entries(params).filter(([, v]) => v));
+  const q = new URLSearchParams(clean).toString();
+  const res = await api.get(`/queries${q ? `?${q}` : ""}`);
   return res.data;
 };
 
@@ -27,5 +32,12 @@ export const updateQuery = async (id, payload) => {
 
 export const cancelQuery = async (id, reason) => {
   const res = await api.post(`/queries/${id}/cancel`, { reason });
+  return res.data;
+};
+
+// Take ownership of an unclaimed query — assigns the CUSTOMER to the calling BDO,
+// which moves every query for them out of the shared pool (§5.20).
+export const claimQuery = async (id) => {
+  const res = await api.post(`/queries/${id}/claim`);
   return res.data;
 };

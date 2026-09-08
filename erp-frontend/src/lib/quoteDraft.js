@@ -1,10 +1,15 @@
 /**
  * Pending quote draft (CRM_MASTER §5.20).
  *
- * The storefront's "Get a quote" requires an account. When an anonymous visitor
- * has configured the rate calculator and hits the signup gate, their selection
- * is parked here so it survives the redirect and is submitted as a real Query
- * the moment their portal exists — they never retype it.
+ * The storefront's "Send us a query" requires an account. When an anonymous visitor
+ * has filled the query form and hits the auth gate, their selection is parked here so
+ * it survives the redirect and is submitted as a real Query the moment their portal
+ * exists — they never retype it. Both doors read it: RegisterPage submits it after
+ * signup, LoginPage after sign-in.
+ *
+ * Carries the contact block (contactName / contactEmail / contactPhone) alongside the
+ * selection purely to prefill the signup form; the Query itself takes those from the
+ * customer record the server already has.
  *
  * sessionStorage (not localStorage): a draft is scoped to this tab/visit and
  * must not linger on a shared machine.

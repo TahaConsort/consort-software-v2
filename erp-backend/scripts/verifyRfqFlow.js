@@ -67,7 +67,7 @@ const check = (name, ok, detail = "") => {
  */
 const cleanup = async () => {
   const queries = await prisma.query.findMany({
-    where: { cargoDescription: TAG },
+    where: { customerName: TAG },
     select: { id: true },
   });
   const queryIds = queries.map((q) => q.id);
@@ -154,19 +154,11 @@ const seedFixtures = async () => {
       raisedVia: "bdo",
       status: "open",
       services: ["local_transport", "customs_clearance"],
+      customerName: TAG, // the cleanup handle
+      customerEmail: "zz-verify-rfq@consort.test",
+      customerPhone: "0300-0000001",
       pickupAddress: "SITE Area, Karachi",
-      deliveryAddress: "Sundar Industrial Estate, Lahore",
-      senderName: "ZZ Sender",
-      senderPhone: "0300-0000001",
-      senderAddress: "SITE Area, Karachi",
-      receiverName: "ZZ Receiver",
-      receiverPhone: "0300-0000002",
-      receiverAddress: "Sundar Industrial Estate, Lahore",
-      inlandMode: "rail",
-      originRailTerminal: "Karachi Cantt Dry Port",
-      destinationRailTerminal: "Lahore Dry Port",
-      cargoDescription: TAG, // the cleanup handle
-      weightKg: 24000,
+      destinationAddress: "Sundar Industrial Estate, Lahore",
     },
   });
 
@@ -254,10 +246,10 @@ async function run() {
   check("each transport RFQ carries its leg; customs has none",
     !!firstMile && !!middleMile && !!lastMile && customsRfq?.leg == null);
   check("reference is RFQ-YYYY-NNNNN", /^RFQ-\d{4}-\d{5}$/.test(firstMile?.referenceNo ?? ""), firstMile?.referenceNo);
-  check("hydrated RFQ carries the rail + party fields",
-    firstMile?.query?.inlandMode === "rail" &&
-      firstMile?.query?.originRailTerminal === "Karachi Cantt Dry Port" &&
-      firstMile?.query?.senderName === "ZZ Sender");
+  check("hydrated RFQ carries the query contact + route fields",
+    firstMile?.query?.customerName === TAG &&
+      firstMile?.query?.pickupAddress === "SITE Area, Karachi" &&
+      firstMile?.query?.destinationAddress === "Sundar Industrial Estate, Lahore");
 
   const dupeLeg = await call("POST", "/rfqs", {
     queryId: query.id,
@@ -392,7 +384,7 @@ async function run() {
 
   const queriesList = await call("GET", "/queries");
   const thisQuery = (queriesList.json?.data ?? []).find((q) => q.id === query.id);
-  check("query list carries rfqSummary + rail fields", !!thisQuery?.rfqSummary && thisQuery?.inlandMode === "rail",
+  check("query list carries rfqSummary + contact fields", !!thisQuery?.rfqSummary && thisQuery?.customerName === TAG,
     thisQuery?.rfqSummary ? JSON.stringify(thisQuery.rfqSummary) : "absent");
 }
 

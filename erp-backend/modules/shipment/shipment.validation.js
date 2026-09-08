@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PARTY_ROLES } from "../../utils/partyRoles.js";
 
 /** Shipment — request schemas (CRM_MASTER §5.8, RULE-SH). OTD step schemas live
  *  in the OTD module (§5.9). */
@@ -32,3 +33,31 @@ export const scheduleSchema = z
   })
   .refine((d) => d.etd || d.eta, { message: "Provide an ETD and/or an ETA" })
   .refine((d) => !d.etd || !d.eta || d.eta >= d.etd, { message: "ETA cannot be before ETD" });
+
+// ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§7) ─────────
+// A party row points at exactly one party record — a `vendors` row (the party
+// directory, which already carries NTN/STRN/REX/VAT/IBAN/SWIFT) or a CRM `customers`
+// row acting as a party on its own shipment. Mirrors the shipment_parties_one_target
+// CHECK in prisma/sql/constraints.sql; keep the two in step.
+//
+// The role is NOT validated against the party's `Vendor.type`. That is the whole point
+// of the junction: PARTY_ROLE_VENDOR_TYPES only orders the picker.
+export const addPartySchema = z
+  .object({
+    role: z.enum(PARTY_ROLES),
+    vendorId: z.string().uuid().optional(),
+    customerId: z.string().uuid().optional(),
+    notes: z.string().max(500).optional(),
+  })
+  .refine((d) => (d.vendorId ? 1 : 0) + (d.customerId ? 1 : 0) === 1, {
+    message: "Provide exactly one of vendorId or customerId",
+  });
+
+export const updatePartySchema = z
+  .object({
+    role: z.enum(PARTY_ROLES).optional(),
+    notes: z.string().max(500).nullable().optional(),
+  })
+  .refine((d) => d.role !== undefined || d.notes !== undefined, {
+    message: "Provide a role and/or notes to change",
+  });

@@ -129,10 +129,6 @@ const customerDashboard = async (user) => {
       orderBy: { createdAt: "desc" },
       select: {
         id: true, referenceNo: true, status: true, exceptionState: true, services: true,
-        // The package is what the customer actually bought — the portal shows that
-        // rather than the internal service codes. croHandledBy/lcHandledBy drive the
-        // "we're waiting on your CRO/LC" prompts (ADR-050).
-        servicePackage: true, croHandledBy: true, lcHandledBy: true,
         originPort: true, destinationPort: true, pickupAddress: true, deliveryAddress: true, eta: true,
         // §5.16 — the customer tracks the stages their order ACTUALLY has, so
         // ship the composed path (titles come from the templates below).

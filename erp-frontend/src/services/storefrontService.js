@@ -18,6 +18,3 @@ export const getLoadBoard = async (filters = {}) => {
 
 // Indicative price breakdown — nothing is persisted.
 export const getRateQuote = async (payload) => (await api.post("/public/rate-quote", payload)).data;
-
-// "Request a quote" → creates a Public Inquiry for Sales to triage.
-export const submitInquiry = async (payload) => (await api.post("/public/inquiries", payload)).data;

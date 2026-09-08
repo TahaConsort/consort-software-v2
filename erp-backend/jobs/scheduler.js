@@ -281,6 +281,101 @@ const pruneRetention = async () => {
   });
 };
 
+// ── Export trade documents (roadmap §7.2) ────────────────────────────────────
+// The three things the roadmap asks to be flagged automatically. Each is idempotent:
+// the instrument and the B/L carry their own "already told you" timestamp, so an hourly
+// run does not re-nag, and a restart never double-notifies.
+
+const FI_WARN_DAYS = 14;
+
+/** Financial Instrument expiry approaching, and expiry itself. */
+const sweepFinancialInstruments = async () => {
+  const now = new Date();
+  const horizon = new Date(now.getTime() + FI_WARN_DAYS * DAY);
+
+  // Past expiry — the status moves, which is a fact about the instrument rather than a
+  // reminder, so it is applied whether or not anyone was notified before.
+  const expired = await prisma.financialInstrument.findMany({
+    where: { status: "active", expiryDate: { lt: now } },
+    select: { id: true, fiNumber: true, expiryDate: true },
+  });
+  for (const fi of expired) {
+    await prisma.financialInstrument.update({ where: { id: fi.id }, data: { status: "expired" } });
+    await emit("fi.expiring", { financialInstrumentId: fi.id, fiNumber: fi.fiNumber, expired: true });
+  }
+
+  const soon = await prisma.financialInstrument.findMany({
+    where: { status: "active", expiryDate: { gte: now, lte: horizon }, expiryNotifiedAt: null },
+    select: { id: true, fiNumber: true, expiryDate: true },
+  });
+  for (const fi of soon) {
+    await prisma.financialInstrument.update({ where: { id: fi.id }, data: { expiryNotifiedAt: now } });
+    await emit("fi.expiring", {
+      financialInstrumentId: fi.id,
+      fiNumber: fi.fiNumber,
+      daysLeft: Math.ceil((new Date(fi.expiryDate) - now) / DAY),
+    });
+  }
+};
+
+/**
+ * DA maturity. The roadmap is explicit that "75 days from B/L date" must be computed
+ * from the actual Bill of Lading date rather than typed in, so the due date is derived
+ * here from shippedOnBoard + the instrument's daDays.
+ */
+const sweepDaMaturity = async () => {
+  const now = new Date();
+  const bols = await prisma.billOfLading.findMany({
+    where: { shippedOnBoard: { not: null }, daNotifiedAt: null },
+    select: { id: true, blNumber: true, shippedOnBoard: true, shipmentId: true },
+  });
+  for (const bol of bols) {
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: bol.shipmentId },
+      select: { financialInstrumentId: true },
+    });
+    if (!shipment?.financialInstrumentId) continue;
+    const fi = await prisma.financialInstrument.findUnique({
+      where: { id: shipment.financialInstrumentId },
+      select: { id: true, daDays: true, status: true },
+    });
+    if (!fi?.daDays || fi.status === "closed") continue;
+
+    const due = new Date(new Date(bol.shippedOnBoard).getTime() + fi.daDays * DAY);
+    const daysLeft = Math.ceil((due - now) / DAY);
+    if (daysLeft > FI_WARN_DAYS) continue;
+
+    await prisma.billOfLading.update({ where: { id: bol.id }, data: { daNotifiedAt: now } });
+    await emit("fi.da_due", {
+      shipmentId: bol.shipmentId,
+      financialInstrumentId: fi.id,
+      blNumber: bol.blNumber,
+      dueDate: due,
+      daysLeft,
+    });
+  }
+};
+
+/**
+ * Packing List vs Commercial Invoice vs B/L. Reported, never enforced — the desk needs
+ * to see that two documents disagree, not to be stopped from recording the second one.
+ */
+const sweepTradeMismatch = async () => {
+  const { tradeAlertsFor } = await import("../modules/trade/trade.service.js");
+  const shipments = await prisma.shipment.findMany({
+    where: { kind: "trade", status: { notIn: ["closed"] }, exceptionState: { not: "cancelled" } },
+    select: { id: true, referenceNo: true },
+  });
+  for (const s of shipments) {
+    if (await recentlyEmitted("trade.mismatch_detected", "shipmentId", s.id)) continue;
+    const alerts = (await tradeAlertsFor(s.id)).filter((a) =>
+      ["weight_mismatch", "quantity_mismatch", "invoice_exceeds_fi"].includes(a.code),
+    );
+    if (!alerts.length) continue;
+    await emit("trade.mismatch_detected", { shipmentId: s.id, referenceNo: s.referenceNo, alerts });
+  }
+};
+
 export const runSweepsOnce = async () => {
   await sweepLeadStaleness();
   await sweepQueries();
@@ -291,6 +386,9 @@ export const runSweepsOnce = async () => {
   await sweepLoadBoard();
   await reapOutbox();
   await sweepDocumentOrphans();
+  await sweepFinancialInstruments();
+  await sweepDaMaturity();
+  await sweepTradeMismatch();
   await pruneRetention();
 };
 

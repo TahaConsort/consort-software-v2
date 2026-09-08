@@ -130,9 +130,6 @@ export const createQuotation = catchAsync(async (req, res, next) => {
           // Snapshot from the query (INV-14 lineage) — all three travel together, since
           // the package and CRO mode are what compose the OTD path at approval.
           services: query.services,
-          servicePackage: query.servicePackage,
-          croHandledBy: query.croHandledBy,
-          lcHandledBy: query.lcHandledBy,
           currency: req.body.currency ?? DEFAULT_CURRENCY,
           fxRate: req.body.fxRate ?? undefined,
           validityDate: req.body.validityDate ?? undefined,
@@ -221,6 +218,44 @@ export const sendQuotation = catchAsync(async (req, res, next) => {
   res.json({ success: true, message: "Quotation sent to the customer", data: hydrated });
 });
 
+/* ── POST /api/quotations/:id/share ── (BDO gives the sent quote to the customer) */
+/**
+ * After Ops releases a quote (`sent`), the BDO relays it to the customer over
+ * email / phone / WhatsApp / in person and records how. Works for every customer
+ * origin — storefront form, bank LC, or the BDO's own book — via the widened BDO
+ * scope in attachQuotationScope. Purely informational: it never gates approval,
+ * and re-sharing (phoned first, then emailed) just overwrites with the latest.
+ * rowVersion is deliberately NOT bumped — nothing commercial changes, and bumping
+ * would 412 an approve clicked right after from the same dialog.
+ */
+export const shareQuotation = catchAsync(async (req, res, next) => {
+  const quotation = await prisma.quotation.findUnique({ where: { id: req.params.id } });
+  if (!quotation || !quotationInScope(req, quotation)) return next(new AppError("Quotation not found", 404));
+  if (quotation.status !== "sent") {
+    return next(new AppError(`Only a sent quotation can be given to the customer (this one is ${quotation.status})`, 409));
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.quotation.update({
+      where: { id: quotation.id },
+      data: {
+        sharedVia: req.body.channel,
+        sharedById: req.user.id,
+        sharedAt: new Date(),
+        shareNote: req.body.note ?? null,
+      },
+      include: { chargeLines: { orderBy: { sortOrder: "asc" } } },
+    });
+    await emitEvent(tx, "quotation.shared", {
+      quotationId: u.id, referenceNo: u.referenceNo, queryId: u.queryId, channel: req.body.channel,
+    });
+    return u;
+  });
+
+  const [hydrated] = await hydrate([updated]);
+  res.json({ success: true, message: "Recorded — quote given to the customer", data: hydrated });
+});
+
 /* ── POST /api/quotations/:id/approve ── THE PIVOT (RULE-QT-07, WORKFLOW §9) */
 export const approveQuotation = catchAsync(async (req, res, next) => {
   const quotation = await prisma.quotation.findUnique({
@@ -261,6 +296,14 @@ export const approveQuotation = catchAsync(async (req, res, next) => {
     // A portal customer may only approve their own (scope C).
     if (req.user.customerId !== customer.id) {
       return next(new AppError("Quotation not found", 404));
+    }
+  } else if (hasRole(req.user, "web_manager") && quotation.query.raisedVia === "portal") {
+    // The web_manager owns the WEBSITE channel: portal-raised quotes are theirs to
+    // decide even when they ALSO hold bdo (which alone is limited to raised-by-me).
+    // Checked before the bdo branch so the channel authority wins for a dual-role
+    // user. Standard four-eyes still applies: never on a customer they own.
+    if (req.user.id === customer.assignedBdoId) {
+      return next(new AppError("The owning BDO cannot approve their own quotation (RULE-QT-03)", 403));
     }
   } else if (hasRole(req.user, "bdo") && !hasRole(req.user, "asm") && !isManagement(req.user)) {
     // A BDO may approve on the customer's behalf (verbal acceptance on a call),
@@ -382,9 +425,6 @@ export const reviseQuotation = catchAsync(async (req, res, next) => {
         parentQuotationId: parent.id,
         status: "draft",
         services: parent.services,
-        servicePackage: parent.servicePackage,
-        croHandledBy: parent.croHandledBy,
-        lcHandledBy: parent.lcHandledBy,
         currency: parent.currency,
         fxRate: parent.fxRate ?? undefined,
         totalAmount: parent.totalAmount,

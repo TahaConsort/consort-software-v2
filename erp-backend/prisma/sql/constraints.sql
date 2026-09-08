@@ -17,7 +17,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS quotations_one_live_uq
 CREATE UNIQUE INDEX IF NOT EXISTS quotations_one_approved_uq
   ON quotations (query_id) WHERE status = 'approved';
 
--- RULE-QRY-05 / INV-14 — services can never be empty
+-- RULE-QRY-05 / INV-14 — services can never be empty (now a free-text text[])
 DO $$ BEGIN
   ALTER TABLE queries ADD CONSTRAINT queries_services_nonempty CHECK (cardinality(services) > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -28,61 +28,16 @@ DO $$ BEGIN
   ALTER TABLE shipments ADD CONSTRAINT shipments_services_nonempty CHECK (cardinality(services) > 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- Package ↔ CRO-mode consistency. Only loading_point_to_port and international have a
--- Container Release Order in play: local_transport has no container, and
--- port_to_consignee has one the line already released (the customer's delivery order
--- stands in for the CRO). Those two must be not_applicable; the export packages must
--- not be. A NULL service_package is a pre-package row and is exempt.
---
--- DROP-then-ADD rather than the ADD/EXCEPTION idiom used elsewhere in this file: these
--- definitions have CHANGED, and a bare ADD would swallow duplicate_object and silently
--- leave the OLD predicate in place — which rejects every port_to_consignee row.
--- Mirrors allowedCroModes() in utils/servicePackage.js; keep the two in step.
-ALTER TABLE queries DROP CONSTRAINT IF EXISTS queries_cro_mode_valid;
-ALTER TABLE queries ADD CONSTRAINT queries_cro_mode_valid CHECK (
-  service_package IS NULL
-  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
-  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
-);
+-- Package / CRO-mode / LC-mode consistency: REMOVED. The service_package, cro_handled_by
+-- and lc_handled_by columns no longer exist, so these six CHECKs have nothing to guard.
+-- Postgres drops a CHECK automatically with the column it references, but the explicit
+-- DROPs below make an already-migrated database converge whichever order it got there.
+ALTER TABLE queries    DROP CONSTRAINT IF EXISTS queries_cro_mode_valid;
 ALTER TABLE quotations DROP CONSTRAINT IF EXISTS quotations_cro_mode_valid;
-ALTER TABLE quotations ADD CONSTRAINT quotations_cro_mode_valid CHECK (
-  service_package IS NULL
-  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
-  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
-);
-ALTER TABLE shipments DROP CONSTRAINT IF EXISTS shipments_cro_mode_valid;
-ALTER TABLE shipments ADD CONSTRAINT shipments_cro_mode_valid CHECK (
-  service_package IS NULL
-  OR (service_package IN ('local_transport', 'port_to_consignee') AND cro_handled_by = 'not_applicable')
-  OR (service_package NOT IN ('local_transport', 'port_to_consignee') AND cro_handled_by <> 'not_applicable')
-);
-
--- Package ↔ LC-mode consistency (ADR-050). Only the export packages can trade under a
--- Letter of Credit; unlike the CRO, both may also run WITHOUT one (not_applicable =
--- "no-LC trade"), so the export side is unconstrained. A NULL service_package is a
--- pre-package row and is exempt. Mirrors allowedLcModes() in utils/servicePackage.js;
--- keep the two in step. ADD/EXCEPTION idiom: this definition has never changed.
-DO $$ BEGIN
-  ALTER TABLE queries ADD CONSTRAINT queries_lc_mode_valid CHECK (
-    service_package IS NULL
-    OR service_package NOT IN ('local_transport', 'port_to_consignee')
-    OR lc_handled_by = 'not_applicable'
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE quotations ADD CONSTRAINT quotations_lc_mode_valid CHECK (
-    service_package IS NULL
-    OR service_package NOT IN ('local_transport', 'port_to_consignee')
-    OR lc_handled_by = 'not_applicable'
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
-DO $$ BEGIN
-  ALTER TABLE shipments ADD CONSTRAINT shipments_lc_mode_valid CHECK (
-    service_package IS NULL
-    OR service_package NOT IN ('local_transport', 'port_to_consignee')
-    OR lc_handled_by = 'not_applicable'
-  );
-EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+ALTER TABLE shipments  DROP CONSTRAINT IF EXISTS shipments_cro_mode_valid;
+ALTER TABLE queries    DROP CONSTRAINT IF EXISTS queries_lc_mode_valid;
+ALTER TABLE quotations DROP CONSTRAINT IF EXISTS quotations_lc_mode_valid;
+ALTER TABLE shipments  DROP CONSTRAINT IF EXISTS shipments_lc_mode_valid;
 
 -- Outreach / Visit Plans target exactly one of lead, customer
 DO $$ BEGIN
@@ -139,4 +94,40 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE otd_step_templates ADD CONSTRAINT otd_step_templates_code_format
     CHECK (step_code ~ '^[a-z][a-z0-9_]{1,49}$');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- Export Shipment Workflow roadmap §2/§7 — a shipment party points at exactly one
+-- party record: a `vendors` row (the party directory, which carries NTN/REX/IBAN) or a
+-- CRM `customers` row acting as a party on its own shipment. Same idiom as
+-- outreach_one_target above. Two DIFFERENT companies may share a role (the Ahmad Saeed
+-- B/L carries two notify parties); the same company twice in one role is blocked by the
+-- partial unique indexes Prisma generates from @@unique.
+DO $$ BEGIN
+  ALTER TABLE shipment_parties ADD CONSTRAINT shipment_parties_one_target
+    CHECK (num_nonnulls(vendor_id, customer_id) = 1);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── Export trade documents (roadmap §4) ──────────────────────────────────────
+-- Money on a trade document is never negative, and an instrument can never be drawn
+-- past its own value — the drawdown ledger is what Step 8 closes against.
+DO $$ BEGIN
+  ALTER TABLE financial_instruments ADD CONSTRAINT financial_instruments_value_positive CHECK (value > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE financial_instruments ADD CONSTRAINT financial_instruments_drawn_nonneg CHECK (drawn_amount >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- "60% CAD / 40% DA" must not add up to more than the instrument.
+DO $$ BEGIN
+  ALTER TABLE financial_instruments ADD CONSTRAINT financial_instruments_split_valid
+    CHECK (COALESCE(cad_percent, 0) + COALESCE(da_percent, 0) <= 100);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE financial_instrument_drawdowns ADD CONSTRAINT fi_drawdowns_amount_positive CHECK (amount > 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE trade_invoice_lines ADD CONSTRAINT trade_invoice_lines_amount_nonneg CHECK (amount >= 0);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN
+  ALTER TABLE packing_list_items ADD CONSTRAINT packing_list_items_counts_nonneg
+    CHECK (COALESCE(boxes, 0) >= 0 AND COALESCE(pieces, 0) >= 0);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;

@@ -5,8 +5,8 @@ import { TOPICS } from "@/lib/topics";
 /**
  * Query store (CRM_MASTER §5.6) — the Ops intake queue, with a status filter.
  *
- * Queries are born in three places besides this screen — inquiry conversion, LC-referral
- * conversion, and the customer portal — and none of them could reach this list before,
+ * Queries are born in two places besides this screen — LC-referral conversion and the
+ * customer portal/storefront — and neither could reach this list before,
  * so new work simply did not appear until someone reloaded. They all publish `queries`
  * now, and so does quotation approval, which moves a query to `quoted`/`won`.
  */
@@ -15,10 +15,10 @@ export const useQueryStore = createResourceStore({
   topics: [TOPICS.QUERIES],
 
   state: { queries: [] },
-  filters: { status: "" },
+  filters: { status: "", channel: "" }, // channel: bdo | bank_lc | website (tabs)
 
   load: async ({ filters }) => {
-    const res = await queryService.listQueries(filters.status || undefined);
+    const res = await queryService.listQueries({ status: filters.status, channel: filters.channel });
     return { queries: res.data ?? [] };
   },
 
@@ -33,6 +33,12 @@ export const useQueryStore = createResourceStore({
     updateQuery: (id, payload) =>
       mutate(() => queryService.updateQuery(id, payload), {
         invalidates: [TOPICS.QUERIES, TOPICS.DASHBOARD],
+      }),
+
+    // Claiming assigns the customer, so the Customers screen moves too.
+    claimQuery: (id) =>
+      mutate(() => queryService.claimQuery(id), {
+        invalidates: [TOPICS.QUERIES, TOPICS.CUSTOMERS],
       }),
 
     cancelQuery: (id, reason) =>

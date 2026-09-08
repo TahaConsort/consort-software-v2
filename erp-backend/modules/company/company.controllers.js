@@ -127,11 +127,16 @@ export const updateContact = catchAsync(async (req, res, next) => {
 
 /* ─────────────────────────── Customers ─────────────────────────── */
 
-const serializeCustomer = (customer, company, bdoUser, portalUsers = []) => ({
+const serializeCustomer = (customer, company, bdoUser, portalUsers = [], primaryContact = null) => ({
   id: customer.id,
   referenceNo: customer.referenceNo,
   companyId: customer.companyId,
   companyName: company?.name ?? "—",
+  // The person to call. Carried on the list so a picker can prefill a form with it
+  // rather than making the user look the customer up separately.
+  primaryContactName: primaryContact?.name ?? null,
+  primaryContactEmail: primaryContact?.email ?? null,
+  primaryContactPhone: primaryContact?.phone ?? null,
   source: customer.source,
   assignedBdoId: customer.assignedBdoId,
   assignedBdoName: bdoUser?.employee
@@ -149,7 +154,7 @@ export const listCustomers = catchAsync(async (req, res) => {
   const customers = await prisma.customer.findMany({ orderBy: { createdAt: "desc" } });
 
   // Lead/Customer FKs are scalars (DATABASE §4) — join manually.
-  const [companies, bdos, portalUsers] = await Promise.all([
+  const [companies, bdos, portalUsers, primaryContacts] = await Promise.all([
     prisma.company.findMany({ where: { id: { in: customers.map((c) => c.companyId) } } }),
     prisma.user.findMany({
       where: { id: { in: customers.map((c) => c.assignedBdoId).filter(Boolean) } },
@@ -159,10 +164,15 @@ export const listCustomers = catchAsync(async (req, res) => {
       where: { customerId: { in: customers.map((c) => c.id) } },
       select: { id: true, email: true, passwordHash: true, customerId: true },
     }),
+    prisma.contact.findMany({
+      where: { companyId: { in: customers.map((c) => c.companyId) }, isPrimary: true },
+      select: { companyId: true, name: true, email: true, phone: true },
+    }),
   ]);
 
   const companyById = new Map(companies.map((c) => [c.id, c]));
   const bdoById = new Map(bdos.map((u) => [u.id, u]));
+  const contactByCompany = new Map(primaryContacts.map((c) => [c.companyId, c]));
 
   res.json({
     success: true,
@@ -172,6 +182,7 @@ export const listCustomers = catchAsync(async (req, res) => {
         companyById.get(c.companyId),
         bdoById.get(c.assignedBdoId),
         portalUsers.filter((u) => u.customerId === c.id),
+        contactByCompany.get(c.companyId) ?? null,
       ),
     ),
   });

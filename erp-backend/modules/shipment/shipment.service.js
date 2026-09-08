@@ -9,7 +9,6 @@ import {
   isPermittedOutOfOrder,
   OTC_MILESTONES,
 } from "../../utils/composition.js";
-import { inferPackageFromServices, resolveCroMode, resolveLcMode } from "../../utils/servicePackage.js";
 import { buildDocumentFileName, missingRequiredDocs } from "../document/document.service.js";
 import { docTypeLabel } from "../document/document.validation.js";
 import { renderQuotationPdf } from "../../utils/quotationPdf.js";
@@ -54,25 +53,16 @@ const audit = (tx, { actorId, action, resourceType, resourceId, diff, correlatio
  */
 export const createShipmentFromApproval = async (tx, { quotation, query, customer, actorId, approvalChannel }) => {
   const correlationId = crypto.randomUUID();
-  // All three are FROZEN onto the shipment below (INV-14) — the path is composed once,
-  // here, and never recomposed, even if the query is later edited.
-  //
-  // A quotation SENT before service packages shipped has no package of its own, so
-  // infer one from its service snapshot rather than compose a half-path.
+  // The service set is FROZEN onto the shipment below (INV-14). The path is composed
+  // once, here, and never recomposed, even if the query is later edited.
   const services = quotation.services;
-  const servicePackage = quotation.servicePackage ?? inferPackageFromServices(services);
-  const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: quotation.croHandledBy });
-  // A quotation sent before ADR-050 has lcHandledBy at its column default; the resolver
-  // reads `lc_finance` in its frozen services as "Consort runs the LC" so the label
-  // matches the steps that compose.
-  const lcHandledBy = resolveLcMode({ servicePackage, lcHandledBy: quotation.lcHandledBy, services });
 
   // Compose the OTD path from the seeded templates (single source — ADR-001).
   const templates = await tx.otdStepTemplate.findMany();
   if (templates.length === 0) {
     throw new Error("OTD step templates are not seeded — run `node prisma/seed.js` before approving quotes.");
   }
-  const path = composeOtdPath(templates, { services, servicePackage, croHandledBy, lcHandledBy });
+  const path = composeOtdPath(templates);
 
   // quotation → approved (RULE-QT-07); query → shipment_created.
   await tx.quotation.update({
@@ -96,26 +86,11 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       queryId: query.id,
       customerId: customer.id,
       services,
-      servicePackage,
-      croHandledBy,
-      lcHandledBy,
       status: "booking",
-      originPort: query.originPort ?? null,
-      destinationPort: query.destinationPort ?? null,
+      // The only route detail a query still carries. Ports, contacts, inland mode and
+      // the import detention terms start null and are set on the shipment itself.
       pickupAddress: query.pickupAddress ?? null,
-      deliveryAddress: query.deliveryAddress ?? null,
-      senderName: query.senderName ?? null,
-      senderPhone: query.senderPhone ?? null,
-      senderAddress: query.senderAddress ?? null,
-      receiverName: query.receiverName ?? null,
-      receiverPhone: query.receiverPhone ?? null,
-      receiverAddress: query.receiverAddress ?? null,
-      inlandMode: query.inlandMode ?? "truck",
-      originRailTerminal: query.originRailTerminal ?? null,
-      destinationRailTerminal: query.destinationRailTerminal ?? null,
-      freeDays: query.freeDays ?? null,
-      emptyReturnLocation: query.emptyReturnLocation ?? null,
-      incoterm: query.incoterm ?? null,
+      deliveryAddress: query.destinationAddress ?? null,
     },
   });
 
@@ -136,7 +111,7 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
   const stepRows = await tx.otdStep.findMany({ where: { shipmentId: shipment.id }, select: { id: true, stepCode: true } });
   const actionTemplates = await tx.otdStepActionTemplate.findMany();
   const actionData = stepRows.flatMap((row) =>
-    composeStepActions(actionTemplates, row.stepCode, { services, servicePackage, croHandledBy, lcHandledBy })
+    composeStepActions(actionTemplates, row.stepCode)
       .map((a) => ({ otdStepId: row.id, ...a })),
   );
   if (actionData.length) await tx.otdStepAction.createMany({ data: actionData });
@@ -607,3 +582,110 @@ export const assertPayableWritable = (shipment, action = "record vendor costs") 
 };
 
 export { emitEvent as emitShipmentEvent, audit as auditShipment };
+
+/**
+ * Create a shipment from a Trade Contract instead of an approved quotation
+ * (Export Shipment Workflow roadmap Step 1).
+ *
+ * This is the deliberate exception to INV-03. The roadmap cycle starts at the BRD /
+ * contract and the bank registration, both of which exist before anybody quotes
+ * anything, so a trade shipment has no quotation to originate from. Everything else is
+ * identical to the quotation path: the OTD path is composed from the same templates,
+ * the same five OTC milestones are seeded, the same chat channel is opened.
+ *
+ * What it deliberately does NOT do is auto-draft a receivable. On a trade shipment the
+ * receivable is drafted when the SALE commercial invoice is issued (§4.4), because that
+ * is the document the customer is actually billed against.
+ */
+export const createTradeShipmentTx = async (tx, { contract, financialInstrument, customer, body, actorId }) => {
+  const correlationId = crypto.randomUUID();
+  const services = body.services;
+
+  const templates = await tx.otdStepTemplate.findMany();
+  if (templates.length === 0) {
+    throw new AppError("OTD step templates are not seeded — the composition catalog is empty", 500);
+  }
+  const path = composeOtdPath(templates);
+  if (path.length === 0) {
+    throw new AppError("The workflow catalog composes no steps — every step template is inactive", 422);
+  }
+
+  const referenceNo = await allocateRef(tx, "shipment");
+  const shipment = await tx.shipment.create({
+    data: {
+      referenceNo,
+      kind: "trade",
+      direction: body.direction ?? contract.direction ?? "export",
+      contractId: contract.id,
+      financialInstrumentId: financialInstrument?.id ?? null,
+      customerId: customer.id,
+      services,
+      status: "booking",
+      originPort: body.originPort ?? null,
+      destinationPort: body.destinationPort ?? financialInstrument?.portOfDischarge ?? null,
+      incoterm: body.incoterm ?? financialInstrument?.incoterm ?? contract.incoterm ?? null,
+      etd: body.etd ?? null,
+      eta: body.eta ?? null,
+    },
+  });
+
+  await tx.otdStep.createMany({
+    data: path.map((s) => ({
+      shipmentId: shipment.id,
+      canonicalNo: s.canonicalNo,
+      displayNo: s.displayNo,
+      stepCode: s.stepCode,
+      ownerDepartment: s.ownerDepartment,
+    })),
+  });
+
+  const stepRows = await tx.otdStep.findMany({ where: { shipmentId: shipment.id }, select: { id: true, stepCode: true } });
+  const actionTemplates = await tx.otdStepActionTemplate.findMany();
+  const actionData = stepRows.flatMap((row) =>
+    composeStepActions(actionTemplates, row.stepCode)
+      .map((a) => ({ otdStepId: row.id, ...a })),
+  );
+  if (actionData.length) await tx.otdStepAction.createMany({ data: actionData });
+
+  await tx.otcMilestone.createMany({
+    data: OTC_MILESTONES.map((m) => ({ shipmentId: shipment.id, ...m })),
+  });
+
+  const channel = await tx.chatChannel.create({
+    data: { type: "shipment", shipmentId: shipment.id, name: `Shipment ${referenceNo}` },
+  });
+  const depts = await tx.department.findMany({ where: { code: { in: departmentsOnPath(path) } } });
+  const memberIds = new Set([...depts.map((d) => d.headUserId), customer.assignedBdoId, actorId].filter(Boolean));
+  for (const userId of memberIds) {
+    await tx.chatChannelMember.create({ data: { channelId: channel.id, userId } });
+  }
+
+  // Seed the party list from what the contract and the instrument already name, so the
+  // desk starts with the vendor, the bank and the buyer filled in rather than blank
+  // (roadmap §2/§3). Roles are per shipment from this point on.
+  const partyRows = [
+    { role: "vendor", vendorId: contract.vendorId },
+    { role: "customer", customerId: customer.id },
+  ];
+  if (financialInstrument) {
+    partyRows.push({ role: "bank", vendorId: financialInstrument.bankVendorId });
+    if (financialInstrument.buyerVendorId) partyRows.push({ role: "buyer", vendorId: financialInstrument.buyerVendorId });
+  }
+  for (const p of partyRows) {
+    await tx.shipmentParty.create({
+      data: { shipmentId: shipment.id, role: p.role, vendorId: p.vendorId ?? null, customerId: p.customerId ?? null },
+    });
+  }
+
+  await audit(tx, {
+    actorId,
+    action: "shipment.created_from_contract",
+    resourceType: "shipment",
+    resourceId: shipment.id,
+    diff: { referenceNo, contractId: contract.id, financialInstrumentId: financialInstrument?.id ?? null, services },
+    correlationId,
+  });
+  await emitEvent(tx, "shipment.created", { shipmentId: shipment.id, referenceNo, kind: "trade" }, correlationId);
+
+  return { shipment, stepCount: path.length };
+};

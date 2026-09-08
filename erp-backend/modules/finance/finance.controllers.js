@@ -6,6 +6,7 @@ import { allocateRef } from "../../utils/referenceNumber.js";
 import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 import { invoiceInScope } from "./finance.middleware.js";
 import { completeMilestoneTx, maybeSettleTx, invoiceStateTx } from "../otc/otc.service.js";
+import { recomputeTradeStage, recalcFiDrawn } from "../trade/trade.service.js";
 import { assertShipmentUnlocked, assertPayableWritable } from "../shipment/shipment.service.js";
 
 // Receivable writes lock on settled; payable writes stay open until closed/cancelled.
@@ -26,6 +27,7 @@ const emitEvent = (tx, eventType, payload) =>
 /* ── POST /api/finance/invoices ── (manual invoice from a step — payable/receivable) */
 export const createInvoice = catchAsync(async (req, res, next) => {
   const { shipmentId, kind, otdStepId, vendorId, counterparty, currency, dueDate, lines } = req.body;
+  const { billOfLadingId, goodsDeclarationId, financialInstrumentId, containerId } = req.body;
 
   const shipment = await prisma.shipment.findUnique({ where: { id: shipmentId } });
   if (!shipment) return next(new AppError("Shipment not found", 404));
@@ -52,15 +54,25 @@ export const createInvoice = catchAsync(async (req, res, next) => {
   const priced = lines.map((l, i) => {
     const quantity = Number(l.quantity ?? 1);
     const unitPrice = Number(l.unitPrice);
+    const amount = Math.round(quantity * unitPrice * 100) / 100;
+    // Tax is derived from the rate, never accepted as an amount — the same rule the
+    // line total already follows (roadmap §4.7, the QICT invoice).
+    const taxPercent = l.taxPercent == null ? null : Number(l.taxPercent);
     return {
       description: l.description,
       quantity,
       unitPrice,
-      amount: Math.round(quantity * unitPrice * 100) / 100,
+      amount,
+      chargeCode: l.chargeCode ?? null,
+      taxPercent,
+      taxAmount: taxPercent == null ? null : Math.round(amount * taxPercent) / 100,
       sortOrder: l.sortOrder ?? i,
     };
   });
-  const totalAmount = Math.round(priced.reduce((s, l) => s + l.amount, 0) * 100) / 100;
+  const netTotal = Math.round(priced.reduce((s, l) => s + l.amount, 0) * 100) / 100;
+  const taxTotal = Math.round(priced.reduce((s, l) => s + Number(l.taxAmount ?? 0), 0) * 100) / 100;
+  // The invoice total is what the vendor actually bills — net plus tax.
+  const totalAmount = Math.round((netTotal + taxTotal) * 100) / 100;
 
   const created = await prisma.$transaction(async (tx) => {
     const referenceNo = await allocateRef(tx, "invoice");
@@ -76,6 +88,11 @@ export const createInvoice = catchAsync(async (req, res, next) => {
         status: "draft",
         currency: currency ?? DEFAULT_CURRENCY,
         totalAmount,
+        taxTotal: taxTotal || null,
+        billOfLadingId: billOfLadingId ?? null,
+        goodsDeclarationId: goodsDeclarationId ?? null,
+        financialInstrumentId: financialInstrumentId ?? null,
+        containerId: containerId ?? null,
         dueDate: dueDate ?? null,
         lines: { create: priced },
       },
@@ -220,7 +237,32 @@ export const recordPayment = catchAsync(async (req, res, next) => {
       if (ledgerClear) await completeMilestoneTx(tx, invoice.shipmentId, "payment_received", req.user.id);
       shipmentStatus = await maybeSettleTx(tx, invoice.shipmentId, req.user.id);
       await emitEvent(tx, "payment.received", { invoiceId: invoice.id, shipmentId: invoice.shipmentId });
+
+      // Roadmap Step 7 — money realised against a receivable that names a Financial
+      // Instrument draws that instrument down, which is what eventually lets Step 8
+      // close it. The drawdown ledger is the source; `drawnAmount` only mirrors it.
+      if (invoice.financialInstrumentId) {
+        await tx.financialInstrumentDrawdown.create({
+          data: {
+            financialInstrumentId: invoice.financialInstrumentId,
+            shipmentId: invoice.shipmentId,
+            amount: invoice.totalAmount,
+            realisedAt: req.body.receivedAt ?? new Date(),
+            notes: `Realised against invoice ${invoice.referenceNo}`,
+            recordedById: req.user.id,
+          },
+        });
+        await recalcFiDrawn(tx, invoice.financialInstrumentId);
+        await emitEvent(tx, "fi.drawdown.recorded", {
+          financialInstrumentId: invoice.financialInstrumentId,
+          shipmentId: invoice.shipmentId,
+          amount: invoice.totalAmount,
+        });
+      }
     }
+    // Whatever the kind, the payment may have moved the trade stage: a paid payable
+    // can complete `logistics_settled`, a paid receivable `payment_realised`.
+    await recomputeTradeStage(tx, invoice.shipmentId, req.user.id);
     return { invoice: u, ledgerClear, shipmentStatus };
   });
 

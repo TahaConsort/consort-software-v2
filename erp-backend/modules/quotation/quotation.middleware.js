@@ -7,8 +7,11 @@ import { teamUserIds } from "../lead/lead.middleware.js";
  *   Ops (mgr/exec)  draft/revise/send + read (dept D → all quotations)
  *   Management      read + approve/reject (A)
  *   ASM             read + approve/reject on the customer's behalf (team T)
- *   BDO             read + approve/reject on the customer's behalf, but ONLY for
- *                   queries they raised (scope O — product decision 2026-07)
+ *   BDO             read + share for queries they raised OR customers assigned to
+ *                   them (form/LC customers included); approve/reject stays ONLY
+ *                   for queries they raised (product decision 2026-07)
+ *   Web manager     read + share + approve/reject for the WEBSITE channel only
+ *                   (queries with raisedVia = portal)
  *   Customer        read + approve/reject own (C)
  *
  * Scope resolves to req.quotationScope:
@@ -23,6 +26,7 @@ export const requireQuotationAccess = requireRole(
   "gm",
   "asm",
   "bdo",
+  "web_manager",
   "ops_manager",
   "ops_exec",
   "customer",
@@ -55,10 +59,31 @@ export const attachQuotationScope = async (req, res, next) => {
       });
       req.quotationScope = { queryIds: queries.map((q) => q.id) };
     } else {
-      // bdo — only quotations for queries THEY raised (scope O). This governs
-      // both read and the approve/reject decision (quotationInScope).
+      // bdo and/or web_manager — the legs compose for a multi-role user.
+      //
+      // bdo: quotations for queries THEY raised, plus queries of customers
+      // ASSIGNED to them. The second leg is what lets a BDO give a quote to a
+      // customer who came in through the storefront form (query raised by the
+      // portal user) or a bank LC (query raised by the converting ops user) —
+      // claiming/routing assigns the CUSTOMER, not the query. Approve/reject
+      // stays raised-by-them only via the explicit guard in approveQuotation.
+      //
+      // web_manager: quotations for every WEBSITE-channel query (raisedVia =
+      // portal) — the channel is theirs by role.
+      const or = [];
+      if (hasRole(req.user, "bdo")) {
+        const mine = await prisma.customer.findMany({
+          where: { assignedBdoId: req.user.id },
+          select: { id: true },
+        });
+        or.push(
+          { raisedById: req.user.id },
+          { customerId: { in: mine.map((c) => c.id) } },
+        );
+      }
+      if (hasRole(req.user, "web_manager")) or.push({ raisedVia: "portal" });
       const queries = await prisma.query.findMany({
-        where: { raisedById: req.user.id },
+        where: { OR: or },
         select: { id: true },
       });
       req.quotationScope = { queryIds: queries.map((q) => q.id) };

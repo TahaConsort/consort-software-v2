@@ -1,9 +1,9 @@
 /**
  * One-shot backfill: give every existing shipment's steps their sub-action checklist
- * (ADR-048), composed from the shipment's FROZEN package / CRO mode / services.
+ * (ADR-048), composed from the step catalog.
  *
  * Why this is needed: `order_confirmed` moved its document pack out of the template's
- * `requiredDocTypes` and into package-gated sub-actions, so it is the sub-action rows —
+ * `requiredDocTypes` and into sub-actions, so it is the sub-action rows —
  * not the template — that now carry the RULE-SH-06 gate for that step. A shipment
  * approved before this change has no rows, and would therefore confirm an order with no
  * documents at all. This closes that window.
@@ -19,7 +19,6 @@
  */
 import prisma from "../config/prisma.js";
 import { composeStepActions } from "../utils/composition.js";
-import { inferPackageFromServices, resolveCroMode } from "../utils/servicePackage.js";
 
 const APPLY = process.argv.includes("--apply");
 
@@ -35,8 +34,6 @@ async function run() {
       id: true,
       referenceNo: true,
       services: true,
-      servicePackage: true,
-      croHandledBy: true,
       otdSteps: {
         select: { id: true, stepCode: true, status: true, completedAt: true, completedById: true },
       },
@@ -47,11 +44,6 @@ async function run() {
   let touched = 0;
 
   for (const s of shipments) {
-    // A shipment approved before packages existed still has a frozen services[] —
-    // infer from that rather than skip it, exactly as the approval path does.
-    const servicePackage = s.servicePackage ?? inferPackageFromServices(s.services);
-    const croHandledBy = resolveCroMode({ servicePackage, croHandledBy: s.croHandledBy });
-
     const existing = await prisma.otdStepAction.findMany({
       where: { otdStepId: { in: s.otdSteps.map((st) => st.id) } },
       select: { otdStepId: true, actionCode: true },
@@ -60,11 +52,7 @@ async function run() {
 
     const rows = [];
     for (const step of s.otdSteps) {
-      const composed = composeStepActions(actionTemplates, step.stepCode, {
-        services: s.services,
-        servicePackage,
-        croHandledBy,
-      });
+      const composed = composeStepActions(actionTemplates, step.stepCode);
       for (const a of composed) {
         if (have.has(`${step.id}:${a.actionCode}`)) continue;
         const alreadyDone = step.status === "done" && a.kind === "manual";
@@ -82,7 +70,7 @@ async function run() {
     touched++;
     created += rows.length;
     if (APPLY) await prisma.otdStepAction.createMany({ data: rows });
-    console.log(`${APPLY ? "✓" : "·"} ${s.referenceNo} (${servicePackage}/${croHandledBy}) — ${rows.length} sub-action(s)`);
+    console.log(`${APPLY ? "✓" : "·"} ${s.referenceNo} — ${rows.length} sub-action(s)`);
   }
 
   console.log(

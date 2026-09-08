@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { SERVICE_CODES } from "../../utils/servicePackage.js";
+import { SERVICE_CODES } from "../../utils/serviceCodes.js";
 
 /**
  * Quotation — request schemas (CRM_MASTER §5.7, RULE-QT).
@@ -40,4 +40,10 @@ export const approveQuotationSchema = z.object({
 
 export const rejectQuotationSchema = z.object({
   reason: z.string().min(3, "A rejection reason is required (RULE-QT-04)"),
+});
+
+// BDO gives the sent quote to the customer over mail/phone/WhatsApp and records how.
+export const shareQuotationSchema = z.object({
+  channel: z.enum(["email", "phone", "whatsapp", "in_person"]),
+  note: z.string().max(500).optional(),
 });

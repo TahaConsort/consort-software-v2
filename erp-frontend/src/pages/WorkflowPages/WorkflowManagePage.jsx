@@ -56,16 +56,12 @@ const ChipToggle = ({ options, value = [], onChange, disabled = false }) => (
   </div>
 );
 
-const GateSummary = ({ step, meta }) => {
-  const chips = [];
-  if (step.always) chips.push({ text: "always", cls: "border-primary/50 text-primary" });
-  (step.packages ?? []).forEach((p) =>
-    chips.push({ text: meta?.packages.find((x) => x.code === p)?.label ?? p, cls: "" }),
-  );
-  (step.croModes ?? []).forEach((m) => chips.push({ text: `CRO: ${m}`, cls: "border-amber-400 text-amber-700 dark:text-amber-300" }));
-  (step.lcModes ?? []).forEach((m) => chips.push({ text: `LC: ${m}`, cls: "border-sky-400 text-sky-700 dark:text-sky-300" }));
-  (step.services ?? []).forEach((s) => chips.push({ text: prettyCode(s), cls: "border-violet-400 text-violet-700 dark:text-violet-300" }));
-  if (!chips.length) chips.push({ text: "every shipment", cls: "" });
+// Composition has no gates any more, so the only thing that decides whether a step
+// appears is whether it is active.
+const GateSummary = ({ step }) => {
+  const chips = step.active === false
+    ? [{ text: "inactive — never composes", cls: "border-muted-foreground/40 text-muted-foreground" }]
+    : [{ text: "every shipment", cls: "" }];
   return (
     <div className="flex flex-wrap gap-1">
       {chips.map((c, i) => (
@@ -298,8 +294,7 @@ const StepsTab = ({ meta, onMetaChanged }) => {
 
 const EMPTY_STEP = {
   stepCode: "", canonicalNo: "", title: "", hint: "", ownerDepartment: "", derivedStatus: "",
-  dueOffsetHours: "48", always: false, active: true,
-  packages: [], croModes: [], lcModes: [], services: [], requiredDocTypes: [],
+  dueOffsetHours: "48", active: true, requiredDocTypes: [],
 };
 
 const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
@@ -314,12 +309,7 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
           ownerDepartment: step.ownerDepartment,
           derivedStatus: step.derivedStatus,
           dueOffsetHours: String(step.dueOffsetHours),
-          always: step.always,
           active: step.active,
-          packages: step.packages ?? [],
-          croModes: step.croModes ?? [],
-          lcModes: step.lcModes ?? [],
-          services: step.services ?? [],
           requiredDocTypes: step.requiredDocTypes ?? [],
         }
       : EMPTY_STEP,
@@ -348,12 +338,7 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
       ownerDepartment: form.ownerDepartment,
       derivedStatus: form.derivedStatus,
       dueOffsetHours: Number(form.dueOffsetHours) || 48,
-      always: form.always,
       active: form.active,
-      packages: form.packages,
-      croModes: form.croModes,
-      lcModes: form.lcModes,
-      services: form.services,
       requiredDocTypes: form.requiredDocTypes,
     };
     onSubmit(editing ? payload : { stepCode: form.stepCode, ...payload });
@@ -430,34 +415,6 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
             </div>
           </div>
 
-          <div className="rounded-lg border p-3 space-y-3">
-            <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Gates — empty means "don't restrict"
-            </p>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Service packages</Label>
-              <ChipToggle options={meta.packages} value={form.packages} onChange={(v) => set("packages", v)} />
-            </div>
-            <div className="grid sm:grid-cols-2 gap-3">
-              <div className="space-y-1.5">
-                <Label className="text-xs">CRO modes</Label>
-                <ChipToggle options={meta.croModes} value={form.croModes} onChange={(v) => set("croModes", v)} />
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">LC modes</Label>
-                <ChipToggle options={meta.lcModes} value={form.lcModes} onChange={(v) => set("lcModes", v)} />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label className="text-xs">Services</Label>
-              <ChipToggle options={meta.services} value={form.services} onChange={(v) => set("services", v)} />
-            </div>
-            <label className="flex items-center gap-2 text-sm cursor-pointer">
-              <Checkbox checked={form.always} onCheckedChange={(v) => set("always", !!v)} />
-              Always include (on the gated packages) — don't require a service match
-            </label>
-          </div>
-
           <div className="space-y-1.5">
             <Label className="text-xs">Required documents <span className="text-muted-foreground font-normal">(block completion until attached — RULE-SH-06)</span></Label>
             <ChipToggle
@@ -491,17 +448,13 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
       docType: a.docType ?? "",
       sortOrder: String(a.sortOrder),
       required: a.required,
-      packages: a.packages ?? [],
-      croModes: a.croModes ?? [],
-      lcModes: a.lcModes ?? [],
-      services: a.services ?? [],
     })),
   );
   const setRow = (i, k, v) => setRows((p) => p.map((r, idx) => (idx === i ? { ...r, [k]: v } : r)));
   const addRow = () =>
     setRows((p) => [
       ...p,
-      { actionCode: "", title: "", kind: "manual", docType: "", sortOrder: String((p.length + 1) * 10), required: true, packages: [], croModes: [], lcModes: [], services: [] },
+      { actionCode: "", title: "", kind: "manual", docType: "", sortOrder: String((p.length + 1) * 10), required: true },
     ]);
   const removeRow = (i) => setRows((p) => p.filter((_, idx) => idx !== i));
 
@@ -524,10 +477,6 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
         docType: r.kind === "document" ? r.docType : undefined,
         sortOrder: Number(r.sortOrder) || 0,
         required: r.required,
-        packages: r.packages,
-        croModes: r.croModes,
-        lcModes: r.lcModes,
-        services: r.services,
       })),
     );
   };
@@ -600,14 +549,6 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
                   <Checkbox checked={r.required} onCheckedChange={(v) => setRow(i, "required", !!v)} />
                   Required (blocks step completion)
                 </label>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[11px] text-muted-foreground">Packages:</span>
-                  <ChipToggle options={meta.packages} value={r.packages} onChange={(v) => setRow(i, "packages", v)} />
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[11px] text-muted-foreground">LC:</span>
-                  <ChipToggle options={meta.lcModes} value={r.lcModes} onChange={(v) => setRow(i, "lcModes", v)} />
-                </div>
               </div>
             </div>
           ))}
@@ -665,8 +606,7 @@ const ValidateDialog = ({ onClose }) => {
                 <p className="font-medium text-xs uppercase tracking-wide text-muted-foreground">Broken combinations</p>
                 {badCombos.map((c, i) => (
                   <div key={i} className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 p-2 text-xs">
-                    <b>{prettyCode(c.servicePackage)}</b> · CRO {c.croHandledBy} · LC {c.lcHandledBy}
-                    {c.withDownstream ? " · +downstream" : ""} — {c.issues.join("; ")}
+                    The composed path — {c.issues.join("; ")}
                   </div>
                 ))}
               </div>
@@ -873,83 +813,28 @@ const DocTypesTab = ({ onChanged }) => {
 /* ══════════════════════════ Preview ══════════════════════════ */
 
 const PreviewTab = ({ meta }) => {
-  const [servicePackage, setServicePackage] = useState("international");
-  const [croHandledBy, setCroHandledBy] = useState("consort");
-  const [lcHandledBy, setLcHandledBy] = useState("not_applicable");
-  const [withDownstream, setWithDownstream] = useState(false);
   const [preview, setPreview] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  const pkg = meta?.packages.find((p) => p.code === servicePackage);
-  // The compose endpoint coerces invalid modes anyway; the UI mirrors allowedness.
-  const croOptions = servicePackage === "local_transport" || servicePackage === "port_to_consignee"
-    ? [{ code: "not_applicable", label: "Not applicable" }]
-    : (meta?.croModes ?? []).filter((m) => m.code !== "not_applicable");
-  const lcOptions = servicePackage === "loading_point_to_port" || servicePackage === "international"
-    ? meta?.lcModes ?? []
-    : [{ code: "not_applicable", label: "No LC" }];
-
+  // There are no selection gates any more: every shipment composes the same path, so
+  // the preview takes no inputs and is fetched once.
   useEffect(() => {
     let alive = true;
-    setLoading(true);
     serviceCatalogService
-      .composeServices({
-        servicePackage,
-        croHandledBy,
-        lcHandledBy,
-        services: withDownstream && servicePackage === "international" ? ["destination_services"] : undefined,
-      })
+      .composeServices()
       .then((res) => { if (alive) setPreview(res.data ?? null); })
       .catch(() => { if (alive) setPreview(null); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [servicePackage, croHandledBy, lcHandledBy, withDownstream]);
+  }, []);
 
   if (!meta) return <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>;
 
   return (
     <div className="space-y-4">
-      <div className="grid sm:grid-cols-4 gap-3">
-        <div className="space-y-1.5">
-          <Label>Service package</Label>
-          <Select value={servicePackage} onValueChange={(v) => { setServicePackage(v); setCroHandledBy(v === "local_transport" || v === "port_to_consignee" ? "not_applicable" : "consort"); setLcHandledBy("not_applicable"); setWithDownstream(false); }}
-            items={meta.packages.map((p) => ({ value: p.code, label: p.label }))}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {meta.packages.map((p) => <SelectItem key={p.code} value={p.code}>{p.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label>CRO</Label>
-          <Select value={croHandledBy} onValueChange={setCroHandledBy}
-            items={croOptions.map((m) => ({ value: m.code, label: m.label }))}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {croOptions.map((m) => <SelectItem key={m.code} value={m.code}>{m.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label>Letter of Credit</Label>
-          <Select value={lcHandledBy} onValueChange={setLcHandledBy}
-            items={lcOptions.map((m) => ({ value: m.code, label: m.label }))}>
-            <SelectTrigger><SelectValue /></SelectTrigger>
-            <SelectContent>
-              {lcOptions.map((m) => <SelectItem key={m.code} value={m.code}>{m.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-1.5">
-          <Label>&nbsp;</Label>
-          <label className={`flex items-center gap-2 text-sm h-9 ${servicePackage === "international" ? "cursor-pointer" : "opacity-40"}`}>
-            <Checkbox checked={withDownstream} disabled={servicePackage !== "international"} onCheckedChange={(v) => setWithDownstream(!!v)} />
-            Add downstream
-          </label>
-        </div>
-      </div>
-
-      {pkg && <p className="text-xs text-muted-foreground">{pkg.description}</p>}
+      <p className="text-xs text-muted-foreground">
+        Every shipment runs this one path — the active step templates, in canonical order.
+      </p>
 
       {loading ? (
         <div className="flex justify-center py-10 text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>
@@ -957,7 +842,7 @@ const PreviewTab = ({ meta }) => {
         <div className="rounded-xl border p-4 space-y-3">
           <div className="flex items-center gap-2 flex-wrap">
             <Eye className="w-4 h-4 text-primary" />
-            <p className="text-sm font-medium">This selection composes {preview.stepCount} steps</p>
+            <p className="text-sm font-medium">The path composes {preview.stepCount} steps</p>
             <span className="text-xs text-muted-foreground">· departments: {(preview.departments ?? []).join(", ")}</span>
           </div>
           <ol className="space-y-2">
@@ -980,7 +865,7 @@ const PreviewTab = ({ meta }) => {
           </ol>
         </div>
       ) : (
-        <p className="text-sm text-muted-foreground">Could not compose a preview for this selection.</p>
+        <p className="text-sm text-muted-foreground">Could not compose the preview.</p>
       )}
     </div>
   );

@@ -10,6 +10,7 @@ export const INTERNAL_ROLES = [
   "hr",
   "asm",
   "bdo",
+  "web_manager",
   "ops_manager",
   "ops_exec",
   "compliance_manager",
@@ -50,6 +51,8 @@ export const ROLE_LABELS = {
   hr: "HR Manager",
   asm: "Area Sales Manager",
   bdo: "Business Development Officer",
+  web_manager: "Web Manager", // owns the website query channel
+
   ops_manager: "Operations Manager",
   ops_exec: "Operations Executive",
   compliance_manager: "Compliance Manager",

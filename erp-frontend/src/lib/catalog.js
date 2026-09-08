@@ -1,6 +1,7 @@
 /**
- * The Phase-1 service catalog (ADR-041, CRM_MASTER §5.6a) — the services a
- * customer selects on a query; they later compose the shipment's OTD path.
+ * The Phase-1 service catalog (ADR-041, CRM_MASTER §5.6a). A query's `services` is free
+ * text now, so this is the SUGGESTED list the pickers offer — not a closed set. Anything
+ * not in it renders as the raw string.
  */
 export const SERVICE_LABELS = {
   local_transport: "Local Transport / Inland",
@@ -16,140 +17,16 @@ export const SERVICE_OPTIONS = Object.entries(SERVICE_LABELS).map(([value, label
 export const labelForService = (code) => SERVICE_LABELS[code] ?? code;
 
 /**
- * The three service packages a customer actually chooses. These sit ABOVE the service
- * codes above: picking a package presets the service set server-side
- * (erp-backend/utils/servicePackage.js). Customers see packages; internal users see
- * both, and can fine-tune the underlying services.
- */
-export const SERVICE_PACKAGE_LABELS = {
-  local_transport: "Local Transport",
-  loading_point_to_port: "Loading Point → Port",
-  international: "International Shipment",
-  port_to_consignee: "Port → Consignee (Import Delivery)",
-};
-
-export const SERVICE_PACKAGE_DESCRIPTIONS = {
-  local_transport:
-    "Inland trucking only — we collect from your pickup point and deliver to your delivery point.",
-  loading_point_to_port:
-    "We move your cargo from your factory or loading point to the port and hand it over at the terminal gate.",
-  international:
-    "The full export service — CRO, customs clearance, terminal handling, ocean freight, bill of lading and release.",
-  port_to_consignee:
-    "Your container has landed and been released — we collect it from the terminal, deliver it to the consignee and return the empty.",
-};
-
-// Plain-language "what you get", shown on the package cards in the portal.
-export const SERVICE_PACKAGE_INCLUDES = {
-  local_transport: ["Transporter arranged", "Loading at your site", "Delivery & proof of delivery"],
-  loading_point_to_port: [
-    "Container release order (CRO)",
-    "Empty container pickup & stuffing",
-    "Inland transit to the port",
-    "Terminal gate-in & handover",
-  ],
-  international: [
-    "Everything in Loading Point → Port",
-    "Customs declaration & inspection",
-    "Vessel booking & ocean freight",
-    "Bill of lading & telex release",
-  ],
-  port_to_consignee: [
-    "Container collected from the terminal",
-    "Delivery to the consignee's address",
-    "Proof of delivery collected",
-    "Empty container returned to the yard",
-  ],
-};
-
-export const SERVICE_PACKAGE_OPTIONS = Object.entries(SERVICE_PACKAGE_LABELS).map(([value, label]) => ({
-  value,
-  label,
-  description: SERVICE_PACKAGE_DESCRIPTIONS[value],
-  includes: SERVICE_PACKAGE_INCLUDES[value],
-}));
-
-export const labelForPackage = (code) => SERVICE_PACKAGE_LABELS[code] ?? code ?? "—";
-
-// Who obtains the CRO — the sub-option on Loading Point → Port.
-export const CRO_HANDLING_LABELS = {
-  not_applicable: "Not applicable",
-  customer: "Customer provides the CRO",
-  consort: "Consort arranges the CRO",
-};
-
-// Shorter forms for table cells and badges.
-export const CRO_HANDLING_SHORT = {
-  not_applicable: "—",
-  customer: "CRO by customer",
-  consort: "CRO by Consort",
-};
-
-export const labelForCroMode = (code) => CRO_HANDLING_LABELS[code] ?? code ?? "—";
-
-// Who manages the Letter of Credit (ADR-050) — the second sub-option on the export
-// packages, independent of the CRO. `not_applicable` doubles as "no-LC trade".
-export const LC_HANDLING_LABELS = {
-  not_applicable: "No LC",
-  customer: "Customer provides the LC",
-  consort: "Consort manages the LC",
-};
-
-// Shorter forms for table cells and badges. Unlike the CRO map, no-LC renders a word
-// rather than "—": on an export job "no LC" is a real choice, not a non-question.
-export const LC_HANDLING_SHORT = {
-  not_applicable: "No LC",
-  customer: "LC by customer",
-  consort: "LC by Consort",
-};
-
-export const labelForLcMode = (code) => LC_HANDLING_LABELS[code] ?? code ?? "—";
-
-/**
- * Which service codes each package presets. Mirrors PACKAGE_SERVICES in
- * erp-backend/utils/servicePackage.js, which is authoritative — the server always
- * re-resolves, so this copy is only for showing Ops what they're adding on top of.
- */
-export const PACKAGE_PRESET_SERVICES = {
-  local_transport: ["local_transport"],
-  loading_point_to_port: ["local_transport", "port_handling"],
-  international: ["local_transport", "port_handling", "customs_clearance", "sea_freight"],
-  port_to_consignee: ["local_transport", "port_handling"],
-};
-
-// Mirrors erp-backend/utils/servicePackage.js — which packages need port codes.
-export const packageUsesPorts = (pkg) => !!pkg && pkg !== "local_transport";
-export const packageUsesDestinationPort = (pkg) => pkg === "international";
-export const packageHasCroChoice = (pkg) => pkg === "loading_point_to_port";
-// The LC question is asked on BOTH export packages (mirrors allowedLcModes, ADR-050);
-// international additionally offers the destination-delivery add-on toggle.
-export const packageHasLcChoice = (pkg) => pkg === "loading_point_to_port" || pkg === "international";
-export const packageHasDownstreamToggle = (pkg) => pkg === "international";
-
-/**
- * Which door fields a package asks for. Import delivery is the first package to want a
- * port AND a street address — it starts at the terminal named by originPort and ends at
- * the consignee — so "uses ports" no longer implies "no addresses".
- */
-export const packageUsesPickupAddress = (pkg) => pkg === "local_transport";
-export const packageUsesDeliveryAddress = (pkg) =>
-  pkg === "local_transport" || pkg === "port_to_consignee";
-/** Free days + empty-return location: the import leg only. */
-export const packageUsesImportTerms = (pkg) => pkg === "port_to_consignee";
-
-/**
- * The route line for a query or shipment — which pair of endpoints actually describes
- * the movement. Local transport runs address → address, import delivery runs
- * port → address, and the export packages run port → port (or port → nothing, for a job
- * that ends at the terminal gate).
+ * The route line for a query or shipment: pickup → destination. A query records two
+ * free-text addresses now — the service packages, ports and CRO/LC handling modes that
+ * used to decide which pair of endpoints to print are gone.
  *
- * One helper because the "is it local?" ternary was copy-pasted across five call sites,
- * and every one of them printed a blank route the moment a fourth package existed.
+ * Shipments still carry ports, so those win when present and addresses are the fallback.
  */
 export const routeOf = (row) => {
   if (!row) return "";
-  const from = packageUsesPickupAddress(row.servicePackage) ? row.pickupAddress : row.originPort;
-  const to = packageUsesDeliveryAddress(row.servicePackage) ? row.deliveryAddress : row.destinationPort;
+  const from = row.pickupAddress || row.originPort;
+  const to = row.destinationAddress || row.deliveryAddress || row.destinationPort;
   return [from, to].filter(Boolean).join(" → ");
 };
 
@@ -177,6 +54,23 @@ export const QUOTATION_STATUS_LABELS = {
   approved: "Approved",
   rejected: "Rejected",
   expired: "Expired",
+};
+
+// The three query intake channels (tabs on the Queries screen) and the
+// Query.raisedVia value behind each bucket.
+export const QUERY_CHANNEL_LABELS = {
+  bdo: "BDO",
+  bank_lc: "Bank LC",
+  website: "Website",
+};
+export const RAISED_VIA_TO_CHANNEL = { bdo: "bdo", bank_lc: "bank_lc", portal: "website" };
+
+// How the BDO gave a sent quote to the customer (Quotation.sharedVia).
+export const QUOTE_SHARE_CHANNEL_LABELS = {
+  email: "Email",
+  phone: "Phone",
+  whatsapp: "WhatsApp",
+  in_person: "In person",
 };
 
 // The derived shipment statuses — a shorter service path only ever reaches its
@@ -394,3 +288,142 @@ export const VEHICLE_KIND_LABELS = {
 };
 
 export const VEHICLE_KIND_OPTIONS = Object.entries(VEHICLE_KIND_LABELS).map(([value, label]) => ({ value, label }));
+
+// ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§3/§7) ──────
+// Mirrors PARTY_ROLE_LABELS / PARTY_ROLE_VENDOR_TYPES in
+// erp-backend/utils/partyRoles.js; keep the two in step.
+//
+// The roadmap's rule: a party's details are stored once on the party record, the ROLE
+// is per shipment. `Vendor.type` is only a default hint — it orders the picker and is
+// never a constraint, which is what lets the same company be a Vendor on one job and
+// the Freight Forwarder on the next.
+
+export const PARTY_ROLE_LABELS = {
+  customer: "Customer",
+  manufacturer: "Manufacturer (One-Window Provider)",
+  vendor: "Vendor (Goods Supplier)",
+  exporter: "Exporter / Shipper (on documents)",
+  buyer: "Buyer / Consignee (on documents)",
+  notify_party: "Notify Party",
+  bank: "Bank (Financial Instrument)",
+  ocean_carrier: "Ocean Carrier",
+  carrier_agent: "Carrier's Agent",
+  freight_forwarder: "Freight Forwarder",
+  port_terminal: "Port / Container Terminal",
+  clearing_agent: "Customs Clearing Agent",
+  destination_agent: "Destination Agent",
+  transporter: "Transporter",
+  other: "Other",
+};
+
+export const PARTY_ROLE_OPTIONS = Object.entries(PARTY_ROLE_LABELS).map(([value, label]) => ({ value, label }));
+
+export const labelForPartyRole = (code) => PARTY_ROLE_LABELS[code] ?? code ?? "—";
+
+/** Which vendor types to list first for a role. A suggestion, never a filter. */
+export const PARTY_ROLE_VENDOR_TYPES = {
+  customer: ["buyer"],
+  manufacturer: ["other", "exporter"],
+  vendor: ["exporter", "other"],
+  exporter: ["exporter"],
+  buyer: ["buyer"],
+  notify_party: ["buyer", "other"],
+  bank: ["bank"],
+  ocean_carrier: ["ocean_carrier", "shipping_line"],
+  carrier_agent: ["shipping_line", "destination_agent"],
+  freight_forwarder: ["freight_forwarder"],
+  port_terminal: ["port_terminal", "container_yard"],
+  clearing_agent: ["customs_agent"],
+  destination_agent: ["destination_agent"],
+  transporter: ["transporter", "rail_operator"],
+  other: [],
+};
+
+// ── Shipment kind & direction (roadmap §1, Examples 1 & 2) ────────────────────
+// How the shipment was born, and which way the goods move. Both are per-shipment:
+// Consort is Manufacturer on the Zanitex export and Freight Forwarder on the Chenab
+// import, so neither can be inferred from any party record.
+
+export const SHIPMENT_KIND_LABELS = {
+  forwarding: "Freight Forwarding",
+  trade: "Trade (One-Window)",
+};
+
+export const SHIPMENT_DIRECTION_LABELS = {
+  export: "Export",
+  import: "Import",
+};
+
+export const labelForShipmentKind = (code) => SHIPMENT_KIND_LABELS[code] ?? code ?? "—";
+export const labelForDirection = (code) => SHIPMENT_DIRECTION_LABELS[code] ?? code ?? "—";
+
+// ── Export trade documents (roadmap §4/§7.1) ──────────────────────────────────
+// The roadmap workflow states. DERIVED server-side from which documents exist, so the
+// UI only ever renders them — there is no control anywhere that sets a stage.
+
+export const TRADE_STAGE_LABELS = {
+  none: "Not a trade shipment",
+  contract_registered: "Contract Registered",
+  fi_active: "Financial Instrument Active",
+  packing_list_confirmed: "Packing List Confirmed",
+  commercial_invoice_raised: "Commercial Invoice Raised",
+  booking_confirmed: "Booking Confirmed / GD Filed",
+  shipped_on_board: "Shipped on Board (B/L Issued)",
+  logistics_settled: "Logistics Invoices Settled",
+  payment_realised: "Payment Realised (CAD/DA)",
+  fi_closed: "Financial Instrument Closed",
+};
+
+/** Rendering order for the progress bar — `none` is deliberately not a rung. */
+export const TRADE_STAGE_ORDER = [
+  "contract_registered",
+  "fi_active",
+  "packing_list_confirmed",
+  "commercial_invoice_raised",
+  "booking_confirmed",
+  "shipped_on_board",
+  "logistics_settled",
+  "payment_realised",
+  "fi_closed",
+];
+
+export const labelForTradeStage = (code) => TRADE_STAGE_LABELS[code] ?? code ?? "—";
+
+export const FI_TYPE_LABELS = {
+  exp_form: "Bank EXP Registration",
+  lc: "Letter of Credit",
+  dp: "Documents against Payment (DP)",
+  da: "Documents against Acceptance (DA)",
+  advance: "Advance Payment",
+  open_account: "Open Account",
+};
+
+export const FI_STATUS_LABELS = {
+  draft: "Draft",
+  active: "Active",
+  expired: "Expired",
+  closed: "Closed",
+  cancelled: "Cancelled",
+};
+
+export const FI_STATUS_CLASS = {
+  active: "bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300",
+  expired: "bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300",
+  closed: "bg-muted text-muted-foreground border-muted-foreground/30",
+  draft: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300",
+  cancelled: "bg-muted text-muted-foreground border-muted-foreground/30 line-through",
+};
+
+export const TRADE_INVOICE_SIDE_LABELS = {
+  purchase: "Purchase — vendor bills Consort",
+  sale: "Sale — Consort bills the customer",
+};
+
+export const TRADE_CONTRACT_STATUS_LABELS = {
+  draft: "Draft",
+  active: "Active",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
+
+export const FREIGHT_TERMS_LABELS = { prepaid: "Freight Prepaid", collect: "Freight Collect" };

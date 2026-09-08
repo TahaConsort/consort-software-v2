@@ -24,12 +24,12 @@ import notificationRoutes from "./modules/notification/notification.routes.js";
 import actionRoutes from "./modules/action/action.routes.js";
 import auditRoutes from "./modules/audit/audit.routes.js";
 import storefrontRoutes from "./modules/storefront/storefront.routes.js";
-import inquiryRoutes from "./modules/inquiry/inquiry.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
 import rfqRoutes from "./modules/rfq/rfq.routes.js";
 import { driverRouter, vehicleRouter } from "./modules/fleet/fleet.routes.js";
 import workflowRoutes from "./modules/workflow/workflow.routes.js";
+import tradeRoutes from "./modules/trade/trade.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
 import { AppError } from "./utils/AppError.js";
 
@@ -115,10 +115,10 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/action-engine", actionRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/workflow", workflowRoutes); // Management-only catalog admin (ADR-051)
+app.use("/api/trade", tradeRoutes); // export trade documents (Export Shipment Workflow roadmap §4)
 
 // Intake channels & public storefront (CRM_MASTER §5.20/§5.21)
-app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calc + inquiry
-app.use("/api/inquiries", inquiryRoutes); // internal: direct-channel triage
+app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calculator
 app.use("/api/lc-referrals", lcInboxRoutes); // internal: bank-LC inbox
 
 // Unhandled route fallback

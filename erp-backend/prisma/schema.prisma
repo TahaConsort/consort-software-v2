@@ -37,6 +37,10 @@ enum UserRole {
   transport_manager
   transport_exec
   accounts
+  // Owns the WEBSITE query channel: queries raised via the storefront/portal
+  // (raisedVia = portal) that no BDO raised — reads, updates and carries their
+  // quotes, scoped to that channel only.
+  web_manager
   customer
 }
 
@@ -100,9 +104,14 @@ enum QueryStatus {
   expired
 }
 
+// The query's intake channel — the three buckets the Queries screen filters by:
+//   bdo     raised internally by sales (BDO/ASM)
+//   portal  the website channel — storefront signup / portal customer
+//   bank_lc materialized from a bank LC referral (§5.21)
 enum RaisedVia {
   bdo
   portal
+  bank_lc
 }
 
 // Revisions are new rows, not a status (ADR-019)
@@ -120,6 +129,14 @@ enum ApprovalChannel {
   management
 }
 
+// How the BDO relayed a sent quote to the customer (email, call, WhatsApp, face to face)
+enum QuoteShareChannel {
+  email
+  phone
+  whatsapp
+  in_person
+}
+
 // ADR-041 — the Phase-1 catalog, closed
 enum ServiceCode {
   local_transport
@@ -128,39 +145,6 @@ enum ServiceCode {
   port_handling
   lc_finance
   destination_services // destination agent: DO + gate pass, destination pickup, delivery, empty return
-}
-
-// The packages the business actually sells. Sits ABOVE ServiceCode: picking a
-// package presets `services[]` (utils/servicePackage.js), so everything already keyed
-// on ServiceCode — charge types, rate cards, P&L — is untouched. Needed as its own
-// dimension because `local_transport`, `loading_point_to_port` and `port_to_consignee`
-// share the `local_transport` service code yet require different step paths.
-enum ServicePackage {
-  local_transport // #1 inland trucking only — no port, no CRO, no customs, no trade-doc pack
-  loading_point_to_port // #2 factory/loading point → port gate
-  international // #3 full export path: CRO, customs, terminal, ocean freight, BL, telex
-  // #4 the IMPORT leg, sold on its own: the box is already discharged and released, so
-  // there is no CRO. The customer supplies BOL + delivery order + gate pass + free days;
-  // we pull the container off the terminal, deliver to the consignee, return the empty.
-  port_to_consignee
-}
-
-// Who obtains the Container Release Order. The sub-option on package #2; forced to
-// `consort` on #3 and `not_applicable` on #1 and #4 (CHECK in prisma/sql/constraints.sql).
-enum CroHandling {
-  not_applicable // package #1 — no container, no CRO
-  customer // customer supplies the CRO; we record their copy
-  consort // we apply to the shipping line and obtain the CRO
-}
-
-// Who manages the Letter of Credit (ADR-050). A second per-shipment sub-option beside
-// CroHandling — CRO is container release, LC is trade finance; the two vary independently.
-// Only the export packages (loading_point_to_port, international) may hold customer/consort;
-// not_applicable doubles as "no-LC trade" there (CHECK in prisma/sql/constraints.sql).
-enum LcHandling {
-  not_applicable // no LC on this trade, or a package with no LC choice
-  customer // customer runs the LC with their bank; we collect a copy
-  consort // we manage the LC end-to-end (lc_finance service is implied)
 }
 
 // Step codes are plain strings since ADR-051, so the Workflow admin panel can mint new
@@ -184,6 +168,135 @@ enum StepActionKind {
 enum OtdStepStatus {
   pending
   done
+}
+
+// ── Trade shipments (Export Shipment Workflow roadmap §1, §7) ─────────────────
+// How a shipment was BORN. `forwarding` is the original path — from an approved
+// quotation (INV-03). `trade` is the roadmap's path: a Trade Contract plus a
+// Financial Instrument registered at the vendor's bank, both of which exist BEFORE
+// any shipment does, so a trade shipment has no quotation to originate from.
+enum ShipmentKind {
+  forwarding
+  trade
+
+  @@map("shipment_kind")
+}
+
+// Export vs Import is a per-SHIPMENT fact, never a property of a party (roadmap §1,
+// Examples 1 & 2: Consort is Manufacturer on the Zanitex export and Freight Forwarder
+// on the Chenab import).
+enum ShipmentDirection {
+  export
+  import
+
+  @@map("shipment_direction")
+}
+
+// The role a party plays ON ONE SHIPMENT. Deliberately NOT `VendorType`, which stays a
+// default hint on the vendor record: the same company is Exporter on one shipment and
+// Freight Forwarder on the next, and the roadmap forbids fixing it per company.
+enum PartyRole {
+  customer
+  manufacturer
+  vendor
+  exporter
+  buyer
+  notify_party
+  bank
+  ocean_carrier
+  carrier_agent
+  freight_forwarder
+  port_terminal
+  clearing_agent
+  destination_agent
+  transporter
+  other
+
+  @@map("party_role")
+}
+
+// ── Export trade documents (Export Shipment Workflow roadmap §4/§7) ───────────
+
+// The roadmap §7.1 workflow states. DERIVED from which documents exist, never
+// written by an endpoint — the same rule ADR-014 applies to ShipmentStatus.
+enum TradeStage {
+  none
+  contract_registered
+  fi_active
+  packing_list_confirmed
+  commercial_invoice_raised
+  booking_confirmed
+  shipped_on_board
+  logistics_settled
+  payment_realised
+  fi_closed
+
+  @@map("trade_stage")
+}
+
+enum TradeContractStatus {
+  draft
+  active
+  completed
+  cancelled
+
+  @@map("trade_contract_status")
+}
+
+// The roadmap sample instruments are bank EXP registrations (BIP-EXP-…), but the
+// same record shape carries an LC or a documentary collection, so the type is a
+// column rather than a separate table.
+enum FinancialInstrumentType {
+  exp_form
+  lc
+  dp
+  da
+  advance
+  open_account
+
+  @@map("financial_instrument_type")
+}
+
+enum FinancialInstrumentStatus {
+  draft
+  active
+  expired
+  closed
+  cancelled
+
+  @@map("financial_instrument_status")
+}
+
+// Which way the goods invoice points. `purchase` is the vendor billing Consort —
+// the only one present in the roadmap sample documents. `sale` is Consort billing
+// the customer, and is what makes the margin on goods computable.
+enum TradeInvoiceSide {
+  purchase
+  sale
+
+  @@map("trade_invoice_side")
+}
+
+enum TradeInvoiceStatus {
+  draft
+  issued
+  void
+
+  @@map("trade_invoice_status")
+}
+
+enum FreightTerms {
+  prepaid
+  collect
+
+  @@map("freight_terms")
+}
+
+enum BolType {
+  master
+  house
+
+  @@map("bol_type")
 }
 
 // Progressive values; DERIVED, never written by an endpoint (ADR-014, INV-02).
@@ -330,16 +443,7 @@ enum LoginOutcome {
   inactive
 }
 
-// ── Intake channels & public storefront (CRM_MASTER §5.20/§5.21) ──
-
-// Public Inquiry lifecycle (WORKFLOW §2b) — the *direct* channel intake
-enum InquiryStatus {
-  new
-  reviewing
-  converted
-  spam
-  closed
-}
+// ── Intake channel & public storefront (CRM_MASTER §5.20/§5.21) ──
 
 // Bank LC Referral lifecycle (WORKFLOW §2c) — the *bank_lc* channel intake
 enum BankLcStatus {
@@ -667,61 +771,29 @@ model VisitPlan {
 
 // ================= QUERY → QUOTATION =================
 
+// A query is a plain enquiry: who is asking, where the goods move from and to, and
+// which services they want. Everything operational (ports, packages, CRO/LC handling,
+// cargo details) was removed — the quotation and shipment carry that now.
 model Query {
-  id                String        @id @default(uuid())
-  referenceNo       String        @unique @map("reference_no") // QRY-YYYY-NNNNN
-  customerId        String        @map("customer_id")
-  raisedById        String        @map("raised_by_id") // BDO or portal user
-  raisedVia         RaisedVia     @map("raised_via")
-  status            QueryStatus   @default(open)
-  services          ServiceCode[] // RULE-QRY-05 — non-empty CHECK, DATABASE.md §5
-  servicePackage    ServicePackage? @map("service_package") // what the customer picked; presets `services`
-  croHandledBy      CroHandling     @default(not_applicable) @map("cro_handled_by") // package #2 sub-option
-  lcHandledBy       LcHandling      @default(not_applicable) @map("lc_handled_by") // ADR-050 — export-package sub-option
-  originPort        String?       @map("origin_port") // validated against ports; null for local_transport
-  destinationPort   String?       @map("destination_port")
-  // Free-text door addresses for local_transport, where a UN/LOCODE port is the wrong shape.
-  pickupAddress     String?       @map("pickup_address")
-  deliveryAddress   String?       @map("delivery_address")
-  // Shipper / consignee contact details — optional-but-encouraged at intake. These are
-  // the people at the doors, not the paying customer: the vendor RC prints them as
-  // operational contacts while the customer's identity stays off vendor paperwork.
-  senderName        String?       @map("sender_name")
-  senderPhone       String?       @map("sender_phone")
-  senderAddress     String?       @map("sender_address")
-  receiverName      String?       @map("receiver_name")
-  receiverPhone     String?       @map("receiver_phone")
-  receiverAddress   String?       @map("receiver_address")
-  // Every package preset includes local_transport, so the inland leg always exists.
-  // Rail splits it into first/middle/last mile — one RFQ (and one vendor) per leg.
-  inlandMode        InlandMode    @default(truck) @map("inland_mode")
-  // Rail only: the two terminals bounding the middle mile. Free text — rail terminals
-  // are not in the Port reference table.
-  originRailTerminal      String? @map("origin_rail_terminal")
-  destinationRailTerminal String? @map("destination_rail_terminal")
-  // ── port_to_consignee terms. Free days is the detention-free window the line grants
-  // the consignee; blowing it is what turns a clean import job into a demurrage bill,
-  // so it is captured as a number rather than buried in step notes. The return location
-  // is where the empty goes back (often a dry port, not the terminal it came off).
-  freeDays          Int?          @map("free_days")
-  emptyReturnLocation String?     @map("empty_return_location")
-  containerTypeCode String?       @map("container_type_code")
-  incoterm          String?
-  cargoDescription  String?       @map("cargo_description")
-  weightKg          Decimal?      @map("weight_kg") @db.Decimal(12, 2)
-  isHazardous       Boolean       @default(false) @map("is_hazardous") // triggers pre-check (RULE-QRY-02)
-  isReefer          Boolean       @default(false) @map("is_reefer")
-  cancelReason      String?       @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
-  // The source LC, as read off the bank's advice at conversion (CRM_MASTER §5.21).
-  // A snapshot, not a live join: the credit's terms at the moment the query was
-  // raised are what the quotation is priced against, and an amended LC must not
-  // silently rewrite the basis of a quote already sent. Null for every query that
-  // did not come from the bank_lc channel.
-  lcDetails         Json?         @map("lc_details")
-  quotations        Quotation[]
-  vendorRfqs        VendorRfq[]
-  createdAt         DateTime      @default(now())
-  updatedAt         DateTime      @updatedAt
+  id                 String      @id @default(uuid())
+  referenceNo        String      @unique @map("reference_no") // QRY-YYYY-NNNNN
+  customerId         String      @map("customer_id")
+  raisedById         String      @map("raised_by_id") // BDO or portal user — drives BDO/ASM scoping
+  raisedVia          RaisedVia   @map("raised_via")
+  status             QueryStatus @default(open)
+  // Contact snapshot. Prefilled from the linked Customer but editable, so a BDO can
+  // record the person who actually called without mutating the customer record.
+  customerName       String      @map("customer_name")
+  customerEmail      String      @map("customer_email")
+  customerPhone      String      @map("customer_phone")
+  pickupAddress      String      @map("pickup_address")
+  destinationAddress String      @map("destination_address")
+  services           String[] // free text since the package catalog was removed
+  cancelReason       String?     @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
+  quotations         Quotation[]
+  vendorRfqs         VendorRfq[]
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
 
   @@index([customerId, status])
   @@index([status, createdAt]) // staleness sweep (RULE-QRY-04)
@@ -736,10 +808,7 @@ model Quotation {
   version           Int                   @default(1) // revision = new row (ADR-019)
   parentQuotationId String?               @map("parent_quotation_id")
   status            QuotationStatus       @default(draft) // partial uniques INV-07/08, DATABASE.md §5
-  services          ServiceCode[] // snapshot from the query
-  servicePackage    ServicePackage?       @map("service_package") // snapshot from the query
-  croHandledBy      CroHandling           @default(not_applicable) @map("cro_handled_by") // snapshot from the query
-  lcHandledBy       LcHandling            @default(not_applicable) @map("lc_handled_by") // snapshot from the query
+  services          String[] // snapshot from the query
   currency          String                @default("PKR") @db.Char(3)
   fxRate            Decimal?              @map("fx_rate") @db.Decimal(12, 6)
   totalAmount       Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
@@ -750,6 +819,12 @@ model Quotation {
   decidedById       String?               @map("decided_by_id") // never the owning BDO (RULE-QT-03)
   decidedAt         DateTime?             @map("decided_at")
   approvalChannel   ApprovalChannel?      @map("approval_channel")
+  // BDO → customer relay: after Ops sends, the BDO gives the quote to the customer
+  // over mail/phone/WhatsApp and records how. Informational, never a gate.
+  sharedVia         QuoteShareChannel?    @map("shared_via")
+  sharedById        String?               @map("shared_by_id")
+  sharedAt          DateTime?             @map("shared_at")
+  shareNote         String?               @map("share_note")
   rejectionReason   String?               @map("rejection_reason") // required on reject (RULE-QT-04)
   rowVersion        Int                   @default(1) @map("row_version") // If-Match (RULE-QT-08)
   chargeLines       QuotationChargeLine[]
@@ -788,15 +863,9 @@ model OtdStepTemplate {
   stepCode         String         @unique @map("step_code")
   title            String
   ownerDepartment  DepartmentCode @map("owner_department") // ADR-003/039 ownership
-  always           Boolean        @default(false) // steps 1–2 and 14 (RULE-SVC-01)
-  services         ServiceCode[] // included when selection intersects (ADR-040)
-  // Gates are evaluated package → CRO mode → service, each EMPTY-MEANS-DON'T-GATE.
-  // `always: true` plus a non-empty `packages` therefore reads "always, on these packages".
-  // A shipment with servicePackage = null (composed before packages existed) skips the
-  // package gate entirely, which is what makes legacy paths reproduce byte-for-byte.
-  packages         ServicePackage[] // empty = applies to any package
-  croModes         CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
-  lcModes          LcHandling[]     @map("lc_modes") // empty = applies in any LC mode (ADR-050)
+  // There are no composition gates any more: every ACTIVE template composes onto every
+  // shipment, in canonical order. A step that should no longer appear is deactivated,
+  // never deleted, so historical shipments still resolve it by step code.
   // One plain-language line on what completing this step actually means — shown on the
   // step panel. Lives here (ADR-051) so admin-created steps carry their own guidance;
   // previously a hardcoded STEP_HINTS map in the frontend.
@@ -831,10 +900,6 @@ model OtdStepActionTemplate {
   docType    String?          @map("doc_type") // required when kind = document
   sortOrder  Int              @map("sort_order")
   required   Boolean          @default(true) // false = advisory; does not gate completion
-  packages   ServicePackage[] // empty = applies to any package
-  croModes   CroHandling[]    @map("cro_modes") // empty = applies in any CRO mode
-  lcModes    LcHandling[]     @map("lc_modes") // empty = applies in any LC mode (ADR-050)
-  services   ServiceCode[] // empty = applies whatever the services
 
   @@unique([stepCode, actionCode])
   @@index([stepCode])
@@ -872,13 +937,24 @@ model OtdStepAction {
 model Shipment {
   id               String                  @id @default(uuid())
   referenceNo      String                  @unique @map("reference_no") // SHIP-YYYY-NNNNN
-  quotationId      String                  @unique @map("quotation_id") // INV-03 — exactly one approved quote
-  queryId          String                  @unique @map("query_id")
+  // NULLABLE since trade shipments (roadmap Step 1): a `forwarding` shipment still
+  // carries exactly one approved quote (INV-03), a `trade` shipment originates from a
+  // Trade Contract instead. `@unique` still holds — Postgres allows repeated NULLs.
+  // The kind ↔ origin pairing is enforced by shipments_origin_valid in sql/constraints.sql.
+  quotationId      String?                 @unique @map("quotation_id") // INV-03 — exactly one approved quote (forwarding only)
+  queryId          String?                 @unique @map("query_id")
   customerId       String                  @map("customer_id")
-  services         ServiceCode[] // FROZEN at approval (INV-14) — non-empty CHECK, DATABASE.md §5
-  servicePackage   ServicePackage?         @map("service_package") // FROZEN at approval; null = pre-package shipment
-  croHandledBy     CroHandling             @default(not_applicable) @map("cro_handled_by") // FROZEN at approval
-  lcHandledBy      LcHandling              @default(not_applicable) @map("lc_handled_by") // FROZEN at approval (ADR-050)
+  kind             ShipmentKind            @default(forwarding)
+  direction        ShipmentDirection?      // export | import — set on trade shipments
+  // A trade shipment originates HERE instead of from a quotation (roadmap Step 1).
+  contractId       String?                 @map("contract_id")
+  contract         TradeContract?          @relation(fields: [contractId], references: [id])
+  financialInstrumentId String?            @map("financial_instrument_id")
+  financialInstrument FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
+  // Roadmap §7.1 — DERIVED from which trade documents exist, exactly as `status` is
+  // derived from completed steps (ADR-014). Never written by an endpoint.
+  tradeStage       TradeStage              @default(none) @map("trade_stage")
+  services         String[] // FROZEN at approval (INV-14)
   status           ShipmentStatus          @default(booking) // DERIVED (ADR-014, INV-02)
   exceptionState   ExceptionState          @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
   totalHoldMinutes Int                     @default(0) @map("total_hold_minutes")
@@ -886,12 +962,12 @@ model Shipment {
   eta              DateTime? // ETA-breach sweep
   originPort       String?                 @map("origin_port")
   destinationPort  String?                 @map("destination_port")
-  // Free-text door addresses — the vocabulary for local_transport, where a UN/LOCODE
-  // port is the wrong shape. Snapshotted from the Query so transport knows where to drive.
+  // Free-text door addresses, snapshotted from the Query at approval so transport knows
+  // where to drive. `deliveryAddress` is fed by the query's `destinationAddress`.
   pickupAddress    String?                 @map("pickup_address")
   deliveryAddress  String?                 @map("delivery_address")
-  // Shipper/consignee contacts + inland mode, snapshotted from the Query at approval —
-  // the people transport actually calls at the doors, frozen with the rest of the route.
+  // Shipper/consignee contacts + inland mode. The Query no longer carries these, so they
+  // start null and are filled in by the shipment/trade module once the parties are known.
   senderName       String?                 @map("sender_name")
   senderPhone      String?                 @map("sender_phone")
   senderAddress    String?                 @map("sender_address")
@@ -901,8 +977,8 @@ model Shipment {
   inlandMode       InlandMode              @default(truck) @map("inland_mode")
   originRailTerminal      String?          @map("origin_rail_terminal")
   destinationRailTerminal String?          @map("destination_rail_terminal")
-  // Snapshotted from the Query at approval, same as the addresses above (package
-  // port_to_consignee — see the Query model for what they mean).
+  // Import detention terms — the detention-free window the line grants the consignee, and
+  // where the empty goes back. Set by the shipment/trade module, not inherited any more.
   freeDays         Int?                    @map("free_days")
   emptyReturnLocation String?              @map("empty_return_location")
   incoterm         String?
@@ -921,6 +997,13 @@ model Shipment {
   otcMilestones    OtcMilestone[]
   exceptions       ShipmentException[]
   statusHistory    ShipmentStatusHistory[]
+  parties          ShipmentParty[]
+  containers       ShipmentContainer[]
+  packingList      PackingList?
+  tradeInvoices    TradeInvoice[]
+  billOfLading     BillOfLading?
+  goodsDeclaration GoodsDeclaration?
+  tradeStageHistory ShipmentTradeStageHistory[]
   invoices         Invoice[]
   createdAt        DateTime                @default(now())
   updatedAt        DateTime                @updatedAt
@@ -985,6 +1068,38 @@ model ShipmentException {
   @@map("shipment_exceptions")
 }
 
+// Who plays which role on THIS shipment (roadmap §2/§3/§7). The roadmap's central
+// modelling rule: a party's contact and banking details are stored once on the party
+// record, while the ROLE is captured per shipment — the same company can be a Vendor on
+// one job and the Freight Forwarder on the next, and Consort itself is Manufacturer on
+// an export and Freight Forwarder on an import.
+//
+// `vendors` is the party directory (it already carries NTN/STRN/REX/VAT/IBAN/SWIFT and
+// bank branch); a CRM `Customer` may also hold a role without being duplicated into it.
+// Exactly one of vendorId / customerId is set — shipment_parties_one_target in
+// prisma/sql/constraints.sql.
+model ShipmentParty {
+  id         String    @id @default(uuid())
+  shipmentId String    @map("shipment_id")
+  shipment   Shipment  @relation(fields: [shipmentId], references: [id])
+  role       PartyRole
+  vendorId   String?   @map("vendor_id")
+  vendor     Vendor?   @relation(fields: [vendorId], references: [id])
+  customerId String?   @map("customer_id")
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  // One company cannot hold the same role twice on one shipment. Two DIFFERENT
+  // companies in the same role is legal and deliberate — the roadmap's Ahmad Saeed
+  // B/L carries two notify parties (Consort and Javed Latif).
+  @@unique([shipmentId, role, vendorId])
+  @@unique([shipmentId, role, customerId])
+  @@index([shipmentId])
+  @@index([vendorId])
+  @@map("shipment_parties")
+}
+
 model OtcMilestone {
   id            String             @id @default(uuid())
   shipmentId    String             @map("shipment_id")
@@ -1018,10 +1133,22 @@ model Invoice {
   vendorId    String?       @map("vendor_id") // payables — the vendor being billed; null for the customer receivable
   vendor      Vendor?       @relation(fields: [vendorId], references: [id])
   counterparty String?      @map("counterparty") // legacy/display fallback vendor name (payables)
+  // Roadmap §6 — a terminal or forwarder bill quotes the B/L, the container and the
+  // FI. Foreign keys rather than numbers re-typed into the description.
+  billOfLadingId String?    @map("bill_of_lading_id")
+  billOfLading BillOfLading? @relation(fields: [billOfLadingId], references: [id])
+  goodsDeclarationId String? @map("goods_declaration_id")
+  goodsDeclaration GoodsDeclaration? @relation(fields: [goodsDeclarationId], references: [id])
+  financialInstrumentId String? @map("financial_instrument_id")
+  financialInstrument FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
+  containerId String?      @map("container_id")
+  container   ShipmentContainer? @relation(fields: [containerId], references: [id])
   status      InvoiceStatus @default(draft)
   currency    String        @db.Char(3)
   fxRate      Decimal?      @map("fx_rate") @db.Decimal(12, 6) // captured at commit (ADR-006)
   totalAmount Decimal       @map("total_amount") @db.Decimal(14, 2)
+  // Sum of the lines' tax (§4.7 — every QICT charge carries 15% Sindh Sales Tax).
+  taxTotal    Decimal?      @map("tax_total") @db.Decimal(14, 2)
   issuedById  String?       @map("issued_by_id") // accounts
   issuedAt    DateTime?     @map("issued_at")
   dueDate     DateTime?     @map("due_date") // overdue sweep
@@ -1047,6 +1174,10 @@ model InvoiceLine {
   quantity    Decimal @default(1) @db.Decimal(12, 2)
   unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
   amount      Decimal @db.Decimal(14, 2)
+  // §4.7 — the terminal bill is an itemised list of named charges, each taxed.
+  chargeCode  String? @map("charge_code") // charge_types.code
+  taxPercent  Decimal? @map("tax_percent") @db.Decimal(5, 2)
+  taxAmount   Decimal? @map("tax_amount") @db.Decimal(14, 2)
   sortOrder   Int     @default(0) @map("sort_order")
 
   @@index([invoiceId])
@@ -1099,6 +1230,22 @@ model Vendor {
   isActive         Boolean          @default(true) @map("is_active")
   invoices         Invoice[]
   vendorQuotes     VendorQuote[]
+  shipmentParties  ShipmentParty[]
+  // Trade-document back-relations. Each is a NAMED relation because several trade
+  // documents point at `vendors` more than once (an FI names the vendor, its bank and
+  // the buyer). Real FKs, not loose ids — they are also what stops a vendor being hard
+  // deleted out from under a Bill of Lading.
+  tradeContracts       TradeContract[]       @relation("TradeContractVendor")
+  fiAsVendor           FinancialInstrument[] @relation("FiVendor")
+  fiAsBank             FinancialInstrument[] @relation("FiBank")
+  fiAsBuyer            FinancialInstrument[] @relation("FiBuyer")
+  packingListsIssued   PackingList[]         @relation("PackingListIssuer")
+  tradeInvoicesSold    TradeInvoice[]        @relation("TradeInvoiceSeller")
+  tradeInvoicesBought  TradeInvoice[]        @relation("TradeInvoiceBuyer")
+  tradeInvoicesBanked  TradeInvoice[]        @relation("TradeInvoiceBank")
+  bolAsCarrier         BillOfLading[]        @relation("BolCarrier")
+  bolAsCarrierAgent    BillOfLading[]        @relation("BolCarrierAgent")
+  gdAsClearingAgent    GoodsDeclaration[]    @relation("GdClearingAgent")
   createdAt        DateTime         @default(now())
   updatedAt        DateTime         @updatedAt
 
@@ -1526,40 +1673,6 @@ model LoadBoardPosting {
   @@map("load_board_postings")
 }
 
-// Anonymous storefront "request a quote" (§5.20, WORKFLOW §2b). A demand
-// signal, not a customer — a salesperson converts it into a lead + query.
-model PublicInquiry {
-  id                 String        @id @default(uuid())
-  referenceNo        String        @unique @map("reference_no") // INQ-YYYY-NNNNN
-  contactName        String        @map("contact_name")
-  contactEmail       String        @map("contact_email")
-  contactPhone       String?       @map("contact_phone")
-  companyName        String?       @map("company_name")
-  message            String?
-  services           ServiceCode[]
-  originPort         String?       @map("origin_port")
-  destinationPort    String?       @map("destination_port")
-  containerTypeCode  String?       @map("container_type_code")
-  incoterm           String?
-  cargoDescription   String?       @map("cargo_description")
-  weightKg           Decimal?      @map("weight_kg") @db.Decimal(12, 2)
-  isHazardous        Boolean       @default(false) @map("is_hazardous")
-  isReefer           Boolean       @default(false) @map("is_reefer")
-  estimatedAmount    Decimal?      @map("estimated_amount") @db.Decimal(14, 2) // calculator snapshot
-  estimateCurrency   String?       @map("estimate_currency") @db.Char(3)
-  loadBoardPostingId String?       @map("load_board_posting_id") // set if they came from a posting
-  status             InquiryStatus @default(new)
-  reviewedById       String?       @map("reviewed_by_id")
-  convertedLeadId    String?       @map("converted_lead_id")
-  convertedQueryId   String?       @map("converted_query_id")
-  sourceIp           String?       @map("source_ip")
-  createdAt          DateTime      @default(now())
-  updatedAt          DateTime      @updatedAt
-
-  @@index([status, createdAt])
-  @@map("public_inquiries")
-}
-
 // Inbound bank LC posted to the intake webhook (§5.21, WORKFLOW §2c).
 // Idempotent on the bank's own reference so replays never duplicate.
 model BankLcReferral {
@@ -1594,4 +1707,377 @@ model BankLcReferral {
 
   @@index([status, createdAt])
   @@map("bank_lc_referrals")
+}
+
+// ================= EXPORT TRADE DOCUMENTS =================
+// Structured records for the paper trail in Export_Shipment_Workflow_CRM_Roadmap §4.
+// Every document that used to exist only as an uploaded PDF tagged with a docType now
+// also has its fields, and the values that flow downstream (§6) are foreign keys here
+// rather than numbers re-typed onto the next form.
+
+// §4.1 — Sales Contract / Proforma Invoice. Not a scanned file in the sample set, but
+// every downstream document quotes its number and date, so it is the root record.
+model TradeContract {
+  id                   String                @id @default(uuid())
+  referenceNo          String                @unique @map("reference_no") // TCN-YYYY-NNNNN
+  contractNo           String                @map("contract_no") // e.g. AST/09/25/002
+  contractDate         DateTime?             @map("contract_date")
+  direction            ShipmentDirection     @default(export)
+  vendorId             String                @map("vendor_id")
+  vendor               Vendor                @relation("TradeContractVendor", fields: [vendorId], references: [id])
+  customerId           String?               @map("customer_id") // customers.id — a plain id, as on shipments
+  incoterm             String?
+  currency             String                @db.Char(3)
+  totalValue           Decimal?              @map("total_value") @db.Decimal(14, 2)
+  paymentTerms         String?               @map("payment_terms")
+  productDescription   String?               @map("product_description")
+  notes                String?
+  status               TradeContractStatus   @default(active)
+  financialInstruments FinancialInstrument[]
+  shipments            Shipment[]
+  createdById          String?               @map("created_by_id")
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  @@index([vendorId])
+  @@index([customerId])
+  @@map("trade_contracts")
+}
+
+// §4.2 — the bank EXP registration (BIP-EXP-296937-14112025 in the sample set), or an
+// LC / documentary collection carrying the same shape. One vendor holds many of these
+// against potentially different customers, and each shipment draws on exactly one.
+model FinancialInstrument {
+  id                    String                        @id @default(uuid())
+  referenceNo           String                        @unique @map("reference_no") // FI-YYYY-NNNNN
+  fiNumber              String                        @unique @map("fi_number") // the number the bank issued
+  type                  FinancialInstrumentType       @default(exp_form)
+  contractId            String?                       @map("contract_id")
+  contract              TradeContract?                @relation(fields: [contractId], references: [id])
+  vendorId              String                        @map("vendor_id")
+  vendor                Vendor                        @relation("FiVendor", fields: [vendorId], references: [id])
+  bankVendorId          String                        @map("bank_vendor_id")
+  bank                  Vendor                        @relation("FiBank", fields: [bankVendorId], references: [id])
+  customerId            String?                       @map("customer_id")
+  buyerVendorId         String?                       @map("buyer_vendor_id")
+  buyer                 Vendor?                       @relation("FiBuyer", fields: [buyerVendorId], references: [id])
+  incoterm              String?
+  currency              String                        @db.Char(3)
+  value                 Decimal                       @db.Decimal(14, 2)
+  // "60% CAD / 40% DA 75 days from B/L date" decomposed, so the DA maturity can be
+  // computed off the Bill of Lading rather than read out of a sentence.
+  cadPercent            Decimal?                      @map("cad_percent") @db.Decimal(5, 2)
+  daPercent             Decimal?                      @map("da_percent") @db.Decimal(5, 2)
+  daDays                Int?                          @map("da_days")
+  paymentTermsText      String?                       @map("payment_terms_text")
+  portOfDischarge       String?                       @map("port_of_discharge")
+  issueDate             DateTime?                     @map("issue_date")
+  expiryDate            DateTime                      @map("expiry_date")
+  status                FinancialInstrumentStatus     @default(active)
+  // Maintained ONLY by drawdown rows (ADR-001) — never hand-edited.
+  drawnAmount           Decimal                       @default(0) @map("drawn_amount") @db.Decimal(14, 2)
+  expiryNotifiedAt      DateTime?                     @map("expiry_notified_at") // de-dupes the nightly sweep
+  closedById            String?                       @map("closed_by_id")
+  closedAt              DateTime?                     @map("closed_at")
+  notes                 String?
+  drawdowns             FinancialInstrumentDrawdown[]
+  shipments             Shipment[]
+  tradeInvoices         TradeInvoice[]
+  goodsDeclarations     GoodsDeclaration[]
+  logisticsInvoices     Invoice[]
+  createdById           String?                       @map("created_by_id")
+  createdAt             DateTime                      @default(now())
+  updatedAt             DateTime                      @updatedAt
+
+  @@index([status, expiryDate])
+  @@index([vendorId])
+  @@map("financial_instruments")
+}
+
+// Realisation of export proceeds against the instrument (roadmap Step 7). The sum of
+// these is what `drawnAmount` mirrors, and what lets Step 8 close the instrument.
+model FinancialInstrumentDrawdown {
+  id                    String              @id @default(uuid())
+  financialInstrumentId String              @map("financial_instrument_id")
+  financialInstrument   FinancialInstrument @relation(fields: [financialInstrumentId], references: [id])
+  shipmentId            String?             @map("shipment_id")
+  paymentId             String?             @map("payment_id")
+  tradeInvoiceId        String?             @map("trade_invoice_id")
+  amount                Decimal             @db.Decimal(14, 2)
+  realisedAt            DateTime            @map("realised_at")
+  notes                 String?
+  recordedById          String?             @map("recorded_by_id")
+  createdAt             DateTime            @default(now())
+
+  @@index([financialInstrumentId])
+  @@index([shipmentId])
+  @@map("financial_instrument_drawdowns")
+}
+
+// §7 "Shipment / Container". The EIR steps have always implied a container number and a
+// seal; until now neither had anywhere to live.
+model ShipmentContainer {
+  id                String                  @id @default(uuid())
+  shipmentId        String                  @map("shipment_id")
+  shipment          Shipment                @relation(fields: [shipmentId], references: [id])
+  containerNo       String                  @map("container_no")
+  sealNo            String?                 @map("seal_no")
+  containerTypeCode String?                 @map("container_type_code")
+  cartons           Int?
+  netWeightKg       Decimal?                @map("net_weight_kg") @db.Decimal(12, 3)
+  grossWeightKg     Decimal?                @map("gross_weight_kg") @db.Decimal(12, 3)
+  packingLists      PackingList[]
+  bolContainers     BillOfLadingContainer[]
+  logisticsInvoices Invoice[]
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  @@unique([shipmentId, containerNo])
+  @@index([shipmentId])
+  @@map("shipment_containers")
+}
+
+// §4.3 — issued by the vendor factory. The authoritative source for carton, piece and
+// weight data, which the Commercial Invoice, the B/L and the GD all restate (§6).
+model PackingList {
+  id                 String             @id @default(uuid())
+  referenceNo        String             @unique @map("reference_no") // PL-YYYY-NNNNN
+  shipmentId         String             @unique @map("shipment_id")
+  shipment           Shipment           @relation(fields: [shipmentId], references: [id])
+  containerId        String?            @map("container_id")
+  container          ShipmentContainer? @relation(fields: [containerId], references: [id])
+  issuedByVendorId   String?            @map("issued_by_vendor_id")
+  issuedByVendor     Vendor?            @relation("PackingListIssuer", fields: [issuedByVendorId], references: [id])
+  customerId         String?            @map("customer_id")
+  listDate           DateTime?          @map("list_date")
+  // Totals are RECOMPUTED from the items on every write, never accepted from a client.
+  totalCartons       Int?               @map("total_cartons")
+  totalPieces        Int?               @map("total_pieces")
+  totalNetWeightKg   Decimal?           @map("total_net_weight_kg") @db.Decimal(12, 3)
+  totalGrossWeightKg Decimal?           @map("total_gross_weight_kg") @db.Decimal(12, 3)
+  notes              String?
+  confirmedById      String?            @map("confirmed_by_id")
+  confirmedAt        DateTime?          @map("confirmed_at")
+  documentId         String?            @map("document_id") // the generated or scanned PDF
+  items              PackingListItem[]
+  tradeInvoices      TradeInvoice[]
+  createdById        String?            @map("created_by_id")
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+
+  @@map("packing_lists")
+}
+
+model PackingListItem {
+  id            String             @id @default(uuid())
+  packingListId String             @map("packing_list_id")
+  packingList   PackingList        @relation(fields: [packingListId], references: [id], onDelete: Cascade)
+  skuRef        String?            @map("sku_ref")
+  description   String
+  hsCode        String?            @map("hs_code")
+  qtyPerBox     Int?               @map("qty_per_box")
+  boxes         Int?
+  pieces        Int?
+  netWeightKg   Decimal?           @map("net_weight_kg") @db.Decimal(12, 3)
+  grossWeightKg Decimal?           @map("gross_weight_kg") @db.Decimal(12, 3)
+  sortOrder     Int                @default(0) @map("sort_order")
+  invoiceLines  TradeInvoiceLine[]
+
+  @@index([packingListId])
+  @@map("packing_list_items")
+}
+
+// §4.4 — the goods invoice. `side` is what carries the merchant economics: `purchase`
+// is the vendor billing Consort (a cost), `sale` is Consort billing the customer
+// (revenue), and issuing a sale drafts the receivable the OTC ledger already runs on.
+model TradeInvoice {
+  id                    String               @id @default(uuid())
+  referenceNo           String               @unique @map("reference_no") // TIN-YYYY-NNNNN
+  shipmentId            String               @map("shipment_id")
+  shipment              Shipment             @relation(fields: [shipmentId], references: [id])
+  side                  TradeInvoiceSide
+  invoiceNo             String               @map("invoice_no") // e.g. AST/11/25/003
+  invoiceDate           DateTime             @map("invoice_date")
+  financialInstrumentId String?              @map("financial_instrument_id")
+  financialInstrument   FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
+  packingListId         String?              @map("packing_list_id")
+  packingList           PackingList?         @relation(fields: [packingListId], references: [id])
+  sellerVendorId        String?              @map("seller_vendor_id")
+  sellerVendor          Vendor?              @relation("TradeInvoiceSeller", fields: [sellerVendorId], references: [id])
+  buyerVendorId         String?              @map("buyer_vendor_id")
+  buyerVendor           Vendor?              @relation("TradeInvoiceBuyer", fields: [buyerVendorId], references: [id])
+  sellerCustomerId      String?              @map("seller_customer_id")
+  buyerCustomerId       String?              @map("buyer_customer_id")
+  bankVendorId          String?              @map("bank_vendor_id")
+  bankVendor            Vendor?              @relation("TradeInvoiceBank", fields: [bankVendorId], references: [id])
+  incoterm              String?
+  shipmentTerms         String?              @map("shipment_terms") // e.g. CFR Antwerp
+  rexNo                 String?              @map("rex_no")
+  originStatement       String?              @map("origin_statement")
+  currency              String               @db.Char(3)
+  totalValue            Decimal              @default(0) @map("total_value") @db.Decimal(14, 2) // recomputed from lines
+  status                TradeInvoiceStatus   @default(draft)
+  issuedById            String?              @map("issued_by_id")
+  issuedAt              DateTime?            @map("issued_at")
+  voidedById            String?              @map("voided_by_id")
+  voidedAt              DateTime?            @map("voided_at")
+  voidReason            String?              @map("void_reason")
+  receivableInvoiceId   String?              @map("receivable_invoice_id") // the AR invoice a sale drafted
+  documentId            String?              @map("document_id")
+  notes                 String?
+  lines                 TradeInvoiceLine[]
+  goodsDeclarations     GoodsDeclaration[]
+  createdById           String?              @map("created_by_id")
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
+
+  @@unique([shipmentId, side, invoiceNo])
+  @@index([shipmentId])
+  @@index([financialInstrumentId])
+  @@map("trade_invoices")
+}
+
+model TradeInvoiceLine {
+  id                String                 @id @default(uuid())
+  tradeInvoiceId    String                 @map("trade_invoice_id")
+  tradeInvoice      TradeInvoice           @relation(fields: [tradeInvoiceId], references: [id], onDelete: Cascade)
+  // Set when the line was seeded from the packing list, which is what keeps cartons,
+  // pieces and HS codes from being re-typed (§6, §8).
+  packingListItemId String?                @map("packing_list_item_id")
+  packingListItem   PackingListItem?       @relation(fields: [packingListItemId], references: [id])
+  description       String
+  hsCode            String?                @map("hs_code")
+  quantity          Decimal                @default(1) @db.Decimal(14, 3)
+  unitOfMeasure     String?                @map("unit_of_measure")
+  unitPrice         Decimal                @map("unit_price") @db.Decimal(14, 4)
+  amount            Decimal                @db.Decimal(14, 2)
+  sortOrder         Int                    @default(0) @map("sort_order")
+  gdLines           GoodsDeclarationLine[]
+
+  @@index([tradeInvoiceId])
+  @@map("trade_invoice_lines")
+}
+
+// §4.5 — issued by the ocean carrier. Consignee and notify are free text because that is
+// literally what the form carries ("To the order of BankIslami Pakistan Limited"); the
+// structured parties behind them live in shipment_parties.
+model BillOfLading {
+  id                   String                  @id @default(uuid())
+  referenceNo          String                  @unique @map("reference_no") // BL-YYYY-NNNNN
+  shipmentId           String                  @unique @map("shipment_id")
+  shipment             Shipment                @relation(fields: [shipmentId], references: [id])
+  blNumber             String                  @map("bl_number")
+  bookingNo            String?                 @map("booking_no")
+  blType               BolType                 @default(master) @map("bl_type")
+  carrierVendorId      String?                 @map("carrier_vendor_id")
+  carrier              Vendor?                 @relation("BolCarrier", fields: [carrierVendorId], references: [id])
+  carrierAgentVendorId String?                 @map("carrier_agent_vendor_id")
+  carrierAgent         Vendor?                 @relation("BolCarrierAgent", fields: [carrierAgentVendorId], references: [id])
+  shipperText          String?                 @map("shipper_text")
+  consigneeText        String?                 @map("consignee_text")
+  notifyText           String?                 @map("notify_text")
+  secondNotifyText     String?                 @map("second_notify_text")
+  vesselName           String?                 @map("vessel_name")
+  voyageNo             String?                 @map("voyage_no")
+  portOfLoading        String?                 @map("port_of_loading")
+  portOfDischarge      String?                 @map("port_of_discharge")
+  freightTerms         FreightTerms?           @map("freight_terms")
+  // Setting this starts the DA clock: daDueDate = shippedOnBoard + FI.daDays (§7.2).
+  shippedOnBoard       DateTime?               @map("shipped_on_board")
+  issueDate            DateTime?               @map("issue_date")
+  netWeightKg          Decimal?                @map("net_weight_kg") @db.Decimal(12, 3)
+  grossWeightKg        Decimal?                @map("gross_weight_kg") @db.Decimal(12, 3)
+  daNotifiedAt         DateTime?               @map("da_notified_at") // de-dupes the maturity sweep
+  documentId           String?                 @map("document_id")
+  notes                String?
+  containers           BillOfLadingContainer[]
+  logisticsInvoices    Invoice[]
+  createdById          String?                 @map("created_by_id")
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  @@map("bills_of_lading")
+}
+
+model BillOfLadingContainer {
+  id             String            @id @default(uuid())
+  billOfLadingId String            @map("bill_of_lading_id")
+  billOfLading   BillOfLading      @relation(fields: [billOfLadingId], references: [id], onDelete: Cascade)
+  containerId    String            @map("container_id")
+  container      ShipmentContainer @relation(fields: [containerId], references: [id])
+
+  @@unique([billOfLadingId, containerId])
+  @@map("bill_of_lading_containers")
+}
+
+// §4.6 — the GD-I filed with Pakistan Customs through WeBOC by the clearing agent.
+// Customs values are PKR, converted from the invoice currency at `exchangeRate`, which
+// is why the rate is captured on the declaration itself (§7.2).
+model GoodsDeclaration {
+  id                    String                 @id @default(uuid())
+  referenceNo           String                 @unique @map("reference_no") // GD-YYYY-NNNNN
+  shipmentId            String                 @unique @map("shipment_id")
+  shipment              Shipment               @relation(fields: [shipmentId], references: [id])
+  gdNumber              String                 @map("gd_number")
+  gdDate                DateTime?              @map("gd_date")
+  clearingAgentVendorId String?                @map("clearing_agent_vendor_id")
+  clearingAgent         Vendor?                @relation("GdClearingAgent", fields: [clearingAgentVendorId], references: [id])
+  financialInstrumentId String?                @map("financial_instrument_id")
+  financialInstrument   FinancialInstrument?   @relation(fields: [financialInstrumentId], references: [id])
+  tradeInvoiceId        String?                @map("trade_invoice_id")
+  tradeInvoice          TradeInvoice?          @relation(fields: [tradeInvoiceId], references: [id])
+  portOfShipment        String?                @map("port_of_shipment")
+  portOfDischarge       String?                @map("port_of_discharge")
+  exchangeRate          Decimal?               @map("exchange_rate") @db.Decimal(12, 6)
+  fobValuePkr           Decimal?               @map("fob_value_pkr") @db.Decimal(16, 2)
+  freightPkr            Decimal?               @map("freight_pkr") @db.Decimal(16, 2)
+  cfrValuePkr           Decimal?               @map("cfr_value_pkr") @db.Decimal(16, 2)
+  insurancePkr          Decimal?               @map("insurance_pkr") @db.Decimal(16, 2)
+  assessedValuePkr      Decimal?               @map("assessed_value_pkr") @db.Decimal(16, 2)
+  appraiserName         String?                @map("appraiser_name") // the customs officer, NOT an app user
+  examinerName          String?                @map("examiner_name")
+  outOfChargeAt         DateTime?              @map("out_of_charge_at") // the release point
+  filedAt               DateTime?              @map("filed_at")
+  documentId            String?                @map("document_id")
+  notes                 String?
+  lines                 GoodsDeclarationLine[]
+  logisticsInvoices     Invoice[]
+  createdById           String?                @map("created_by_id")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
+
+  @@map("goods_declarations")
+}
+
+model GoodsDeclarationLine {
+  id                 String            @id @default(uuid())
+  goodsDeclarationId String            @map("goods_declaration_id")
+  goodsDeclaration   GoodsDeclaration  @relation(fields: [goodsDeclarationId], references: [id], onDelete: Cascade)
+  tradeInvoiceLineId String?           @map("trade_invoice_line_id")
+  tradeInvoiceLine   TradeInvoiceLine? @relation(fields: [tradeInvoiceLineId], references: [id])
+  hsCode             String            @map("hs_code")
+  description        String
+  quantity           Decimal           @default(1) @db.Decimal(14, 3)
+  unitValue          Decimal?          @map("unit_value") @db.Decimal(14, 4)
+  declaredValuePkr   Decimal?          @map("declared_value_pkr") @db.Decimal(16, 2)
+  assessedValuePkr   Decimal?          @map("assessed_value_pkr") @db.Decimal(16, 2)
+  sroCode            String?           @map("sro_code")
+  sortOrder          Int               @default(0) @map("sort_order")
+
+  @@index([goodsDeclarationId])
+  @@map("goods_declaration_lines")
+}
+
+// The trail behind the derived tradeStage, mirroring shipment_status_history.
+model ShipmentTradeStageHistory {
+  id         String      @id @default(uuid())
+  shipmentId String      @map("shipment_id")
+  shipment   Shipment    @relation(fields: [shipmentId], references: [id])
+  fromStage  TradeStage? @map("from_stage")
+  toStage    TradeStage  @map("to_stage")
+  actorId    String?     @map("actor_id")
+  createdAt  DateTime    @default(now())
+
+  @@index([shipmentId, createdAt])
+  @@map("shipment_trade_stage_history")
 }

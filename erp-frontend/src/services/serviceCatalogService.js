@@ -16,19 +16,12 @@ export const getReference = async () => {
   return res.data;
 };
 
-// The three service packages + their CRO options and port requirements.
-export const getPackages = async () => {
-  const res = await api.get("/services/packages");
-  return res.data;
-};
-
 /**
- * Preview the OTD path a shipment would run — the same composition it gets at quote
- * approval. Pass a package (preferred); for Loading Point → Port the CRO mode; for the
- * export packages the LC mode (ADR-050); `services` is the optional additive Ops override.
- * → { servicePackage, croHandledBy, lcHandledBy, services, steps, stepCount, departments, requiredDocTypes }
+ * Preview the OTD path a shipment runs — the same composition it gets at quote approval.
+ * Every shipment runs the one path now, so this takes no inputs.
+ * → { steps, stepCount, departments, requiredDocTypes }
  */
-export const composeServices = async ({ servicePackage, croHandledBy, lcHandledBy, services } = {}) => {
-  const res = await api.post("/services/compose", { servicePackage, croHandledBy, lcHandledBy, services });
+export const composeServices = async () => {
+  const res = await api.post("/services/compose", {});
   return res.data;
 };

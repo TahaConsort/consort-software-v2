@@ -17,8 +17,6 @@ import { labelForService, RFQ_LEG_LABELS } from "@/lib/catalog";
 const fmtDate = (d) =>
   d ? new Date(d).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" }) : null;
 
-const fmtWeight = (kg) => (kg == null || kg === "" ? null : `${Number(kg).toLocaleString()} kg`);
-
 export const rfqMessageFor = ({ rfq, query, vendor }) => {
   const q = query ?? rfq?.query ?? {};
   const lines = [];
@@ -30,51 +28,22 @@ export const rfqMessageFor = ({ rfq, query, vendor }) => {
   if (rfq?.leg) lines.push(`Leg: ${RFQ_LEG_LABELS[rfq.leg] ?? rfq.leg}`);
   lines.push("");
 
-  // Route. A rail leg names only ITS stretch — the vendor prices what they drive
-  // (or rail), not the whole journey. Otherwise: ports for a sea/port job, door
-  // addresses for inland work.
-  const pickup = q.pickupAddress || q.senderAddress;
-  const delivery = q.deliveryAddress || q.receiverAddress;
+  // Route. A query records the two doors; a legged ask names the end it touches so the
+  // vendor prices what they actually drive rather than the whole journey.
+  const pickup = q.pickupAddress;
+  const delivery = q.destinationAddress;
   if (rfq?.leg === "first_mile") {
     if (pickup) lines.push(`Pickup: ${pickup}`);
-    if (q.originRailTerminal) lines.push(`Deliver to rail terminal: ${q.originRailTerminal}`);
-  } else if (rfq?.leg === "middle_mile") {
-    lines.push(`Rail: ${q.originRailTerminal ?? "—"} → ${q.destinationRailTerminal ?? "—"}`);
   } else if (rfq?.leg === "last_mile") {
-    if (q.destinationRailTerminal) lines.push(`Pickup from rail terminal: ${q.destinationRailTerminal}`);
     if (delivery) lines.push(`Delivery: ${delivery}`);
   } else {
-    if (q.originPort || q.destinationPort) {
-      lines.push(`Route: ${q.originPort ?? "—"} → ${q.destinationPort ?? "—"}`);
-    }
-    if (q.pickupAddress) lines.push(`Pickup: ${q.pickupAddress}`);
-    if (q.deliveryAddress) lines.push(`Delivery: ${q.deliveryAddress}`);
+    if (pickup) lines.push(`Pickup: ${pickup}`);
+    if (delivery) lines.push(`Delivery: ${delivery}`);
   }
 
-  // Door contacts where this ask touches a door — operational people, never the
-  // paying customer.
-  const touchesPickup = !rfq?.leg || rfq.leg === "first_mile";
-  const touchesDelivery = !rfq?.leg || rfq.leg === "last_mile";
-  if (touchesPickup && (q.senderName || q.senderPhone)) {
-    lines.push(`Pickup contact: ${[q.senderName, q.senderPhone].filter(Boolean).join(" · ")}`);
-  }
-  if (touchesDelivery && (q.receiverName || q.receiverPhone)) {
-    lines.push(`Delivery contact: ${[q.receiverName, q.receiverPhone].filter(Boolean).join(" · ")}`);
-  }
-
-  if (q.containerTypeCode) lines.push(`Container: ${q.containerTypeCode}`);
-  if (q.cargoDescription) lines.push(`Cargo: ${q.cargoDescription}`);
-  const weight = fmtWeight(q.weightKg);
-  if (weight) lines.push(`Weight: ${weight}`);
-  if (q.incoterm) lines.push(`Incoterm: ${q.incoterm}`);
-
-  // Handling flags change the price and the equipment, so they lead rather than hide.
-  const flags = [q.isHazardous && "HAZARDOUS / DG cargo", q.isReefer && "REEFER — temperature controlled"].filter(
-    Boolean,
-  );
-  if (flags.length) {
-    lines.push("");
-    lines.push(`⚠ ${flags.join(" · ")}`);
+  // The one contact the query carries, where this ask touches a door.
+  if (q.customerName || q.customerPhone) {
+    lines.push(`Site contact: ${[q.customerName, q.customerPhone].filter(Boolean).join(" · ")}`);
   }
 
   if (rfq?.notes) {

@@ -26,7 +26,6 @@ export const TOPICS = {
   INVOICES: "invoices",
   VISITS: "visits",
   OUTREACH: "outreach",
-  INQUIRIES: "inquiries",
   LC_REFERRALS: "lcReferrals",
   NOTIFICATIONS: "notifications",
   EMPLOYEES: "employees",

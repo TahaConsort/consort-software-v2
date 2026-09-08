@@ -68,9 +68,8 @@ export const renderQuotationPdf = async ({ quotation, query, customer, shipmentR
     doc.font("Helvetica-Bold").text("Scope");
     doc.font("Helvetica");
     const lane = [query?.originPort, query?.destinationPort].filter(Boolean).join(" → ")
-      || [query?.pickupAddress, query?.deliveryAddress].filter(Boolean).join(" → ");
+      || [query?.pickupAddress, query?.destinationAddress].filter(Boolean).join(" → ");
     if (lane) doc.text(`Route: ${lane}`);
-    if (query?.incoterm) doc.text(`Incoterm: ${query.incoterm}`);
     doc.text(`Services: ${(quotation.services ?? []).join(", ") || "—"}`);
     doc.text(`Approved: ${fmtDate(quotation.decidedAt ?? new Date())}   ·   Valid to: ${fmtDate(quotation.validityDate)}`);
     doc.moveDown(1);

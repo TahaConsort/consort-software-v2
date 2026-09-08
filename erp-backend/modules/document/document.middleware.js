@@ -18,7 +18,7 @@ import { UPLOAD_ROOT, ensureDir } from "./document.service.js";
 
 export const requireDocumentAccess = requireRole(
   "ceo", "project_director", "director", "cfo", "gm",
-  "hr", "asm", "bdo", "ops_manager", "ops_exec",
+  "hr", "asm", "bdo", "web_manager", "ops_manager", "ops_exec",
   "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts", "customer",
 );
 

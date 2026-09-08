@@ -14,7 +14,6 @@ const PREFIXES = {
   quotation: "QT",
   shipment: "SHIP",
   invoice: "INV",
-  inquiry: "INQ", // public storefront request (CRM_MASTER §5.20)
   lc_referral: "LC", // bank LC intake webhook (CRM_MASTER §5.21)
   load_board: "LB", // load board posting (CRM_MASTER §5.20)
   vendor: "VEN", // vendor/carrier master (freight-forwarding OTC upgrade)

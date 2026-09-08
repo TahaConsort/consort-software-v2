@@ -11,6 +11,8 @@ import { useTypingEffect } from "@/hooks/useTypingEffect";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/authStore";
 import { login as loginRequest } from "@/services/authService";
+import { createQuery } from "@/services/queryService";
+import { readQuoteDraft, clearQuoteDraft } from "@/lib/quoteDraft";
 import { homeRouteForRole } from "@/lib/roles";
 
 // ─── Static constant lives outside the component so it never changes reference
@@ -41,6 +43,27 @@ export default function LoginPage() {
       });
 
       toast.success("Login successful");
+
+      // A returning customer who filled the storefront query form and chose "Sign in &
+      // send" has their selection parked here. Submit it now, so signing in finishes the
+      // job they actually came to do instead of dropping them on an empty dashboard.
+      const draft = readQuoteDraft();
+      if (draft && data.user?.role === "customer" && data.user?.customerId) {
+        try {
+          const q = await createQuery({
+            customerId: data.user.customerId,
+            services: draft.services,
+            pickupAddress: draft.pickupAddress,
+            destinationAddress: draft.destinationAddress,
+          });
+          clearQuoteDraft();
+          toast.success(`Query ${q?.data?.referenceNo ?? ""} sent — our team will come back to you shortly`.trim());
+        } catch (err) {
+          // They are signed in either way; the portal can re-raise it.
+          toast.error(err?.message || "Signed in, but the query needs re-sending from your portal");
+        }
+      }
+
       navigate(homeRouteForRole(data.user.role));
     } catch (err) {
       // axios interceptor normalizes errors to { message, status }

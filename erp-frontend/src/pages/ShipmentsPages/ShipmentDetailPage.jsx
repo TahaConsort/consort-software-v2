@@ -23,11 +23,13 @@ import { DOC_TYPE_OPTIONS } from "@/services/documentService";
 import { INVOICE_KIND_LABELS } from "@/services/financeService";
 import {
   SHIPMENT_STATUS_LABELS, OTC_MILESTONE_LABELS, INVOICE_STATUS_LABELS, labelForService,
-  CRO_HANDLING_SHORT, LC_HANDLING_SHORT, labelForPackage, paymentStateOf, PAYMENT_STATE_CLASS,
+  paymentStateOf, PAYMENT_STATE_CLASS,
   DEFAULT_CURRENCY, routeOf,
 } from "@/lib/catalog";
 import { joinRoom } from "@/lib/socket";
 import DocumentsPanel from "@/components/DocumentsPanel";
+import ShipmentPartiesPanel from "@/components/shipment/ShipmentPartiesPanel";
+import TradeDocumentsPanel from "@/components/shipment/TradeDocumentsPanel";
 
 const EMPTY = [];
 
@@ -217,15 +219,6 @@ const ShipmentDetailPage = () => {
           <p className="text-sm text-muted-foreground mt-1">{shipment.customerCompany} · {shipment.customerRef}</p>
           <div className="flex flex-wrap gap-1 mt-2">
             {/* The package (what was sold) leads; the composed services follow. */}
-            {shipment.servicePackage && (
-              <Badge className="text-[10px]">{labelForPackage(shipment.servicePackage)}</Badge>
-            )}
-            {shipment.croHandledBy && shipment.croHandledBy !== "not_applicable" && (
-              <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[shipment.croHandledBy]}</Badge>
-            )}
-            {shipment.lcHandledBy && shipment.lcHandledBy !== "not_applicable" && (
-              <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[shipment.lcHandledBy]}</Badge>
-            )}
             {(shipment.services ?? []).map((s) => <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>)}
           </div>
           {routeOf(shipment) && (
@@ -424,6 +417,16 @@ const ShipmentDetailPage = () => {
 
         {/* OTC + invoices */}
         <div className="space-y-6">
+          {/* Parties — who plays which role on THIS shipment (roadmap §2/§7). Rendered
+              for everyone with `trade.read`; the panel hides its own controls when the
+              viewer lacks `trade.party.manage` or the order is locked. */}
+          <ShipmentPartiesPanel
+            shipmentId={shipment.id}
+            shipmentKind={shipment.kind}
+            locked={locked}
+            lockReason={lock ? `This shipment is ${lock} — parties are read-only.` : null}
+          />
+
           {/* Job P&L (freight-forwarding OTC upgrade) */}
           {pnl && <PnlCard pnl={pnl} />}
 
@@ -509,6 +512,13 @@ const ShipmentDetailPage = () => {
           here re-derives the step gating immediately.
           Deliberately no `onChanged`: documentStore publishes the `shipment:{id}` topic,
           which this page already owns — passing one too would refetch twice. */}
+      {/* The structured export document pack (roadmap §4). Rendered above the file
+}
+        . qq{          list because the generated packing list and commercial invoice land IN that
+}
+        . qq{          list — the data comes first, the paperwork follows from it. */}
+      <TradeDocumentsPanel shipment={shipment} />
+
       <DocumentsPanel ownerType="shipment" ownerId={id} showRequired locked={locked} />
 
       {/* Dialogs */}

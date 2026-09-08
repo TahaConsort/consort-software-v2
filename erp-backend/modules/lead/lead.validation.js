@@ -8,7 +8,7 @@ import { z } from "zod";
 
 // LeadSource is set automatically by the intake channel, never chosen manually
 // (ADR-042 — immutable, INV-13): a lead created here is always `bdo`; `direct`
-// comes from a storefront inquiry conversion and `bank_lc` from the LC webhook.
+// comes from a storefront self-signup and `bank_lc` from the LC webhook.
 const OUTREACH_TYPES = ["call", "email", "meeting", "whatsapp", "linkedin", "site_visit"];
 const OUTREACH_OUTCOMES = ["positive", "neutral", "negative", "no_response"];
 

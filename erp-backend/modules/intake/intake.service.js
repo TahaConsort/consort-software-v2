@@ -1,13 +1,14 @@
 import crypto from "crypto";
 import { allocateRef } from "../../utils/referenceNumber.js";
-import { inferPackageFromServices, resolveCroMode, resolveLcMode, resolveServices } from "../../utils/servicePackage.js";
 
 /**
- * Shared intake materialisation (CRM_MASTER §5.20/§5.21). Both the *direct*
- * (Public Inquiry) and *bank_lc* (Bank LC Referral) channels converge here:
- * given a triaged intake record they create — in ONE transaction — a company +
- * contact + customer (respecting INV-06) + a converted lead + a query carrying
- * the selected services. The channel only differs in the `source` passed in.
+ * Shared intake materialisation (CRM_MASTER §5.21). Given a triaged intake record
+ * it creates — in ONE transaction — a company + contact + customer (respecting
+ * INV-06) + a converted lead + a query carrying the selected services.
+ *
+ * The *bank_lc* (Bank LC Referral) channel is the only caller left; the shape is
+ * still channel-agnostic (the `source` is passed in) so a second intake channel
+ * can reuse it without rework.
  *
  * Call INSIDE a prisma.$transaction; returns the created rows and event payloads
  * so the caller can attach channel-specific outbox events + back-links.
@@ -18,7 +19,10 @@ const emitEvent = (tx, eventType, payload) =>
 
 const sha256 = (v) => crypto.createHash("sha256").update(v).digest("hex");
 
-const normalizeName = (s) => (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+// Company dedupe key. Exported so every path that can mint a company — intake
+// conversion and the inline "new customer" on a query — folds the same way; two
+// normalizers that drift produce duplicate companies for the same name.
+export const normalizeName = (s) => (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
 
 // Keep only reference codes that actually exist; silently drop unknowns so a
 // triage convert never hard-fails on a stale port/container code.
@@ -53,14 +57,11 @@ export const materializeCustomerAndQuery = async (
     contactPhone,
     country,
     services,
+    pickupAddress,
+    destinationAddress,
     originPort,
     destinationPort,
     containerTypeCode,
-    incoterm,
-    cargoDescription,
-    weightKg,
-    isHazardous,
-    isReefer,
     note,
   },
 ) => {
@@ -106,8 +107,8 @@ export const materializeCustomerAndQuery = async (
   //
   // A customer originates from exactly ONE lead (convertedToCustomerId is unique), and
   // the customer above is reused whenever the company already exists (INV-06). So the
-  // SECOND intake from a company we already serve — a repeat LC from the same importer,
-  // a second web inquiry — must attach to that customer's existing lead. Creating one
+  // SECOND intake from a company we already serve — a repeat LC from the same importer
+  // — must attach to that customer's existing lead. Creating one
   // unconditionally, as this did, made every such conversion die on a unique-constraint
   // 500 with nothing saved and no usable message.
   let lead = await tx.lead.findFirst({ where: { convertedToCustomerId: customer.id } });
@@ -143,41 +144,29 @@ export const materializeCustomerAndQuery = async (
     await emitEvent(tx, "lead.created", { leadId: lead.id, referenceNo: lead.referenceNo, source });
   }
 
-  // 5. Query — the intake channel supplies raw services rather than a package, so
-  //    infer one from them; resolveServices then applies the preset and the
-  //    bank_lc ⇒ lc_finance rule (RULE-SVC-04).
-  const servicePackage = inferPackageFromServices(services ?? []);
-  // A bank-LC referral defaults to Consort managing the LC (ADR-050 / RULE-SVC-04).
-  const lcHandledBy = resolveLcMode({ servicePackage, customerSource: source });
-  const finalServices = resolveServices({ servicePackage, services, customerSource: source, lcHandledBy });
-  const croHandledBy = resolveCroMode({ servicePackage });
+  // 5. Query — a plain enquiry now. The intake channel carries the services verbatim.
+  //    Addresses are required on a query, so an intake that only knew the ports falls
+  //    back to the port codes rather than refusing to convert.
+  const finalServices = services ?? [];
   const refs = await sanitizeRefs(tx, { originPort, destinationPort, containerTypeCode });
   const queryRef = await allocateRef(tx, "query");
-  const hazardous = !!isHazardous;
-  const reefer = !!isReefer;
   const query = await tx.query.create({
     data: {
       referenceNo: queryRef,
       customerId: customer.id,
       raisedById: ownerId,
-      raisedVia: "bdo",
+      // The intake channel IS the query's channel: a bank-LC referral lands in the
+      // Bank LC bucket on the Queries screen, not in BDO's (channel tabs).
+      raisedVia: source === "bank_lc" ? "bank_lc" : "bdo",
+      customerName: contactName,
+      customerEmail: contactEmail ?? "",
+      customerPhone: contactPhone ?? "",
+      pickupAddress: pickupAddress ?? refs.originPort ?? "Not specified",
+      destinationAddress: destinationAddress ?? refs.destinationPort ?? "Not specified",
       services: finalServices,
-      servicePackage,
-      croHandledBy,
-      originPort: refs.originPort,
-      destinationPort: refs.destinationPort,
-      containerTypeCode: refs.containerTypeCode,
-      incoterm: incoterm ?? null,
-      cargoDescription: cargoDescription ?? null,
-      weightKg: weightKg ?? null,
-      isHazardous: hazardous,
-      isReefer: reefer,
     },
   });
   await emitEvent(tx, "query.created", { queryId: query.id, referenceNo: queryRef, services: finalServices });
-  if (hazardous || reefer) {
-    await emitEvent(tx, "query.hazardous", { queryId: query.id, referenceNo: queryRef });
-  }
 
   // 6. Portal login (CRM_MASTER §5.16). A converted customer must be able to act
   //    on their OWN quotes — approve/reject in the portal (§5.7) — instead of the

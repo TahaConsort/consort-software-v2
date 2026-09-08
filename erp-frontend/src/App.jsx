@@ -46,24 +46,28 @@ import AuditListPage from "./pages/AuditPages/AuditListPage";
 import ChatPage from "./pages/ChatPages/ChatPage";
 import NotificationsPage from "./pages/NotificationsPages/NotificationsPage";
 
-// Public storefront + intake channels (§5.20/§5.21)
+// Public storefront + intake channel (§5.20/§5.21)
 import StorefrontPage from "./pages/PublicPages/StorefrontPage";
-import InquiriesListPage from "./pages/InquiryPages/InquiriesListPage";
 import LcInboxPage from "./pages/LcPages/LcInboxPage";
 import WorkflowManagePage from "./pages/WorkflowPages/WorkflowManagePage";
+import TradeRegistersPage from "./pages/TradePages/TradeRegistersPage";
+import VendorDetailPage from "./pages/VendorsPages/VendorDetailPage";
 
 // Role groups (Management passes every gate via RoleGuard, ADR-044).
-const INTERNAL = ["hr", "asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
+const INTERNAL = ["hr", "asm", "bdo", "web_manager", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
 const SALES = ["asm", "bdo"];
-const QUERY_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"];
+// web_manager works the website channel from the Queries screen (channel tabs).
+const QUERY_ROLES = ["asm", "bdo", "web_manager", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"];
 const QUOTATION_ROLES = ["asm", "ops_manager", "ops_exec"];
 const SHIPMENT_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
 const FINANCE_ROLES = ["accounts"]; // + Management via RoleGuard (ADR-044)
-const INQUIRY_ROLES = ["asm", "bdo"]; // direct-channel triage (§5.20)
 const LC_ROLES = ["ops_manager", "ops_exec"]; // bank-LC inbox (§5.21)
 const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"]; // vendor.read (freight-forwarding OTC)
 const RFQ_ROLES = ["ops_manager", "ops_exec"]; // rfq.read — the buy side stays with Ops
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // fleet.read — own drivers & vehicles
+// trade.read — the export document cycle. Contracts and instruments are registered
+// before a shipment exists, so this is its own section rather than a shipment tab.
+const TRADE_ROLES = ["ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "accounts", "asm"];
 
 const App = () => {
   return (
@@ -125,10 +129,7 @@ const App = () => {
                 <Route path="queries" element={<QueriesListPage />} />
               </Route>
 
-              {/* Intake channels (§5.20/§5.21) */}
-              <Route element={<RoleGuard allowedRoles={INQUIRY_ROLES} />}>
-                <Route path="inquiries" element={<InquiriesListPage />} />
-              </Route>
+              {/* Intake channel (§5.21) */}
               <Route element={<RoleGuard allowedRoles={LC_ROLES} />}>
                 <Route path="lc-inbox" element={<LcInboxPage />} />
               </Route>
@@ -164,6 +165,12 @@ const App = () => {
                 <Route path="vendors" element={<VendorsListPage />} />
                 <Route path="vendors/shipping-lines" element={<VendorsListPage key="shipping_line" lockedType="shipping_line" />} />
                 <Route path="vendors/transporters" element={<VendorsListPage key="transporter" lockedType="transporter" />} />
+                <Route path="vendors/:id" element={<VendorDetailPage />} />
+              </Route>
+
+              {/* Trade — contracts + bank instruments (roadmap Step 1) */}
+              <Route element={<RoleGuard allowedRoles={TRADE_ROLES} />}>
+                <Route path="trade" element={<TradeRegistersPage />} />
               </Route>
 
               {/* Own fleet — drivers, trucks, dumpers (fleet.read/fleet.manage) */}

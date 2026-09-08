@@ -5,6 +5,7 @@ import {
   createQuotation,
   updateQuotation,
   sendQuotation,
+  shareQuotation,
   approveQuotation,
   rejectQuotation,
   reviseQuotation,
@@ -18,6 +19,7 @@ import {
   updateQuotationSchema,
   approveQuotationSchema,
   rejectQuotationSchema,
+  shareQuotationSchema,
 } from "./quotation.validation.js";
 
 const router = express.Router();
@@ -34,6 +36,9 @@ router.get("/:id", requirePermission("quotation.read"), getQuotation);
 router.post("/", requirePermission("quotation.create"), validate(createQuotationSchema), createQuotation);
 router.put("/:id", requirePermission("quotation.revise"), validate(updateQuotationSchema), updateQuotation);
 router.post("/:id/send", requirePermission("quotation.send"), sendQuotation);
+// BDO relays the sent quote to the customer (mail/phone/WhatsApp) and records how —
+// works for customers from the storefront form, a bank LC, or the BDO's own book.
+router.post("/:id/share", requirePermission("quotation.share"), validate(shareQuotationSchema), shareQuotation);
 router.post("/:id/revise", requirePermission("quotation.revise"), reviseQuotation);
 
 // Decision — customer / ASM / Management, never the owning BDO (RULE-QT-03).

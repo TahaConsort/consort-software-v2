@@ -214,18 +214,6 @@ const HANDLERS = {
     });
   },
 
-  "inquiry.received": async (payload) => {
-    await notifyUsers(await usersWithRole("asm", "bdo"), {
-      type: "inquiry.received",
-      title: `New storefront inquiry ${payload.referenceNo}`,
-      body: `${payload.companyName ?? "A visitor"} requested a quote. Triage in the inbox.`,
-      actionUrl: "/admin/inquiries",
-      priority: 1,
-    });
-  },
-
-  "inquiry.converted": async () => {},
-
   // A converted customer was given a portal login + activation invite (§5.16).
   // The Notifications module (email) would deliver the activation link; until
   // then, tell the owner an invite is pending so they can pass it on. The raw
@@ -299,6 +287,9 @@ const HANDLERS = {
     });
   },
 
+  // Ops price it; Sales owns the relationship behind it. A query raised on the
+  // storefront by a customer who signed up minutes ago has no BDO yet, so it goes to
+  // the whole Sales floor as claimable work rather than to nobody (§5.20).
   "query.created": async (payload) => {
     await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
       type: "query.created",
@@ -306,35 +297,35 @@ const HANDLERS = {
       body: `Services: ${(payload.services ?? []).join(", ")}`,
       actionUrl: "/admin/queries",
     });
+
+    const customer = payload.customerId
+      ? await prisma.customer.findUnique({ where: { id: payload.customerId } })
+      : null;
+    const services = (payload.services ?? []).join(", ");
+
+    if (customer?.assignedBdoId) {
+      await notifyUsers([customer.assignedBdoId], {
+        type: "query.created",
+        title: `New query ${payload.referenceNo} from your customer`,
+        body: `Services: ${services}`,
+        actionUrl: "/admin/queries",
+        priority: 1,
+      });
+    } else {
+      await notifyUsers(await usersWithRole("asm", "bdo"), {
+        type: "query.created",
+        title: `Unclaimed query ${payload.referenceNo}`,
+        body: `${services || "A new request"} — no BDO assigned yet. Claim it in Queries.`,
+        actionUrl: "/admin/queries",
+        priority: 1,
+      });
+    }
   },
 
-  "query.hazardous": async (payload) => {
-    const dept = await prisma.department.findUnique({ where: { code: "compliance" } });
-    if (dept) {
-      try {
-        await prisma.task.create({
-          data: {
-            idempotencyKey: `precheck:${payload.queryId}`,
-            origin: "query_precheck",
-            queryId: payload.queryId,
-            title: `Compliance pre-check — ${payload.referenceNo}`,
-            description: "Hazardous/reefer cargo flagged on this query. Review before pricing.",
-            departmentId: dept.id,
-            status: "queued",
-            dueDate: new Date(Date.now() + 48 * 60 * 60 * 1000),
-          },
-        });
-      } catch (err) {
-        if (err?.code !== "P2002") throw err;
-      }
-    }
-    await notifyUsers(await usersWithRole("compliance_manager", "compliance_exec"), {
-      type: "query.hazardous",
-      title: `Pre-check needed — ${payload.referenceNo}`,
-      body: "Hazardous or reefer cargo requires a compliance pre-check.",
-      actionUrl: "/admin/queries",
-    });
-  },
+  // A BDO picked an unclaimed query up — it is theirs now, and everyone else's pool
+  // just shrank. Notification-free: the claimer already knows, and the fan-out row
+  // below refreshes the other BDOs' lists.
+  "query.claimed": async () => {},
 
   "query.stale": async (payload) => {
     const targets = [payload.raisedById, ...(await usersWithRole("asm"))];

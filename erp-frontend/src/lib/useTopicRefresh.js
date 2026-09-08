@@ -8,9 +8,9 @@ import { useAutoRefresh } from "./useAutoRefresh.js";
  *
  * The factory covers stores, but a few screens legitimately keep their own state — a
  * detail page with exactly one consumer, or a triage inbox with a local filter — and
- * those were the screens with no live path at all. The LC inbox and the storefront
- * inquiry inbox were the worst of it: inbound work that only ever appeared on a manual
- * reload, on pages whose entire purpose is to show newly arrived work.
+ * those were the screens with no live path at all. The LC inbox was the worst of it:
+ * inbound work that only ever appeared on a manual reload, on a page whose entire
+ * purpose is to show newly arrived work.
  *
  * Registered only while mounted, so `isLive` is trivially true and there is no stale
  * bookkeeping: an unmounted page simply refetches on its next mount.

@@ -14,8 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import toast from "react-hot-toast";
 import {
-  labelForService, PACKAGE_PRESET_SERVICES, CRO_HANDLING_SHORT, LC_HANDLING_SHORT,
-  labelForPackage, routeOf, DEFAULT_CURRENCY,
+  labelForService, routeOf, DEFAULT_CURRENCY,
 } from "@/lib/catalog";
 import { quoteTemplateFor } from "@/lib/quoteTemplates";
 
@@ -65,11 +64,8 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
       }));
     }
     return quoteTemplateFor({
-      servicePackage: query.servicePackage,
-      croHandledBy: query.croHandledBy,
-      extraServices: (query.services ?? []).filter(
-        (s) => !(PACKAGE_PRESET_SERVICES[query.servicePackage] ?? []).includes(s),
-      ),
+      services: query.services ?? [],
+      extraServices: query.services ?? [],
     });
   });
 
@@ -150,32 +146,14 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
             {/* What the customer asked for */}
             <div className="rounded-lg border bg-muted/30 p-3 space-y-2 text-sm">
               <div className="flex flex-wrap gap-1">
-                {query.servicePackage && <Badge className="text-[10px]">{labelForPackage(query.servicePackage)}</Badge>}
-                {query.croHandledBy && query.croHandledBy !== "not_applicable" && (
-                  <Badge variant="outline" className="text-[10px]">{CRO_HANDLING_SHORT[query.croHandledBy]}</Badge>
-                )}
-                {query.lcHandledBy && query.lcHandledBy !== "not_applicable" && (
-                  <Badge variant="outline" className="text-[10px]">{LC_HANDLING_SHORT[query.lcHandledBy]}</Badge>
-                )}
                 {(query.services ?? []).map((s) => (
                   <Badge key={s} variant="secondary" className="text-[10px]">{labelForService(s)}</Badge>
                 ))}
-                {query.isHazardous && <Badge variant="outline" className="text-[10px] text-red-600 border-red-300">Hazardous</Badge>}
-                {query.isReefer && <Badge variant="outline" className="text-[10px] text-sky-600 border-sky-300">Reefer</Badge>}
               </div>
-              {query.croHandledBy === "customer" && !fromRfq && (
-                <p className="text-xs text-muted-foreground">
-                  The customer is supplying their own CRO — no CRO charge line is pre-seeded.
-                </p>
-              )}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                {query.containerTypeCode && <span>Container: <b className="text-foreground">{query.containerTypeCode}</b></span>}
-                {query.incoterm && <span>Incoterm: <b className="text-foreground">{query.incoterm}</b></span>}
-                {query.weightKg != null && <span>Weight: <b className="text-foreground">{Number(query.weightKg).toLocaleString()} kg</b></span>}
+                {query.customerName && <span>Contact: <b className="text-foreground">{query.customerName}</b></span>}
+                {query.customerPhone && <span>Phone: <b className="text-foreground">{query.customerPhone}</b></span>}
               </div>
-              {query.cargoDescription && (
-                <p className="text-xs text-muted-foreground">Cargo: {query.cargoDescription}</p>
-              )}
             </div>
 
             {/* Vendor quotes in more than one currency can't be summed into one sell

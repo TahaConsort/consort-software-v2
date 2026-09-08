@@ -15,6 +15,7 @@ export const INTERNAL_ROLES = [
   "hr",
   "asm",
   "bdo",
+  "web_manager",
   "ops_manager",
   "ops_exec",
   "compliance_manager",

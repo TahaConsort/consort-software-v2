@@ -30,6 +30,12 @@ export const sendQuotation = async (id) => {
   return res.data;
 };
 
+// BDO records giving the sent quote to the customer: { channel, note? }.
+export const shareQuotation = async (id, payload) => {
+  const res = await api.post(`/quotations/${id}/share`, payload);
+  return res.data;
+};
+
 export const approveQuotation = async (id, rowVersion) => {
   const res = await api.post(`/quotations/${id}/approve`, rowVersion != null ? { rowVersion } : {});
   return res.data;

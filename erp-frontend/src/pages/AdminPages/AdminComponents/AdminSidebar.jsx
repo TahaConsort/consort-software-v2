@@ -19,7 +19,6 @@ import {
   Cpu,
   ShieldCheck,
   PhoneCall,
-  Inbox,
   Landmark,
   Truck,
   Workflow,
@@ -38,6 +37,9 @@ const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "complianc
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // own drivers & vehicles
 
 // Each item lists the roles that see it; Management sees everything (ADR-044).
+// Own-fleet screens are Ops + Transport only (fleet.read), narrower than VENDOR_ROLES.
+const FLEET_NAV_ROLES = ["ops_manager", "ops_exec", "transport_manager"];
+
 const NAV_ITEMS = [
   { name: "Dashboard", icon: LayoutDashboard, path: "/admin", roles: NON_MGMT_INTERNAL },
   { name: "Employees", icon: Users, path: "/admin/users", roles: ["hr"] },
@@ -49,9 +51,8 @@ const NAV_ITEMS = [
     name: "Queries",
     icon: FileSearch,
     path: "/admin/queries",
-    roles: ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"],
+    roles: ["asm", "bdo", "web_manager", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"],
   },
-  { name: "Inquiries", icon: Inbox, path: "/admin/inquiries", roles: ["asm", "bdo"] }, // direct channel (§5.20)
   { name: "LC Inbox", icon: Landmark, path: "/admin/lc-inbox", roles: ["ops_manager", "ops_exec"] }, // bank-LC (§5.21)
   // The buy side sits between the query and the quote, because that is the order
   // the work happens in: get vendor rates, then price the sale.
@@ -60,11 +61,29 @@ const NAV_ITEMS = [
   { name: "Shipments", icon: Ship, path: "/admin/shipments", roles: SHIPMENT_ROLES },
   { name: "Tasks", icon: ListChecks, path: "/admin/tasks", roles: SHIPMENT_ROLES },
   { name: "Finance", icon: Receipt, path: "/admin/finance", roles: ["accounts"] },
+  // Export trade documents (roadmap §4). Sits beside Finance because the cycle it
+  // starts — contract, bank registration, collection — is a money workflow.
+  {
+    name: "Trade",
+    icon: Landmark,
+    path: "/admin/trade",
+    roles: ["ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "accounts", "asm"],
+  },
+  // The five vendor sub-screens have always been routed but had no menu entry, so
+  // they were reachable only by URL. The sidebar has supported `children` all along.
   {
     name: "Vendors",
     icon: Truck,
     path: "/admin/vendors",
     roles: VENDOR_ROLES,
+    children: [
+      { name: "All Vendors", icon: Truck, path: "/admin/vendors", roles: VENDOR_ROLES },
+      { name: "Shipping Lines", icon: Ship, path: "/admin/vendors/shipping-lines", roles: VENDOR_ROLES },
+      { name: "Transporters", icon: Truck, path: "/admin/vendors/transporters", roles: VENDOR_ROLES },
+      { name: "Drivers", icon: Users, path: "/admin/vendors/drivers", roles: FLEET_NAV_ROLES },
+      { name: "Trucks", icon: Truck, path: "/admin/vendors/trucks", roles: FLEET_NAV_ROLES },
+      { name: "Dumpers", icon: Truck, path: "/admin/vendors/dumpers", roles: FLEET_NAV_ROLES },
+    ],
   },
   { name: "Chat", icon: MessagesSquare, path: "/admin/chat", roles: NON_MGMT_INTERNAL },
   { name: "Notifications", icon: Bell, path: "/admin/notifications", roles: NON_MGMT_INTERNAL, badge: "unread" },

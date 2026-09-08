@@ -68,26 +68,11 @@ const hydrate = async (rfqs) => {
       status: true,
       customerId: true,
       services: true,
-      servicePackage: true,
-      originPort: true,
-      destinationPort: true,
+      customerName: true,
+      customerEmail: true,
+      customerPhone: true,
       pickupAddress: true,
-      deliveryAddress: true,
-      senderName: true,
-      senderPhone: true,
-      senderAddress: true,
-      receiverName: true,
-      receiverPhone: true,
-      receiverAddress: true,
-      inlandMode: true,
-      originRailTerminal: true,
-      destinationRailTerminal: true,
-      containerTypeCode: true,
-      incoterm: true,
-      cargoDescription: true,
-      weightKg: true,
-      isHazardous: true,
-      isReefer: true,
+      destinationAddress: true,
     },
   });
   const customers = await prisma.customer.findMany({
@@ -219,10 +204,9 @@ export const createRfqs = catchAsync(async (req, res, next) => {
   }
 
   // Every requested service must actually be sold on this query, and must be one
-  // a vendor can price (lc_finance is a bank instrument, not a buy). Legs exist only
-  // on the transport service of a rail-mode query — and there they are mandatory,
-  // because a rail journey has three different vendors carrying three different prices.
-  const isRailTransport = (r) => r.service === "local_transport" && query.inlandMode === "rail";
+  // a vendor can price (lc_finance is a bank instrument, not a buy). Legs are now an
+  // explicit Ops choice on the transport service — the query no longer records an
+  // inland mode to derive them from — so they are allowed but never forced.
   for (const r of requests) {
     if (!query.services.includes(r.service)) {
       return next(new AppError(`This query does not include the ${r.service} service`, 400));
@@ -230,13 +214,8 @@ export const createRfqs = catchAsync(async (req, res, next) => {
     if (!RFQ_SERVICES.includes(r.service)) {
       return next(new AppError(`${r.service} cannot be sent to vendors for a rate`, 400));
     }
-    if (r.leg && !isRailTransport(r)) {
-      return next(new AppError("Legs only apply to the transport service of a rail-mode query", 400));
-    }
-    if (!r.leg && isRailTransport(r)) {
-      return next(
-        new AppError("This query moves inland by rail — request transport rates per leg (first mile, rail, last mile)", 400),
-      );
+    if (r.leg && r.service !== "local_transport") {
+      return next(new AppError("Legs only apply to the transport service", 400));
     }
   }
   const dupKey = (r) => `${r.service}:${r.leg ?? ""}`;

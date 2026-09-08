@@ -199,30 +199,8 @@ async function run() {
   const queryDoc = await prisma.document.findFirst({ where: { ownerType: "query", ownerId: queryId, docType: "lc" } });
   check("the LC PDF is attached to the query", !!queryDoc, queryDoc?.fileName);
 
-  // ── the LC snapshot the quoting screen renders ──
-  const lc = query?.lcDetails;
-  check("query carries an lcDetails snapshot", !!lc, lc ? `${Object.keys(lc).length} keys` : "missing");
-  check("snapshot has the credit's identity + money",
-    lc?.lcNumber === "LC1111112600042" && lc?.currency === "USD" && Number(lc?.amount) === 300000);
-  check("snapshot has both parties",
-    /LINYI TRADE CITY/.test(lc?.applicantName ?? "") && /NATIONAL STEEL/.test(lc?.beneficiaryName ?? ""));
-  check("snapshot has the dates that gate the schedule",
-    !!lc?.expiryDate && !!lc?.latestShipmentDate,
-    `ship by ${String(lc?.latestShipmentDate).slice(0, 10)}, expires ${String(lc?.expiryDate).slice(0, 10)}`);
-  check("snapshot has the movement rules",
-    lc?.partialShipments === "NOT ALLOWED" && lc?.transhipment === "ALLOWED");
-  check("snapshot has the long free-text blocks",
-    (lc?.documentsRequired?.length ?? 0) > 200 && (lc?.goodsDescription?.length ?? 0) > 200,
-    `46A ${lc?.documentsRequired?.length} chars, 45A ${lc?.goodsDescription?.length} chars`);
-  check("snapshot names the port it could not resolve",
-    lc?.unresolvedPorts?.some((p) => /QINGDAO/.test(p)), (lc?.unresolvedPorts ?? []).join("; "));
-  check("snapshot dates are JSON-safe strings", typeof lc?.expiryDate === "string", typeof lc?.expiryDate);
-  check("snapshot back-links to the referral", lc?.referralRef === clone.referenceNo, lc?.referralRef);
-
-  // The API the queries screen actually reads must carry it through, not just the DB.
-  const viaApi = await call(exec.accessToken, "GET", `/queries/${queryId}`);
-  check("GET /queries/:id returns lcDetails", !!viaApi.json?.data?.lcDetails?.lcNumber,
-    viaApi.json?.data?.lcDetails?.lcNumber);
+  // The lcDetails snapshot is gone with the rich Query model — the extracted fields
+  // stay on the BankLcReferral row, and the LC PDF is attached to the query above.
 
   // ── both ops roles can quote it ──
   for (const [role, session] of [["ops_exec", exec], ["ops_manager", mgr]]) {

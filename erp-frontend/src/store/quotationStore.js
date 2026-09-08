@@ -42,6 +42,10 @@ export const useQuotationStore = createResourceStore({
       sendQuotation: (id) =>
         mutate(() => quotationService.sendQuotation(id), { invalidates: quoteTopics }),
 
+      // BDO records giving the sent quote to the customer (mail/phone/WhatsApp).
+      shareQuotation: (id, payload) =>
+        mutate(() => quotationService.shareQuotation(id, payload), { invalidates: quoteTopics }),
+
       rejectQuotation: (id, reason) =>
         mutate(() => quotationService.rejectQuotation(id, reason), { invalidates: quoteTopics }),
 

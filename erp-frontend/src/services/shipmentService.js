@@ -47,3 +47,29 @@ export const setSchedule = async (id, payload) => {
   const res = await api.patch(`/shipments/${id}/schedule`, payload);
   return res.data;
 };
+
+// ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§7) ─────────
+// Reads need `trade.read`; writes need `trade.party.manage`, so a portal customer
+// gets the list (minus every bank and tax field, stripped server-side) and 403s on
+// everything else.
+
+export const listShipmentParties = async (id) => {
+  const res = await api.get(`/shipments/${id}/parties`);
+  return res.data;
+};
+
+// payload — { role, vendorId } | { role, customerId }, plus optional notes.
+export const addShipmentParty = async (id, payload) => {
+  const res = await api.post(`/shipments/${id}/parties`, payload);
+  return res.data;
+};
+
+export const updateShipmentParty = async (id, partyId, payload) => {
+  const res = await api.patch(`/shipments/${id}/parties/${partyId}`, payload);
+  return res.data;
+};
+
+export const removeShipmentParty = async (id, partyId) => {
+  const res = await api.delete(`/shipments/${id}/parties/${partyId}`);
+  return res.data;
+};

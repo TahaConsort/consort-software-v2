@@ -1,6 +1,6 @@
 /**
- * Package-aware quote templates — the charge lines Ops expects to price for each
- * service package, so a quote starts as a filled-in worksheet rather than a blank one.
+ * Service-aware quote templates — the charge lines Ops expects to price for each
+ * service, so a quote starts as a filled-in worksheet rather than a blank one.
  *
  * `chargeCode` must exist in the seeded `charge_types` catalog
  * (erp-backend/prisma/seed.js CHARGE_TYPES), because `resolveCharge`
@@ -23,27 +23,19 @@ const LINE = {
   detention_demurrage: "Detention / Demurrage",
 };
 
+// The charge lines each SERVICE brings to the sheet. Keyed on service code now that the
+// package layer is gone; a query selecting several services unions their lines, in this
+// declaration order, without repeating a code.
 const TEMPLATES = {
   local_transport: ["inland_transport", "fuel_surcharge", "loading_labour"],
-  loading_point_to_port: ["inland_transport", "lolo", "cro_charges", "port_handling", "documentation_fee"],
-  international: [
-    "ocean_freight",
-    "cro_charges",
-    "customs_clearance",
-    "port_handling",
-    "inland_transport",
-    "documentation_fee",
-  ],
-  // Import delivery: terminal charges to get the box out, the run to the consignee, the
-  // run back with the empty. Detention is priced at zero by default and only bites when
-  // the free days run out — but it belongs on the sheet so nobody forgets to quote it.
-  port_to_consignee: [
-    "port_handling",
-    "inland_transport",
-    "loading_labour",
-    "detention_demurrage",
-    "freight_forwarding_fee",
-  ],
+  port_handling: ["lolo", "cro_charges", "port_handling"],
+  customs_clearance: ["customs_clearance"],
+  sea_freight: ["ocean_freight", "documentation_fee"],
+  lc_finance: ["freight_forwarding_fee"],
+  // Destination delivery: the run to the consignee and the run back with the empty.
+  // Detention is priced at zero by default and only bites when the free days run out —
+  // but it belongs on the sheet so nobody forgets to quote it.
+  destination_services: ["inland_transport", "detention_demurrage"],
 };
 
 // Which service each charge code belongs to, so the line carries it through to the
@@ -67,18 +59,17 @@ const SERVICE_OF = {
 /**
  * The charge lines to pre-seed for a query.
  *
- * @param servicePackage the query's package (null for a pre-package query)
- * @param croHandledBy   drops the CRO line when the customer supplies their own CRO —
- *                       we aren't buying it, so there is nothing to charge for
- * @param extraServices  service codes beyond the package preset; each gets its own
- *                       line so an Ops fine-tune still produces something to price
+ * @param services      the query's selected services. Free text, so anything without a
+ *                      template contributes nothing but still gets its own line below.
+ * @param extraServices services with no template of their own; each gets a bare line so
+ *                      an Ops fine-tune still produces something to price
  */
-export const quoteTemplateFor = ({ servicePackage, croHandledBy, extraServices = [] } = {}) => {
-  const codes = [...(TEMPLATES[servicePackage] ?? [])];
-
-  if (croHandledBy === "customer") {
-    const i = codes.indexOf("cro_charges");
-    if (i >= 0) codes.splice(i, 1);
+export const quoteTemplateFor = ({ services = [], extraServices = [] } = {}) => {
+  const codes = [];
+  for (const svc of services) {
+    for (const code of TEMPLATES[svc] ?? []) {
+      if (!codes.includes(code)) codes.push(code);
+    }
   }
 
   const lines = codes.map((chargeCode) => ({

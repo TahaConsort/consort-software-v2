@@ -77,7 +77,7 @@ export const createLead = catchAsync(async (req, res, next) => {
 
   // Source is not chosen manually — a lead created in the CRM is always `bdo`
   // (ADR-042/INV-13). The `direct` and `bank_lc` sources are set by their
-  // intake flows (storefront inquiry / bank LC webhook), not here.
+  // intake flow (the bank LC webhook), not here.
   const source = "bdo";
 
   // Only ASM/Management may assign someone else as owner; a BDO owns their own.
