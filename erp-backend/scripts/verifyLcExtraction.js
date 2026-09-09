@@ -180,10 +180,23 @@ async function run() {
   check("POST /convert mints a customer + query", conv.status === 201 && !!queryId, conv.json?.message);
 
   const query = queryId ? await prisma.query.findUnique({ where: { id: queryId } }) : null;
-  check("query carries commodity AND quantity", /IRON ORE PELLETS/.test(query?.cargoDescription ?? "")
-    && /2500MT/.test(query?.cargoDescription ?? ""), query?.cargoDescription);
-  check("prose loading port resolved to a code", query?.originPort === "PKKHI", query?.originPort);
-  check("query carries the LC's incoterm", query?.incoterm === "CFR", query?.incoterm);
+  // The rich Query model is gone: cargo, ports, incoterm and weight are no longer
+  // columns on a query. What the LC said is preserved on the lead history (checked
+  // below) and in the attached PDF; the lane survives as the pickup address.
+  check("query carries the lane the LC named", /KARACHI|PKKHI/i.test(query?.pickupAddress ?? ""),
+    query?.pickupAddress);
+  check("lc_finance is implied on a bank-LC query", (query?.services ?? []).includes("lc_finance"),
+    (query?.services ?? []).join(", "));
+
+  // Ops converts, Sales owns: the conversion must leave the customer in the claim pool
+  // so a BDO can take it and decide on the quote (2026-09-08).
+  const convCustomer = await prisma.customer.findUnique({
+    where: { id: (await prisma.bankLcReferral.findUnique({ where: { id: clone.id } }))?.convertedCustomerId },
+  });
+  check("converted customer lands in the unclaimed pool", convCustomer?.assignedBdoId === null,
+    `assignedBdoId=${convCustomer?.assignedBdoId}`);
+  check("the query is raised by the converting ops user", query?.raisedById === exec.user?.id,
+    query?.raisedById);
 
   // The LC's own words are kept on the lead's status history — the Query model has no
   // free-text field, and losing the bank's phrasing entirely is worse than the detour.
@@ -194,7 +207,6 @@ async function run() {
     /IRON ORE PELLETS/.test(hist?.notes ?? "") && /300000/.test(hist?.notes ?? ""),
     (hist?.notes ?? "").split("\n")[1]);
 
-  check("quantity became a real weight", Number(query?.weightKg) === 2_500_000, `${query?.weightKg} kg`);
 
   const queryDoc = await prisma.document.findFirst({ where: { ownerType: "query", ownerId: queryId, docType: "lc" } });
   check("the LC PDF is attached to the query", !!queryDoc, queryDoc?.fileName);

@@ -18,6 +18,7 @@ export const DOC_TYPE_OPTIONS = [
   { value: "authority_letterhead", label: "Authority Letterhead" },
   { value: "undertaking", label: "Undertaking" },
   { value: "quotation", label: "Quotation" },
+  { value: "quotation_acceptance", label: "Signed Quotation Acceptance" },
   { value: "rate_confirmation", label: "Rate Confirmation (RC)" },
   { value: "lc", label: "Letter of Credit / SWIFT Advice" },
   { value: "cro", label: "Container Release Order (CRO)" },
@@ -31,6 +32,11 @@ export const DOC_TYPE_OPTIONS = [
   { value: "delivery_order", label: "Delivery Order (DO)" },
   { value: "gate_pass", label: "Gate Pass" },
   { value: "proof", label: "Proof / Evidence" },
+  // Export trade document register (roadmap §4)
+  { value: "trade_contract", label: "Sales Contract / Proforma Invoice" },
+  { value: "financial_instrument", label: "Financial Instrument (Bank EXP Registration)" },
+  { value: "terminal_invoice", label: "Port / Terminal Handling Invoice" },
+  { value: "forwarder_invoice", label: "Freight Forwarder's Invoice" },
   // Master-data paperwork — vendors, drivers and own vehicles
   { value: "cnic", label: "CNIC (National ID)" },
   { value: "driving_license", label: "Driving Licence" },
@@ -84,6 +90,16 @@ export const publishDocument = async (id) => {
 
 export const deleteDocument = async (id, reason) => {
   const res = await api.delete(`/documents/${id}`, { data: reason ? { reason } : {} });
+  return res.data;
+};
+
+/**
+ * Ops signs off a document whose type requires it — the customer's signed Rate
+ * Confirmation before Order Lock. `status` is "verified" or "rejected"; a rejection
+ * needs a note, which is what the customer is told.
+ */
+export const verifyDocument = async (id, { status, note } = {}) => {
+  const res = await api.post(`/documents/${id}/verification`, { status, ...(note ? { note } : {}) });
   return res.data;
 };
 

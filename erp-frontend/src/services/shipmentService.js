@@ -48,6 +48,29 @@ export const setSchedule = async (id, payload) => {
   return res.data;
 };
 
+// ── Ops ownership ────────────────────────────────────────────────────────────
+// One ops person runs a shipment end to end. Claiming is what starts the work:
+// until then its first operations task sits in the department queue.
+
+export const claimShipment = async (id) => {
+  const res = await api.post(`/shipments/${id}/claim`);
+  return res.data;
+};
+
+// Management only. `ownerId: null` releases the shipment back to the pool.
+export const assignShipment = async (id, ownerId) => {
+  const res = await api.post(`/shipments/${id}/assign`, { ownerId });
+  return res.data;
+};
+
+// Roadmap Step 1 on a quotation-born shipment (ADR-057): link the Trade Contract and/or
+// the Financial Instrument the step's `record` items derive from. Needs
+// `trade.contract.manage`. payload — { contractId?, financialInstrumentId? }.
+export const linkTradeRegisters = async (id, payload) => {
+  const res = await api.patch(`/shipments/${id}/trade-links`, payload);
+  return res.data;
+};
+
 // ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§7) ─────────
 // Reads need `trade.read`; writes need `trade.party.manage`, so a portal customer
 // gets the list (minus every bank and tax field, stripped server-side) and 403s on

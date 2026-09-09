@@ -16,6 +16,13 @@ export const NOTIFIABLE_TYPES = [
   "shipment.created", "shipment.resumed", "shipment.cancelled", "shipment.closed",
   "invoice.issued", "payment.received", "task.overdue", "task.unassigned",
   "lead.converted", "visit.scheduled", "visit.no_show",
+  // Ops ownership + the Rate Confirmation gate (2026-09-08).
+  "query.claimed", "shipment.released",
+  "document.awaiting_verification", "document.rejected",
+  // Customer acceptance (ADR-056): sales recorded a verbal yes / the link went unused.
+  "quotation.acceptance_claimed", "quotation.acceptance_lapsed",
+  // Trade alerts (roadmap §7.2) — detected by the nightly sweeps.
+  "fi.expiring", "fi.da_due", "trade.mismatch_detected",
 ];
 export const MANDATORY_TYPES = ["task.assigned", "shipment.held"];
 export const NOTIF_CHANNELS = ["in_app", "email"]; // whatsapp is a Phase-1.5 stub

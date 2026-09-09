@@ -39,15 +39,23 @@ export const getReference = catchAsync(async (req, res) => {
 });
 
 /* ── POST /api/services/compose ── */
-// Previews the OTD path every shipment runs. Powers the "your shipment will run N steps"
+// Previews the OTD path a shipment runs. Powers the "your shipment will run N steps"
 // preview so the customer sees what they are buying before they commit.
+//
+// `kind` picks the path: freight forwarding (the default, and what a quotation becomes)
+// or export trade. They are different processes, so previewing the union would be a lie.
 export const composePreview = catchAsync(async (req, res, next) => {
+  const kind = req.body?.kind ?? req.query?.kind ?? "forwarding";
+  if (!["forwarding", "trade"].includes(kind)) {
+    return next(new AppError("kind must be 'forwarding' or 'trade'", 422));
+  }
+
   const templates = await prisma.otdStepTemplate.findMany();
   if (templates.length === 0) {
     return next(new AppError("OTD step templates are not seeded — run `node prisma/seed.js`", 503));
   }
 
-  const path = composeOtdPath(templates);
+  const path = composeOtdPath(templates, kind);
 
   // Fold each step's checklist into the preview. Without this the preview would
   // under-report badly: `order_confirmed` keeps its document pack in sub-actions, so its
@@ -68,6 +76,7 @@ export const composePreview = catchAsync(async (req, res, next) => {
   res.json({
     success: true,
     data: {
+      kind,
       steps,
       stepCount: steps.length,
       departments: departmentsOnPath(path), // departments with a role on this shipment (RULE-SVC-02)

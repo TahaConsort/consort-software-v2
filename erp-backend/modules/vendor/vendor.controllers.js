@@ -3,6 +3,8 @@ import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import crypto from "crypto";
 import { allocateRef } from "../../utils/referenceNumber.js";
+import { isMailConfigured, sendMail } from "../../config/mailer.js";
+import { buildQuoteRequestEmail } from "./vendor.mail.js";
 
 /** Vendors feed the payable-invoice pickers on the Finance and shipment screens. */
 const emitVendorChanged = (tx, vendorId) =>
@@ -116,4 +118,39 @@ export const deleteVendor = catchAsync(async (req, res, next) => {
     await emitVendorChanged(tx, existing.id);
   });
   res.json({ success: true, message: "Vendor deleted" });
+});
+
+/* ── POST /api/vendors/:id/quote-request ── */
+/**
+ * Email a vendor asking for their rates — the "Quote" button on the vendor card.
+ *
+ * Deliberately NOT a VendorRfq: that record belongs to a query and carries the buy
+ * side of a specific job. This is the directory's own lightweight nudge, so it writes
+ * nothing and simply sends the mail. If it ever needs to be tracked, it becomes an RFQ.
+ *
+ * Replies go to the requester rather than the shared mailbox, because the person who
+ * asked for the rate is the one who has to read it.
+ */
+export const requestVendorQuote = catchAsync(async (req, res, next) => {
+  const vendor = await prisma.vendor.findUnique({ where: { id: req.params.id } });
+  if (!vendor) return next(new AppError("Vendor not found", 404));
+  if (!vendor.email) {
+    return next(new AppError(`${vendor.name} has no email address on file — add one to request rates`, 422));
+  }
+  if (!isMailConfigured()) {
+    return next(new AppError("Email is not configured on the server yet — set MAIL_USER and MAIL_PASSWORD", 503));
+  }
+
+  const { subject, text, html } = buildQuoteRequestEmail(vendor, req.user, req.body?.message);
+
+  try {
+    await sendMail({ to: vendor.email, subject, text, html, replyTo: req.user?.email });
+  } catch (err) {
+    // Gmail's SMTP errors name the account and the auth failure; that is server
+    // config detail, so it is logged rather than returned to the browser.
+    console.error("[vendor.quote-request] send failed:", err?.message);
+    return next(new AppError("Could not send the email — check the mail settings and try again", 502));
+  }
+
+  res.json({ success: true, message: `Rate request emailed to ${vendor.email}` });
 });

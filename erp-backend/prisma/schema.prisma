@@ -127,6 +127,32 @@ enum ApprovalChannel {
   customer_portal
   asm
   management
+  // The channel owners who decide on the customer's behalf (2026-09-08): the BDO
+  // who raised the query or owns the customer; the web_manager for website queries.
+  bdo
+  web_manager
+  // The customer decided for THEMSELVES through a one-time secure link, without a
+  // portal account. `quotations.decided_by_id` stays NULL for this channel — no
+  // internal user made the call — and the provenance lives on `approval_links`.
+  approval_link
+  // The customer signed the quotation on paper and Operations verified the scan
+  // (ADR-056). `decided_by_id` stays NULL here too — the verifier confirmed evidence,
+  // they did not decide — and `acceptance_document_id` points at that evidence.
+  signed_copy
+}
+
+/** What a one-time approval link authorises. `rate_confirmation` is the next subject. */
+enum ApprovalSubject {
+  quotation
+
+  @@map("approval_subject")
+}
+
+enum ApprovalDecision {
+  approved
+  rejected
+
+  @@map("approval_decision")
 }
 
 // How the BDO relayed a sent quote to the customer (email, call, WhatsApp, face to face)
@@ -160,6 +186,10 @@ enum ServiceCode {
 enum StepActionKind {
   manual
   document
+  // Satisfied by a structured REGISTER linked to the shipment — the Trade Contract or
+  // the (active) Financial Instrument — derived at read time exactly like `document`
+  // (ADR-057). `record_type` names which.
+  record
 
   @@map("step_action_kind")
 }
@@ -324,6 +354,12 @@ enum ShipmentStatus {
   destination_inspection
   destination_do
   destination_pickup
+  // Export-trade rungs (roadmap §5 steps 2, 3 and 6). The other five trade steps derive
+  // statuses the forwarding path already had — there is no honest existing equivalent
+  // for "packed", "invoiced" and "logistics bills settled".
+  packing_confirmed
+  invoice_raised
+  logistics_settled
   delivered
   settled
   closed
@@ -414,6 +450,18 @@ enum ScanStatus {
   pending
   clean
   infected
+}
+
+// Ops sign-off on a document whose TYPE requires it (document_types.requires_verification)
+// — the customer's signed Rate Confirmation before Order Lock. A doc of such a type
+// satisfies a step gate only while `verified`; `rejected` satisfies nothing and may be
+// deleted so a corrected copy can replace it (RULE-DOC-04 carve-out).
+enum DocumentVerification {
+  unverified
+  verified
+  rejected
+
+  @@map("document_verification")
 }
 
 enum ChannelType {
@@ -800,6 +848,50 @@ model Query {
   @@map("queries")
 }
 
+/**
+ * A one-time secure link that lets the CUSTOMER approve or reject for themselves,
+ * without a portal account (CRM_MASTER §5.7).
+ *
+ * Why it exists: the alternative is an internal user clicking "Approve by customer"
+ * on their behalf, which leaves no evidence the customer ever agreed. A link carries
+ * its own provenance — who opened it, from where, and exactly what they were shown.
+ *
+ * Security shape:
+ *  - only the SHA-256 `tokenHash` is stored. The plaintext token is returned once, at
+ *    creation, and never again — a dump of this table cannot be replayed into an
+ *    approval;
+ *  - single use: `decidedAt` closes the link, so a forwarded mail cannot re-decide;
+ *  - always expires, and can be revoked early;
+ *  - minting a new link revokes the previous active one, so exactly one link is live
+ *    per subject and a leaked older link is dead on arrival.
+ */
+model ApprovalLink {
+  id            String            @id @default(uuid())
+  tokenHash     String            @unique @map("token_hash")
+  subject       ApprovalSubject   @default(quotation)
+  quotationId   String?           @map("quotation_id")
+  quotation     Quotation?        @relation(fields: [quotationId], references: [id])
+  createdById   String            @map("created_by_id") // the internal user who issued it
+  expiresAt     DateTime          @map("expires_at")
+  revokedAt     DateTime?         @map("revoked_at")
+  revokedById   String?           @map("revoked_by_id")
+  // The decision, and who actually made it. Self-declared, but recorded alongside the
+  // IP and user agent that submitted it — which is strictly more evidence than an
+  // internal "approve on their behalf" click leaves behind.
+  decision      ApprovalDecision?
+  decidedAt     DateTime?         @map("decided_at")
+  approverName  String?           @map("approver_name")
+  approverEmail String?           @map("approver_email")
+  approverIp    String?           @map("approver_ip")
+  approverAgent String?           @map("approver_agent")
+  reason        String?           // the customer's words when they reject
+  createdAt     DateTime          @default(now()) @map("created_at")
+
+  @@index([quotationId])
+  @@index([expiresAt])
+  @@map("approval_links")
+}
+
 model Quotation {
   id                String                @id @default(uuid())
   referenceNo       String                @unique @map("reference_no") // QT-YYYY-NNNNN
@@ -825,9 +917,20 @@ model Quotation {
   sharedById        String?               @map("shared_by_id")
   sharedAt          DateTime?             @map("shared_at")
   shareNote         String?               @map("share_note")
+  // Sales' claim that the customer accepted (on a call, over WhatsApp, in a meeting).
+  // Informational, never a gate: the pivot waits for the customer's OWN act — a link
+  // decision, the portal click, or a signed copy Operations verified (ADR-056).
+  acceptanceClaimedById String?            @map("acceptance_claimed_by_id")
+  acceptanceClaimedAt   DateTime?          @map("acceptance_claimed_at")
+  acceptanceClaimedVia  QuoteShareChannel? @map("acceptance_claimed_via")
+  acceptanceClaimNote   String?            @map("acceptance_claim_note")
+  // The evidence behind a `signed_copy` approval — the verified `quotation_acceptance`
+  // document on this quotation.
+  acceptanceDocumentId  String?            @map("acceptance_document_id")
   rejectionReason   String?               @map("rejection_reason") // required on reject (RULE-QT-04)
   rowVersion        Int                   @default(1) @map("row_version") // If-Match (RULE-QT-08)
   chargeLines       QuotationChargeLine[]
+  approvalLinks     ApprovalLink[]
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
@@ -863,9 +966,15 @@ model OtdStepTemplate {
   stepCode         String         @unique @map("step_code")
   title            String
   ownerDepartment  DepartmentCode @map("owner_department") // ADR-003/039 ownership
-  // There are no composition gates any more: every ACTIVE template composes onto every
-  // shipment, in canonical order. A step that should no longer appear is deactivated,
-  // never deleted, so historical shipments still resolve it by step code.
+  // The ONE composition gate: which shipment kinds compose this step. Since ADR-057 the
+  // roadmap's eight steps apply to BOTH kinds — `kind` says where a shipment was born,
+  // not which path it walks. The only kind-specific step left is Order Lock: a
+  // quotation-born shipment has a Rate Confirmation to sign, a contract-born one does
+  // not. The retired freight-forwarding steps stay as inactive rows.
+  // Within a kind there are no further gates: every ACTIVE template composes onto every
+  // shipment of that kind, in canonical order. A step that should no longer appear is
+  // deactivated, never deleted, so historical shipments still resolve it by step code.
+  appliesToKinds   ShipmentKind[] @default([forwarding, trade]) @map("applies_to_kinds")
   // One plain-language line on what completing this step actually means — shown on the
   // step panel. Lives here (ADR-051) so admin-created steps carry their own guidance;
   // previously a hardcoded STEP_HINTS map in the frontend.
@@ -898,6 +1007,7 @@ model OtdStepActionTemplate {
   title      String
   kind       StepActionKind   @default(manual)
   docType    String?          @map("doc_type") // required when kind = document
+  recordType String?          @map("record_type") // required when kind = record: contract | financial_instrument
   sortOrder  Int              @map("sort_order")
   required   Boolean          @default(true) // false = advisory; does not gate completion
 
@@ -922,6 +1032,7 @@ model OtdStepAction {
   title         String
   kind          StepActionKind @default(manual)
   docType       String?        @map("doc_type")
+  recordType    String?        @map("record_type") // `record` only — which register satisfies it
   sortOrder     Int            @map("sort_order")
   required      Boolean        @default(true)
   status        OtdStepStatus  @default(pending) // `manual` only — see note above
@@ -993,6 +1104,12 @@ model Shipment {
   lcNumber         String?                 @map("lc_number") // bank/LC handshake
   bankRef          String?                 @map("bank_ref")
   escrowRef        String?                 @map("escrow_ref")
+  // ── Ops ownership (2026-09-08) — the ops user who CLAIMED this shipment. From
+  // then on only they work its operations steps and flow (assertOpsOwner); null
+  // means unclaimed, and the Action Engine queues operations tasks instead of
+  // assigning them. Management may reassign or release (shipment.assign).
+  opsOwnerId       String?                 @map("ops_owner_id")
+  opsClaimedAt     DateTime?               @map("ops_claimed_at")
   otdSteps         OtdStep[]
   otcMilestones    OtcMilestone[]
   exceptions       ShipmentException[]
@@ -1011,6 +1128,7 @@ model Shipment {
   @@index([customerId, status])
   @@index([status, exceptionState])
   @@index([eta])
+  @@index([opsOwnerId])
   @@map("shipments")
 }
 
@@ -1454,6 +1572,11 @@ model DocumentType {
   code               String  @id // ^[a-z][a-z0-9_]{1,49}$ — same format guard as step codes
   label              String
   customerUploadable Boolean @default(false) @map("customer_uploadable")
+  // A doc of this type counts towards a step gate only once ops has VERIFIED it
+  // (the signed Rate Confirmation before Order Lock). Lives on the type, not the
+  // step action: every gate reader keys on docType, the cache already serves the
+  // table, and no per-shipment row has to change when the rule does.
+  requiresVerification Boolean @default(false) @map("requires_verification")
   active             Boolean @default(true)
   sortOrder          Int     @default(0) @map("sort_order")
 
@@ -1475,6 +1598,11 @@ model Document {
   publishedById String?           @map("published_by_id")
   publishedAt   DateTime?         @map("published_at")
   scanStatus    ScanStatus        @default(pending) @map("scan_status")
+  // Ops sign-off, meaningful only for types with requires_verification (see the enum).
+  verificationStatus DocumentVerification @default(unverified) @map("verification_status")
+  verifiedById       String?           @map("verified_by_id")
+  verifiedAt         DateTime?         @map("verified_at")
+  verificationNote   String?           @map("verification_note") // why it was rejected, or a note on acceptance
   uploadedById  String            @map("uploaded_by_id")
   deletedAt     DateTime?         @map("deleted_at") // soft delete (RULE-DOC-04)
   createdAt     DateTime          @default(now())

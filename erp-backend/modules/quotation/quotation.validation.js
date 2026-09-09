@@ -8,7 +8,27 @@ import { SERVICE_CODES } from "../../utils/serviceCodes.js";
  */
 
 const chargeLineSchema = z.object({
-  service: z.enum(SERVICE_CODES).optional(),
+  /**
+   * NOT validated against the service catalog, deliberately.
+   *
+   * A Query's `services` is FREE TEXT — the catalog is the suggested list, and anything
+   * typed into "Other service" rides along with it (query.validation.js). The quote
+   * sheet builds one charge line per service, so a hand-typed service arrives here as a
+   * plain string: "Destination Services / Agent", "warehousing", whatever the customer
+   * asked for. Validating it as an enum meant a query with any free-text service simply
+   * could not be quoted — the whole request 400'd on a field that is only a reporting
+   * tag.
+   *
+   * `quotation_charge_lines.service` is the ServiceCode enum column, used to categorise
+   * a line for reporting, so a value outside the catalog is DROPPED rather than
+   * rejected. Nothing is lost: the line still prices, and its description carries what
+   * was actually asked for.
+   */
+  service: z
+    .string()
+    .max(120)
+    .nullish()
+    .transform((v) => (v && SERVICE_CODES.includes(v) ? v : undefined)),
   // Cost sheet (freight-forwarding OTC upgrade) — internal only.
   chargeCode: z.string().max(60).optional(), // ChargeType.code — categorises the line for reporting
   costAmount: z.coerce.number().nonnegative("Cost cannot be negative").optional(), // buy price

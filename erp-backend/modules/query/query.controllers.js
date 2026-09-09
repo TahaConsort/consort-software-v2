@@ -163,6 +163,131 @@ const hydrateQueries = async (queries, { includeRfq = true, includeOwner = inclu
     }
   }
 
+  /**
+   * The Rate Confirmation generated when the quote was approved (ADR-055 / RULE-QT-07),
+   * so Ops can pull it straight off the queries row instead of walking to the shipment.
+   *
+   * Two round-trips for the page, not per row. Internal-only: a portal customer gets
+   * their copy from the portal, where the publish flag is the gate — this shortcut is
+   * for the ops desk and rides on the same `includeRfq` internal-viewer signal.
+   */
+  const rcByQuery = new Map();
+  if (includeRfq) {
+    const approved = queries.filter((q) => q.status === "shipment_created").map((q) => q.id);
+    if (approved.length) {
+      const shipments = await prisma.shipment.findMany({
+        where: { queryId: { in: approved } },
+        select: { id: true, queryId: true, referenceNo: true },
+      });
+      if (shipments.length) {
+        const docs = await prisma.document.findMany({
+          where: {
+            ownerType: "shipment",
+            ownerId: { in: shipments.map((s) => s.id) },
+            docType: "rate_confirmation",
+            deletedAt: null,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, ownerId: true, fileName: true, verificationStatus: true, createdAt: true },
+        });
+        const queryOfShipment = new Map(shipments.map((s) => [s.id, s.queryId]));
+        for (const d of docs) {
+          const queryId = queryOfShipment.get(d.ownerId);
+          // `orderBy desc` means the first one seen per query is the newest — a signed
+          // copy uploaded later must not hide the one Ops is looking for.
+          if (queryId && !rcByQuery.has(queryId)) {
+            rcByQuery.set(queryId, {
+              documentId: d.id,
+              fileName: d.fileName,
+              verificationStatus: d.verificationStatus,
+              createdAt: d.createdAt,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Where the customer's acceptance stands (ADR-056), for the internal row chip:
+   * sales' recorded claim, the live link, the signed copy and its verification, and —
+   * once approved — which of the customer's acts did it. One round-trip for the page's
+   * live quotations, one for their signed copies. Internal-only, like the RC above.
+   */
+  const acceptanceByQuery = new Map();
+  if (includeRfq) {
+    const liveQueries = queries.filter((q) => ["quoted", "shipment_created"].includes(q.status)).map((q) => q.id);
+    if (liveQueries.length) {
+      const quotations = await prisma.quotation.findMany({
+        where: { queryId: { in: liveQueries }, status: { in: ["sent", "approved"] } },
+        orderBy: { version: "desc" },
+        select: {
+          id: true, queryId: true, status: true, approvalChannel: true,
+          acceptanceClaimedById: true, acceptanceClaimedAt: true, acceptanceClaimedVia: true, acceptanceClaimNote: true,
+          acceptanceDocumentId: true,
+          approvalLinks: {
+            orderBy: { createdAt: "desc" },
+            take: 1,
+            select: { expiresAt: true, revokedAt: true, decision: true, decidedAt: true, approverName: true },
+          },
+        },
+      });
+      const claimerIds = [...new Set(quotations.map((q) => q.acceptanceClaimedById).filter(Boolean))];
+      const [claimers, signedCopies] = await Promise.all([
+        claimerIds.length
+          ? prisma.user.findMany({
+              where: { id: { in: claimerIds } },
+              select: { id: true, email: true, employee: { select: { firstName: true, lastName: true } } },
+            })
+          : [],
+        prisma.document.findMany({
+          where: {
+            ownerType: "quotation",
+            ownerId: { in: quotations.map((q) => q.id) },
+            docType: "quotation_acceptance",
+            deletedAt: null,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { id: true, ownerId: true, fileName: true, verificationStatus: true, verificationNote: true, uploadedById: true, createdAt: true },
+        }),
+      ]);
+      const claimerById = new Map(claimers.map((u) => [u.id, u]));
+      const now = new Date();
+      for (const qt of quotations) {
+        if (acceptanceByQuery.has(qt.queryId)) continue; // newest version wins
+        const link = qt.approvalLinks[0] ?? null;
+        const linkStatus = !link ? null
+          : link.revokedAt ? "revoked"
+          : link.decidedAt ? "used"
+          : new Date(link.expiresAt) <= now ? "expired"
+          : "open";
+        // Newest first; a verified copy is the one that counts once one exists.
+        const copies = signedCopies.filter((d) => d.ownerId === qt.id);
+        const evidence = copies.find((d) => d.verificationStatus === "verified") ?? copies[0] ?? null;
+        acceptanceByQuery.set(qt.queryId, {
+          quotationId: qt.id,
+          quotationStatus: qt.status,
+          claimedAt: qt.acceptanceClaimedAt,
+          claimedVia: qt.acceptanceClaimedVia,
+          claimedByName: qt.acceptanceClaimedById ? nameOf(claimerById.get(qt.acceptanceClaimedById)) : null,
+          claimNote: qt.acceptanceClaimNote,
+          link: link ? { status: linkStatus, expiresAt: link.expiresAt, decision: link.decision, approverName: link.approverName } : null,
+          evidence: evidence
+            ? {
+                documentId: evidence.id,
+                fileName: evidence.fileName,
+                verificationStatus: evidence.verificationStatus,
+                verificationNote: evidence.verificationNote,
+                uploadedById: evidence.uploadedById,
+                createdAt: evidence.createdAt,
+              }
+            : null,
+          approvalChannel: qt.approvalChannel,
+        });
+      }
+    }
+  }
+
   return queries.map((q) => {
     const customer = customerById.get(q.customerId);
     const raisedBy = userById.get(q.raisedById);
@@ -182,6 +307,8 @@ const hydrateQueries = async (queries, { includeRfq = true, includeOwner = inclu
           }
         : {}),
       rfqSummary: rfqByQuery.get(q.id) ?? null,
+      rateConfirmation: rcByQuery.get(q.id) ?? null,
+      acceptance: acceptanceByQuery.get(q.id) ?? null,
     };
   });
 };
@@ -330,12 +457,12 @@ export const updateQuery = catchAsync(async (req, res, next) => {
 });
 
 /* ── POST /api/queries/:id/cancel ── */
-// open → cancelled with a mandatory reason — feeds the unserved-demand
-// report (RULE-QRY-03, WORKFLOW §3).
+// open / quoted / revision_requested → cancelled with a mandatory reason — feeds
+// the unserved-demand report (RULE-QRY-03, WORKFLOW §3).
 export const cancelQuery = catchAsync(async (req, res, next) => {
   const query = await prisma.query.findUnique({ where: { id: req.params.id } });
   if (!query || !(await queryInScope(req, query))) return next(new AppError("Query not found", 404));
-  if (!["open", "quoted"].includes(query.status)) {
+  if (!["open", "quoted", "revision_requested"].includes(query.status)) {
     return next(new AppError(`A ${query.status} query cannot be cancelled`, 409));
   }
 
@@ -344,7 +471,22 @@ export const cancelQuery = catchAsync(async (req, res, next) => {
       where: { id: query.id },
       data: { status: "cancelled", cancelReason: req.body.reason },
     });
-    // Cancelling a query invalidates any quotation raised from it.
+    // Cancelling a query invalidates any quotation raised from it — a `sent` quote
+    // on a dead enquiry must never be approvable into a shipment. `rejected`, not
+    // `expired`: the scheduler reserves `expired` for a validity date lapsing.
+    // No `quotation.rejected` event — its handler tells Ops the customer asked
+    // for a revision, which is not what happened; `query.cancelled` already
+    // refreshes the quotation screens.
+    await tx.quotation.updateMany({
+      where: { queryId: u.id, status: { in: ["draft", "sent"] } },
+      data: {
+        status: "rejected",
+        decidedById: req.user.id,
+        decidedAt: new Date(),
+        rejectionReason: `Query cancelled — ${req.body.reason}`,
+        rowVersion: { increment: 1 },
+      },
+    });
     await emitEvent(tx, "query.cancelled", { queryId: u.id, referenceNo: u.referenceNo });
     return u;
   });

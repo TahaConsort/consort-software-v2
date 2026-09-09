@@ -270,7 +270,13 @@ export const convertReferral = catchAsync(async (req, res, next) => {
     return next(new AppError("A rejected referral cannot be converted", 409));
   }
 
-  const ownerId = req.body.ownerId || req.user.id;
+  // Who OWNS the customer this LC creates. Null by default: the converting ops user
+  // is not a salesperson, and stamping them as assignedBdoId used to hide every
+  // bank-LC query from Sales (a BDO's scope is "mine or unclaimed"). Left null, the
+  // customer lands in the claim pool, a BDO claims it from the Bank LC tab, and the
+  // sent quote routes to that BDO for the decision. An explicit ownerId (an inbox
+  // that already knows the account owner) still assigns directly.
+  const ownerId = req.body.ownerId ?? null;
 
   // Read the attached advice and let it fill whatever the referral is missing. This is
   // the point of the whole feature: an LC that arrived as a PDF has no structured
@@ -372,6 +378,8 @@ export const convertReferral = catchAsync(async (req, res, next) => {
       referenceNo: referral.referenceNo,
       customerRef: materialized.customer.referenceNo,
       queryRef: materialized.query.referenceNo,
+      // Tells the relay to put the query in front of the whole Sales floor.
+      unclaimed: !materialized.customer.assignedBdoId,
     });
 
     return materialized;

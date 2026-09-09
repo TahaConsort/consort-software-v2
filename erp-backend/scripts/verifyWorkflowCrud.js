@@ -58,8 +58,17 @@ async function run() {
   token = login.json.accessToken;
   check("login as Management", true);
 
+  // `packages` is gone with the service-package dimension (utils/composition.js) — meta
+  // now describes the catalog itself: departments, derivable statuses, doc types.
   const meta = await call("GET", "/workflow/meta");
-  check("GET /workflow/meta", meta.status === 200 && meta.json.data.packages.length === 4, `${meta.status}`);
+  check(
+    "GET /workflow/meta",
+    meta.status === 200 &&
+      meta.json.data.departments?.length > 0 &&
+      meta.json.data.statuses?.length > 0 &&
+      meta.json.data.docTypes?.length > 0,
+    `${meta.status}`,
+  );
 
   const dt = await call("POST", "/workflow/doc-types", { code: DOCTYPE, label: "ZZ Verify Doc", customerUploadable: false });
   check("create doc type", dt.status === 201, `${dt.status}`);

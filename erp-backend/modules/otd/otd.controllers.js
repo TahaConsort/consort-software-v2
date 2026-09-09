@@ -9,6 +9,7 @@ import {
   emitShipmentEvent,
   auditShipment,
   withStepActions,
+  assertOpsOwner,
 } from "../shipment/shipment.service.js";
 
 /**
@@ -62,6 +63,7 @@ export const listSteps = catchAsync(async (req, res, next) => {
 export const setStepAction = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentInScope(req, next);
   if (!shipment) return;
+  await assertOpsOwner(req, shipment, "work its steps");
   if (["settled", "closed"].includes(shipment.status) || shipment.exceptionState === "cancelled") {
     return next(new AppError("A finished or cancelled shipment's steps can't be edited", 409));
   }
@@ -87,6 +89,9 @@ export const setStepAction = catchAsync(async (req, res, next) => {
     where: { otdStepId: step.id, actionCode: req.params.actionCode },
   });
   if (!action) return next(new AppError("Checklist item not found on this step", 404));
+  if (action.kind === "record") {
+    return next(new AppError("This item is satisfied by linking the register on the shipment, not by ticking it", 409));
+  }
   if (action.kind !== "manual") {
     return next(new AppError("This item is satisfied by attaching its document, not by ticking it", 409));
   }
@@ -128,6 +133,7 @@ export const setStepAction = catchAsync(async (req, res, next) => {
 export const updateStepDetails = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentInScope(req, next);
   if (!shipment) return;
+  await assertOpsOwner(req, shipment, "work its steps");
   if (["settled", "closed"].includes(shipment.status) || shipment.exceptionState === "cancelled") {
     return next(new AppError("A finished or cancelled shipment's steps can't be edited", 409));
   }
@@ -158,6 +164,7 @@ export const updateStepDetails = catchAsync(async (req, res, next) => {
 export const completeStep = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentInScope(req, next);
   if (!shipment) return;
+  await assertOpsOwner(req, shipment, "complete its steps");
 
   // RULE-SH-07 — optimistic concurrency is MANDATORY on direct step completion.
   //
@@ -216,6 +223,7 @@ export const completeStep = catchAsync(async (req, res, next) => {
 export const reopenStep = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentInScope(req, next);
   if (!shipment) return;
+  await assertOpsOwner(req, shipment, "reopen its steps");
   if (["settled", "closed"].includes(shipment.status)) {
     return next(new AppError(`A ${shipment.status} shipment cannot be reopened`, 409));
   }

@@ -40,6 +40,18 @@ export const customerUploadableCodes = async () => {
   return rows.filter((t) => t.active && t.customerUploadable).map((t) => t.code);
 };
 
+/**
+ * Types whose documents only count once ops has VERIFIED them — the customer's signed
+ * Rate Confirmation before Order Lock. Kept on the TYPE rather than on each step's
+ * checklist item: every gate reader already keys on docType, so one flag covers both
+ * gate sources (a template's requiredDocTypes and a step's document sub-actions) and
+ * no per-shipment row has to be rewritten when the rule changes.
+ */
+export const verificationRequiredCodes = async () => {
+  const rows = await getDocTypes();
+  return new Set(rows.filter((t) => t.requiresVerification).map((t) => t.code));
+};
+
 /** code → label for every row ever seeded, active or not (historical docs need labels). */
 export const docTypeLabels = async () => {
   const rows = await getDocTypes();

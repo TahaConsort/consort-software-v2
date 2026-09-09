@@ -35,7 +35,7 @@ import { listVendors } from "@/services/vendorService";
  * field from what it returns them — so this component renders what it is given and
  * never assumes those fields are present.
  */
-const ShipmentPartiesPanel = ({ shipmentId, shipmentKind, locked, lockReason }) => {
+const ShipmentPartiesPanel = ({ shipmentId, locked, lockReason }) => {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission("trade.party.manage") && !locked;
 
@@ -320,7 +320,10 @@ const ShipmentPartiesPanel = ({ shipmentId, shipmentKind, locked, lockReason }) 
             </div>
           )}
 
-          {shipmentKind === "trade" && missingRoles.length > 0 && (
+          {/* The server reports missing roles only for a shipment on the roadmap path
+              (ADR-057), so an empty list is the whole signal — `shipmentKind` is no
+              longer a gate here. */}
+          {missingRoles.length > 0 && (
             <p className="text-[11px] text-amber-600 mt-3 flex items-start gap-1">
               <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
               <span>Not yet named: {missingRoles.map(labelForPartyRole).join(", ")}</span>

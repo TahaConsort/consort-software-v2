@@ -5,14 +5,16 @@ import { teamUserIds } from "../lead/lead.middleware.js";
 /**
  * Quotation access + scope (BUSINESS_RULES §2.2/2.3).
  *   Ops (mgr/exec)  draft/revise/send + read (dept D → all quotations)
- *   Management      read + approve/reject (A)
- *   ASM             read + approve/reject on the customer's behalf (team T)
- *   BDO             read + share for queries they raised OR customers assigned to
- *                   them (form/LC customers included); approve/reject stays ONLY
- *                   for queries they raised (product decision 2026-07)
- *   Web manager     read + share + approve/reject for the WEBSITE channel only
+ *   Management      read + share (record acceptance / relay the link) + reject (A)
+ *   ASM             read + share + reject on the customer's behalf (team T)
+ *   BDO             read + share + reject for queries they raised OR customers
+ *                   assigned to them (form/LC customers included)
+ *   Web manager     read + share + reject for the WEBSITE channel only
  *                   (queries with raisedVia = portal)
- *   Customer        read + approve/reject own (C)
+ *   Customer        read + approve/reject own (C) — the ONLY approver (ADR-056)
+ *
+ * No internal role approves: a shipment is born from the customer's own act — the
+ * portal click, a one-time link decision, or a signed copy Operations verified.
  *
  * Scope resolves to req.quotationScope:
  *   null                → unrestricted (Management, Ops)

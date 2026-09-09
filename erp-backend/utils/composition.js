@@ -4,23 +4,31 @@
  * The single source of the step catalog is `otd_step_templates` (seeded from
  * DATABASE §8). This module READS that table — it never re-encodes it (ADR-001).
  *
- * There are no selection gates any more. The service-package / CRO-mode / LC-mode
- * dimension was removed along with the rich Query model, so EVERY ACTIVE template
- * composes onto EVERY shipment, in canonical order. A step that should stop appearing
- * is deactivated, never deleted, so shipments composed while it was live still resolve
- * it by step code (missingRequiredDocs / recomputeStatus depend on that).
+ * The service-package / CRO-mode / LC-mode dimension was removed along with the rich
+ * Query model. ONE gate survives it: the shipment KIND — and since ADR-057 that gate
+ * separates only Order Lock (quotation-born shipments sign a Rate Confirmation,
+ * contract-born ones do not). The roadmap's eight steps apply to both kinds. Within a
+ * kind every ACTIVE template composes onto EVERY shipment, in canonical order.
+ *
+ * A step that should stop appearing is deactivated, never deleted, so shipments composed
+ * while it was live still resolve it by step code (missingRequiredDocs / recomputeStatus
+ * depend on that).
  */
 
 /**
- * Compose the OTD path.
+ * Compose the OTD path for one shipment kind.
  *
  * @param templates all OtdStepTemplate rows
+ * @param kind      ShipmentKind — which path to compose. Defaults to `forwarding`, the
+ *                  kind every pre-roadmap caller meant.
  * @returns array of { canonicalNo, displayNo, stepCode, title, ownerDepartment,
  *                     derivedStatus, requiredDocTypes } in canonical order.
  */
-export const composeOtdPath = (templates) =>
+export const composeOtdPath = (templates, kind = "forwarding") =>
   templates
-    .filter((t) => t.active !== false)
+    // A row written before the column existed has no kinds; treat that as "both", which
+    // is the column default, rather than silently dropping the step from every path.
+    .filter((t) => t.active !== false && (t.appliesToKinds?.length ? t.appliesToKinds.includes(kind) : true))
     .sort((a, b) => a.canonicalNo - b.canonicalNo)
     .map((t, i) => ({
       canonicalNo: t.canonicalNo,
@@ -38,7 +46,7 @@ export const composeOtdPath = (templates) =>
  *
  * @param actionTemplates all OtdStepActionTemplate rows (any step)
  * @param stepCode        the step to build the checklist for
- * @returns array of { actionCode, title, kind, docType, sortOrder, required }, ordered
+ * @returns array of { actionCode, title, kind, docType, recordType, sortOrder, required }, ordered
  */
 export const composeStepActions = (actionTemplates, stepCode) =>
   actionTemplates
@@ -49,9 +57,20 @@ export const composeStepActions = (actionTemplates, stepCode) =>
       title: a.title,
       kind: a.kind,
       docType: a.docType ?? null,
+      recordType: a.recordType ?? null,
       sortOrder: a.sortOrder,
       required: a.required,
     }));
+
+/**
+ * The registers a `record` sub-action may name (ADR-057). Closed list of two — not an
+ * enum, because it is read by exactly three places (validation, derivation, the gate).
+ */
+export const RECORD_TYPES = ["contract", "financial_instrument"];
+export const RECORD_TYPE_LABELS = {
+  contract: "Trade Contract",
+  financial_instrument: "Financial Instrument (active)",
+};
 
 /**
  * The permitted out-of-order step pairs (RULE-SH-03): an LC advice and a vessel slot

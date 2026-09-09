@@ -49,8 +49,11 @@ export const materializeCustomerAndQuery = async (
   tx,
   {
     source, // 'direct' | 'bank_lc'
-    ownerId, // owning user (converting salesperson / ops_exec)
-    createdById,
+    // The salesperson who OWNS the customer, or null to leave it in the claim pool
+    // (a bank-LC conversion by ops). Never the converter by default — see
+    // lc.controllers convertReferral.
+    ownerId,
+    createdById, // whoever performed the intake — raises the query, owns the lead if nobody else does
     companyName,
     contactName,
     contactEmail,
@@ -85,6 +88,8 @@ export const materializeCustomerAndQuery = async (
         referenceNo,
         companyId: company.id,
         source,
+        // null = unclaimed pool (RULE-QRY-01 scope: "mine or nobody's"). A company we
+        // already serve keeps its BDO — this branch only runs for a NEW customer.
         assignedBdoId: ownerId,
       },
     });
@@ -122,7 +127,9 @@ export const materializeCustomerAndQuery = async (
         contactId: contact.id,
         source,
         status: "converted",
-        ownerId,
+        // leads.owner_id is NOT NULL — an unclaimed intake's lead sits with the
+        // person who performed it until a BDO claims the customer.
+        ownerId: ownerId ?? createdById,
         createdById,
         convertedAt: new Date(),
         convertedToCustomerId: customer.id,
@@ -154,7 +161,10 @@ export const materializeCustomerAndQuery = async (
     data: {
       referenceNo: queryRef,
       customerId: customer.id,
-      raisedById: ownerId,
+      // The person who performed the intake raised it. Sales ownership is on the
+      // Customer (assignedBdoId), not here — a BDO who later claims the customer
+      // sees this query through that leg of their scope.
+      raisedById: createdById,
       // The intake channel IS the query's channel: a bank-LC referral lands in the
       // Bank LC bucket on the Queries screen, not in BDO's (channel tabs).
       raisedVia: source === "bank_lc" ? "bank_lc" : "bdo",
@@ -202,7 +212,7 @@ export const materializeCustomerAndQuery = async (
         customerRef: customer.referenceNo,
         userId: portalUser.id,
         email: contactEmail,
-        ownerId,
+        ownerId: ownerId ?? createdById,
       });
     }
   }

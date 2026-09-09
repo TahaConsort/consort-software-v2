@@ -24,6 +24,7 @@ import notificationRoutes from "./modules/notification/notification.routes.js";
 import actionRoutes from "./modules/action/action.routes.js";
 import auditRoutes from "./modules/audit/audit.routes.js";
 import storefrontRoutes from "./modules/storefront/storefront.routes.js";
+import approvalPublicRoutes from "./modules/approval/approval.public.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
 import rfqRoutes from "./modules/rfq/rfq.routes.js";
@@ -119,6 +120,9 @@ app.use("/api/trade", tradeRoutes); // export trade documents (Export Shipment W
 
 // Intake channels & public storefront (CRM_MASTER §5.20/§5.21)
 app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calculator
+// Anonymous customer approval by one-time token (ADR-055). Its own router so
+// the token routes carry a much tighter rate limit than the storefront's.
+app.use("/api/public", approvalPublicRoutes);
 app.use("/api/lc-referrals", lcInboxRoutes); // internal: bank-LC inbox
 
 // Unhandled route fallback

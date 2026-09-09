@@ -24,7 +24,7 @@ export const useDocumentStore = createResourceStore({
     ownerId: null,
     withRequired: false, // remembered, so refetch() reproduces the caller's intent
     documents: [],
-    checklist: [], // [{ displayNo, stepCode, status, required, missing }]
+    checklist: [], // [{ displayNo, stepCode, status, required, missing, unverified }]
   },
 
   // The checklist is a separate request, so it belongs in the identity: a panel that
@@ -93,6 +93,10 @@ export const useDocumentStore = createResourceStore({
 
       publish: (id) =>
         mutate(() => documentService.publishDocument(id), { invalidates: touched() }),
+
+      /** Verifying is what opens the Order Lock gate, so it dirties the shipment too. */
+      verify: (id, { status, note } = {}) =>
+        mutate(() => documentService.verifyDocument(id, { status, note }), { invalidates: touched() }),
 
       remove: (id, reason) =>
         mutate(() => documentService.deleteDocument(id, reason), { invalidates: touched() }),

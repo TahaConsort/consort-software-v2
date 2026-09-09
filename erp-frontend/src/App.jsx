@@ -48,6 +48,7 @@ import NotificationsPage from "./pages/NotificationsPages/NotificationsPage";
 
 // Public storefront + intake channel (§5.20/§5.21)
 import StorefrontPage from "./pages/PublicPages/StorefrontPage";
+import ApproveQuotePage from "./pages/PublicPages/ApproveQuotePage";
 import LcInboxPage from "./pages/LcPages/LcInboxPage";
 import WorkflowManagePage from "./pages/WorkflowPages/WorkflowManagePage";
 import TradeRegistersPage from "./pages/TradePages/TradeRegistersPage";
@@ -77,6 +78,11 @@ const App = () => {
         <Routes>
           {/* Public storefront — anonymous front door, no auth (§5.20) */}
           <Route path="/" element={<StorefrontPage />} />
+
+          {/* Customer quotation approval by one-time link (ADR-055). Deliberately OUTSIDE
+              GuestGuard: the customer has no account, and a logged-in Consort user
+              following the link must not be redirected away from it either. */}
+          <Route path="/approve/:token" element={<ApproveQuotePage />} />
 
           {/* Guest / public auth routes */}
           <Route element={<GuestGuard />}>

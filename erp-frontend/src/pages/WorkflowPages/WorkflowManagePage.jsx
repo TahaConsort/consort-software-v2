@@ -16,6 +16,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import * as workflowService from "@/services/workflowService";
 import * as serviceCatalogService from "@/services/serviceCatalogService";
+import { SHIPMENT_KIND_LABELS } from "@/lib/catalog";
 
 /**
  * Workflow catalog admin (ADR-051) — Management-only CRUD over the OTD step catalog,
@@ -31,6 +32,12 @@ const TABS = [
 ];
 
 const prettyCode = (code) => String(code ?? "").replace(/_/g, " ");
+
+/**
+ * The two processes a step can belong to (schema `ShipmentKind`) — the one composition
+ * gate. Labels come from the shared catalog so this panel and the shipment pages agree.
+ */
+const SHIPMENT_KIND_OPTIONS = Object.entries(SHIPMENT_KIND_LABELS).map(([code, label]) => ({ code, label }));
 
 /** Toggleable badge chips — the compact editor for the template gate arrays. */
 const ChipToggle = ({ options, value = [], onChange, disabled = false }) => (
@@ -59,9 +66,17 @@ const ChipToggle = ({ options, value = [], onChange, disabled = false }) => (
 // Composition has no gates any more, so the only thing that decides whether a step
 // appears is whether it is active.
 const GateSummary = ({ step }) => {
+  // Shipment kind is the one composition gate. Within a kind there are no further
+  // gates, so a step on both kinds really does compose onto every shipment.
+  const kinds = step.appliesToKinds?.length ? step.appliesToKinds : ["forwarding", "trade"];
   const chips = step.active === false
     ? [{ text: "inactive — never composes", cls: "border-muted-foreground/40 text-muted-foreground" }]
-    : [{ text: "every shipment", cls: "" }];
+    : kinds.length === SHIPMENT_KIND_OPTIONS.length
+      ? [{ text: "every shipment", cls: "" }]
+      : kinds.map((k) => ({
+          text: SHIPMENT_KIND_OPTIONS.find((o) => o.code === k)?.label ?? k,
+          cls: k === "trade" ? "border-primary/50 text-primary" : "",
+        }));
   return (
     <div className="flex flex-wrap gap-1">
       {chips.map((c, i) => (
@@ -294,7 +309,7 @@ const StepsTab = ({ meta, onMetaChanged }) => {
 
 const EMPTY_STEP = {
   stepCode: "", canonicalNo: "", title: "", hint: "", ownerDepartment: "", derivedStatus: "",
-  dueOffsetHours: "48", active: true, requiredDocTypes: [],
+  dueOffsetHours: "48", active: true, requiredDocTypes: [], appliesToKinds: ["forwarding"],
 };
 
 const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
@@ -311,6 +326,7 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
           dueOffsetHours: String(step.dueOffsetHours),
           active: step.active,
           requiredDocTypes: step.requiredDocTypes ?? [],
+          appliesToKinds: step.appliesToKinds?.length ? step.appliesToKinds : ["forwarding"],
         }
       : EMPTY_STEP,
   );
@@ -326,6 +342,9 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
     if (!form.title.trim()) return toast.error("A title is required");
     if (!form.ownerDepartment) return toast.error("Pick the owning department");
     if (!form.derivedStatus) return toast.error("Pick the status this step derives");
+    if (!form.appliesToKinds.length) {
+      return toast.error("Pick at least one shipment kind — untick 'Active' to retire a step instead");
+    }
     if (form.canonicalNo === "" || Number(form.canonicalNo) < 1) return toast.error("A canonical number is required");
     if (numberTaken) return toast.error(`Canonical number ${form.canonicalNo} is already in use`);
     if (!editing && !/^[a-z][a-z0-9_]{1,49}$/.test(form.stepCode)) {
@@ -340,6 +359,7 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
       dueOffsetHours: Number(form.dueOffsetHours) || 48,
       active: form.active,
       requiredDocTypes: form.requiredDocTypes,
+      appliesToKinds: form.appliesToKinds,
     };
     onSubmit(editing ? payload : { stepCode: form.stepCode, ...payload });
   };
@@ -416,6 +436,18 @@ const StepDialog = ({ busy, meta, step, takenNumbers, onClose, onSubmit }) => {
           </div>
 
           <div className="space-y-1.5">
+            <Label className="text-xs">Applies to <span className="text-muted-foreground font-normal">(which shipment kinds compose this step)</span></Label>
+            <ChipToggle
+              options={SHIPMENT_KIND_OPTIONS}
+              value={form.appliesToKinds}
+              onChange={(v) => set("appliesToKinds", v)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              Freight forwarding and export trade run different processes. A step only appears on the kinds picked here.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
             <Label className="text-xs">Required documents <span className="text-muted-foreground font-normal">(block completion until attached — RULE-SH-06)</span></Label>
             <ChipToggle
               options={activeDocTypes.map((t) => ({ code: t.code, label: t.label }))}
@@ -446,6 +478,7 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
       title: a.title,
       kind: a.kind,
       docType: a.docType ?? "",
+      recordType: a.recordType ?? "",
       sortOrder: String(a.sortOrder),
       required: a.required,
     })),
@@ -454,7 +487,7 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
   const addRow = () =>
     setRows((p) => [
       ...p,
-      { actionCode: "", title: "", kind: "manual", docType: "", sortOrder: String((p.length + 1) * 10), required: true },
+      { actionCode: "", title: "", kind: "manual", docType: "", recordType: "", sortOrder: String((p.length + 1) * 10), required: true },
     ]);
   const removeRow = (i) => setRows((p) => p.filter((_, idx) => idx !== i));
 
@@ -466,6 +499,7 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
       if (!/^[a-z][a-z0-9_]{1,49}$/.test(r.actionCode)) return toast.error(`"${r.actionCode || "(empty)"}" is not a valid item code`);
       if (!r.title.trim()) return toast.error("Every item needs a title");
       if (r.kind === "document" && !r.docType) return toast.error(`"${r.title}" is a document item — pick its document type`);
+      if (r.kind === "record" && !r.recordType) return toast.error(`"${r.title}" is a register item — pick which register satisfies it`);
     }
     const codes = rows.map((r) => r.actionCode);
     if (new Set(codes).size !== codes.length) return toast.error("Item codes must be unique within the step");
@@ -475,11 +509,19 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
         title: r.title.trim(),
         kind: r.kind,
         docType: r.kind === "document" ? r.docType : undefined,
+        recordType: r.kind === "record" ? r.recordType : undefined,
         sortOrder: Number(r.sortOrder) || 0,
         required: r.required,
       })),
     );
   };
+
+  // The registers a `record` item may derive from (ADR-057) — mirrors RECORD_TYPES in
+  // erp-backend/utils/composition.js.
+  const RECORD_TYPE_OPTIONS = [
+    { value: "contract", label: "Trade Contract linked to the shipment" },
+    { value: "financial_instrument", label: "Financial Instrument linked & active" },
+  ];
 
   return (
     <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
@@ -544,6 +586,18 @@ const ChecklistDialog = ({ busy, meta, step, onClose, onSubmit }) => {
                 </div>
               )}
 
+              {r.kind === "record" && (
+                <div className="space-y-1">
+                  <Label className="text-[11px]">Register</Label>
+                  <Select value={r.recordType ?? ""} onValueChange={(v) => setRow(i, "recordType", v)} items={RECORD_TYPE_OPTIONS}>
+                    <SelectTrigger className="h-8 text-xs"><SelectValue placeholder="Which register satisfies it…" /></SelectTrigger>
+                    <SelectContent>
+                      {RECORD_TYPE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
               <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
                 <label className="flex items-center gap-1.5 text-xs cursor-pointer">
                   <Checkbox checked={r.required} onCheckedChange={(v) => setRow(i, "required", !!v)} />
@@ -590,7 +644,7 @@ const ValidateDialog = ({ onClose }) => {
         <DialogHeader>
           <DialogTitle>Catalog health</DialogTitle>
           <DialogDescription>
-            Every package × CRO × LC combination is composed against the live catalog and checked for
+            Each shipment kind's path is composed against the live catalog and checked for
             paths that can never finish.
           </DialogDescription>
         </DialogHeader>
@@ -603,10 +657,10 @@ const ValidateDialog = ({ onClose }) => {
 
             {badCombos.length > 0 && (
               <div className="space-y-1.5">
-                <p className="font-medium text-xs uppercase tracking-wide text-muted-foreground">Broken combinations</p>
+                <p className="font-medium text-xs uppercase tracking-wide text-muted-foreground">Broken paths</p>
                 {badCombos.map((c, i) => (
                   <div key={i} className="rounded-md border border-amber-300 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-800 p-2 text-xs">
-                    The composed path — {c.issues.join("; ")}
+                    {SHIPMENT_KIND_OPTIONS.find((o) => o.code === c.kind)?.label ?? c.kind} path — {c.issues.join("; ")}
                   </div>
                 ))}
               </div>
@@ -653,7 +707,7 @@ const DocTypesTab = ({ onChanged }) => {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
-  const [form, setForm] = useState({ code: "", label: "", customerUploadable: false, sortOrder: "" });
+  const [form, setForm] = useState({ code: "", label: "", customerUploadable: false, requiresVerification: false, sortOrder: "" });
 
   const load = async () => {
     setLoading(true);
@@ -697,12 +751,13 @@ const DocTypesTab = ({ onChanged }) => {
         code: form.code,
         label: form.label.trim(),
         customerUploadable: form.customerUploadable,
+        requiresVerification: form.requiresVerification,
         sortOrder: form.sortOrder === "" ? undefined : Number(form.sortOrder),
       }),
     );
     if (ok) {
       setOpen(false);
-      setForm({ code: "", label: "", customerUploadable: false, sortOrder: "" });
+      setForm({ code: "", label: "", customerUploadable: false, requiresVerification: false, sortOrder: "" });
     }
   };
 
@@ -725,6 +780,7 @@ const DocTypesTab = ({ onChanged }) => {
                 <th className="px-4 py-2.5">Code</th>
                 <th className="px-4 py-2.5">Label</th>
                 <th className="px-4 py-2.5">Customer can upload</th>
+                <th className="px-4 py-2.5">Needs ops sign-off</th>
                 <th className="px-4 py-2.5">In use</th>
                 <th className="px-4 py-2.5 text-right">Actions</th>
               </tr>
@@ -744,6 +800,15 @@ const DocTypesTab = ({ onChanged }) => {
                         checked={t.customerUploadable}
                         disabled={busy}
                         onCheckedChange={(v) => act(() => workflowService.updateDocType(t.code, { customerUploadable: !!v }))}
+                      />
+                    </td>
+                    {/* A type with this on only satisfies a step once Operations has
+                        verified the file — the signed Rate Confirmation before Order Lock. */}
+                    <td className="px-4 py-2.5">
+                      <Checkbox
+                        checked={t.requiresVerification}
+                        disabled={busy}
+                        onCheckedChange={(v) => act(() => workflowService.updateDocType(t.code, { requiresVerification: !!v }))}
                       />
                     </td>
                     <td className="px-4 py-2.5 text-xs">
@@ -797,6 +862,10 @@ const DocTypesTab = ({ onChanged }) => {
               <Checkbox checked={form.customerUploadable} onCheckedChange={(v) => setForm((p) => ({ ...p, customerUploadable: !!v }))} />
               Portal customers may upload this type
             </label>
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <Checkbox checked={form.requiresVerification} onCheckedChange={(v) => setForm((p) => ({ ...p, requiresVerification: !!v }))} />
+              Operations must verify it before it satisfies a step
+            </label>
             <DialogFooter className="gap-2">
               <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={busy}>Cancel</Button>
               <Button type="submit" disabled={busy} className="gap-2">
@@ -815,25 +884,45 @@ const DocTypesTab = ({ onChanged }) => {
 const PreviewTab = ({ meta }) => {
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(true);
+  // Shipment kind is the one composition gate, so it is the one input the preview takes.
+  const [kind, setKind] = useState("forwarding");
 
-  // There are no selection gates any more: every shipment composes the same path, so
-  // the preview takes no inputs and is fetched once.
   useEffect(() => {
     let alive = true;
+    setLoading(true);
     serviceCatalogService
-      .composeServices()
+      .composeServices(kind)
       .then((res) => { if (alive) setPreview(res.data ?? null); })
       .catch(() => { if (alive) setPreview(null); })
       .finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, []);
+  }, [kind]);
 
   if (!meta) return <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>;
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <Label className="text-xs">Preview path</Label>
+        <div className="flex gap-1.5">
+          {SHIPMENT_KIND_OPTIONS.map((o) => (
+            <button
+              key={o.code}
+              type="button"
+              onClick={() => setKind(o.code)}
+              className={`text-[11px] px-2.5 py-1 rounded-full border transition ${
+                kind === o.code
+                  ? "bg-primary text-white border-primary"
+                  : "bg-transparent text-muted-foreground border-border hover:border-primary/50"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <p className="text-xs text-muted-foreground">
-        Every shipment runs this one path — the active step templates, in canonical order.
+        Every shipment of this kind runs this path — its active step templates, in canonical order.
       </p>
 
       {loading ? (

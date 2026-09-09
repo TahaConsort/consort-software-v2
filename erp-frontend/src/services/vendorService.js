@@ -19,3 +19,10 @@ export const updateVendor = async (id, payload) => (await api.patch(`/vendors/${
 export const deactivateVendor = async (id) => (await api.post(`/vendors/${id}/deactivate`)).data;
 
 export const deleteVendor = async (id) => (await api.delete(`/vendors/${id}`)).data;
+
+/**
+ * Email a vendor asking for their rates (the Quote button on the vendor card).
+ * `message` is optional free text appended to the request in the vendor's own copy.
+ */
+export const requestVendorQuote = async (id, payload = {}) =>
+  (await api.post(`/vendors/${id}/quote-request`, payload)).data;

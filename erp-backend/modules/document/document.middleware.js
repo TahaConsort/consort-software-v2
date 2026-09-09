@@ -198,8 +198,10 @@ export const ownerInScope = async (user, ownerType, ownerId, { forWrite = false 
     // write (INV-10). The customerId test below would already refuse it; this is the
     // explicit statement of intent so a future ctx shape cannot loosen it by accident.
     if (ctx.masterData) return false;
-    // Inbound uploads are confined to the customer's OWN shipments; nothing else.
-    if (forWrite && ownerType !== "shipment") return false;
+    // Inbound uploads are confined to the customer's OWN shipments — plus their own
+    // quotations, for the one thing a customer sends in there: the copy they signed
+    // (ADR-056). The controller's customer-uploadable allowlist narrows the docType.
+    if (forWrite && ownerType !== "shipment" && ownerType !== "quotation") return false;
     return !!ctx.customerId && ctx.customerId === user.customerId;
   }
 

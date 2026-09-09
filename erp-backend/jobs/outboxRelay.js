@@ -43,12 +43,23 @@ const notifyUsers = async (userIds, { type, title, body, actionUrl, priority }) 
   }
 };
 
+// Matches on the PRIMARY role or any secondary one in `roles[]` — the same test as
+// hasRole() in auth.middleware. Filtering `role` alone silently skipped a multi-role
+// user whose second hat (say web_manager) was the one that mattered.
 const usersWithRole = async (...roles) => {
   const users = await prisma.user.findMany({
-    where: { role: { in: roles }, isActive: true },
+    where: { isActive: true, OR: [{ role: { in: roles } }, { roles: { hasSome: roles } }] },
     select: { id: true },
   });
   return users.map((u) => u.id);
+};
+
+// Document types are admin-managed data, so a notification says "Rate Confirmation
+// (RC)", not "rate_confirmation".
+const docTypeLabelFor = async (code) => {
+  if (!code) return "document";
+  const row = await prisma.documentType.findUnique({ where: { code }, select: { label: true } });
+  return row?.label ?? code;
 };
 
 const customerPortalUsers = async (customerId) => {
@@ -144,7 +155,13 @@ const createNextStepTask = async (shipmentId) => {
     });
   }
 
-  const assigneeId = await resolveAssignee(dept.id, dept);
+  // Ops ownership (2026-09-08): an operations step belongs to whoever CLAIMED the
+  // shipment, not to whichever ops desk is least busy. Unclaimed leaves the task in
+  // the department queue, which is the signal for someone to pick the job up.
+  const assigneeId =
+    step.ownerDepartment === "operations"
+      ? shipment.opsOwnerId ?? null
+      : await resolveAssignee(dept.id, dept);
   const dueDate = new Date(Date.now() + (template?.dueOffsetHours ?? 48) * 60 * 60 * 1000);
   const prettyStep = step.stepCode.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 
@@ -244,6 +261,152 @@ const HANDLERS = {
       body: `Customer ${payload.customerRef}, query ${payload.queryRef} created.`,
       actionUrl: "/admin/queries",
     });
+    // Conversion by ops leaves the customer in the claim pool — put it in front of
+    // the whole Sales floor so a BDO picks it up before the quote lands.
+    if (payload.unclaimed) {
+      await notifyUsers(await usersWithRole("bdo"), {
+        type: "lc.converted",
+        title: `Unclaimed bank-LC query ${payload.queryRef}`,
+        body: `Customer ${payload.customerRef} has no BDO yet — claim it in Queries › Bank LC to own the quote decision.`,
+        actionUrl: "/admin/queries",
+        priority: 1,
+      });
+    }
+  },
+
+  // A shipment now has an owner: hand them every operations task that was sitting
+  // in the queue waiting for exactly this.
+  "shipment.claimed": async (payload) => {
+    if (!payload.ownerId) return;
+    const steps = await prisma.otdStep.findMany({
+      where: { shipmentId: payload.shipmentId, ownerDepartment: "operations" },
+      select: { id: true },
+    });
+    if (!steps.length) return;
+    const stepIds = steps.map((s) => s.id);
+    const { count } = await prisma.task.updateMany({
+      where: { otdStepId: { in: stepIds }, status: "queued" },
+      data: { assigneeId: payload.ownerId, status: "open" },
+    });
+    if (!count) return;
+    const tasks = await prisma.task.findMany({ where: { otdStepId: { in: stepIds }, assigneeId: payload.ownerId, status: "open" } });
+    for (const t of tasks) emitToUser(payload.ownerId, "task:assigned", t);
+    await notifyUsers([payload.ownerId], {
+      type: "task.assigned",
+      title: `${payload.shipmentRef} is yours`,
+      body: `${count} operations task${count > 1 ? "s" : ""} moved to your list.`,
+      actionUrl: "/admin/tasks",
+      priority: 1,
+    });
+  },
+
+  // Released back to the pool — its operations tasks go back to the queue so the
+  // next person to claim the shipment inherits them.
+  "shipment.released": async (payload) => {
+    const steps = await prisma.otdStep.findMany({
+      where: { shipmentId: payload.shipmentId, ownerDepartment: "operations" },
+      select: { id: true },
+    });
+    if (!steps.length) return;
+    await prisma.task.updateMany({
+      where: { otdStepId: { in: steps.map((s) => s.id) }, status: { in: ["open", "in_progress"] } },
+      data: { assigneeId: null, status: "queued" },
+    });
+    await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
+      type: "shipment.released",
+      title: `${payload.shipmentRef} is unclaimed again`,
+      body: "Its operations tasks are back in the queue — claim it to pick the job up.",
+      actionUrl: "/admin/shipments",
+      priority: 1,
+    });
+  },
+
+  // Documents. Most changes ride the socket fan-out alone — nobody needs a bell for
+  // an upload they made themselves. Two cases DO need telling, and both are the
+  // Rate Confirmation gate on Order Lock:
+  //
+  //   the customer uploads a signed copy  → the ops owner has to verify it before
+  //                                         the order can lock, and will not know
+  //                                         it landed otherwise
+  //   ops rejects a signed copy           → the customer has to send a corrected
+  //                                         one, and the reason is the whole message
+  "shipment.documents.changed": async (payload) => {
+    // The customer's signed quotation (ADR-056) lives on the QUOTATION, not a shipment
+    // — there is no shipment yet; verifying it is what creates one. Ops has to hear
+    // that a copy landed, and the uploader has to hear if it was refused.
+    if (payload.ownerType === "quotation" && payload.docType === "quotation_acceptance") {
+      const quotation = await prisma.quotation.findUnique({
+        where: { id: payload.ownerId },
+        select: { id: true, referenceNo: true, queryId: true, query: { select: { customerId: true } } },
+      });
+      if (!quotation) return;
+      if (payload.change === "upload") {
+        await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
+          type: "document.awaiting_verification",
+          title: `Signed acceptance uploaded for ${quotation.referenceNo}`,
+          body: "Verify it to create the shipment — or reject it if it is not the customer's signed copy.",
+          actionUrl: "/admin/queries",
+          priority: 1,
+        });
+      } else if (payload.change === "reject") {
+        const doc = await prisma.document.findUnique({
+          where: { id: payload.documentId },
+          select: { verificationNote: true, uploadedById: true },
+        });
+        const customer = await prisma.customer.findUnique({ where: { id: quotation.query.customerId } });
+        await notifyUsers([doc?.uploadedById, customer?.assignedBdoId], {
+          type: "document.rejected",
+          title: `Signed acceptance for ${quotation.referenceNo} not accepted`,
+          body: doc?.verificationNote ?? "Ops could not accept it — ask the customer for a clearer signed copy.",
+          actionUrl: "/admin/queries",
+          priority: 1,
+        });
+      }
+      return;
+    }
+
+    if (!payload.shipmentId) return; // master-data paperwork — no workflow gate
+    const shipment = await prisma.shipment.findUnique({ where: { id: payload.shipmentId } });
+    if (!shipment) return;
+    const label = await docTypeLabelFor(payload.docType);
+
+    if (payload.change === "upload" && payload.actorRole === "customer") {
+      const types = await prisma.documentType.findMany({
+        where: { requiresVerification: true },
+        select: { code: true },
+      });
+      if (!types.some((t) => t.code === payload.docType)) return;
+      const targets = shipment.opsOwnerId
+        ? [shipment.opsOwnerId]
+        : await usersWithRole("ops_manager", "ops_exec");
+      await notifyUsers(targets, {
+        type: "document.awaiting_verification",
+        title: `Signed ${label} uploaded on ${shipment.referenceNo}`,
+        body: "Verify it to lock the order.",
+        actionUrl: `/admin/shipments/${shipment.id}`,
+        priority: 1,
+      });
+      return;
+    }
+
+    if (payload.change === "reject") {
+      const doc = await prisma.document.findUnique({
+        where: { id: payload.documentId },
+        select: { verificationNote: true },
+      });
+      const customer = await prisma.customer.findUnique({ where: { id: shipment.customerId } });
+      const targets = [
+        ...(await customerPortalUsers(shipment.customerId)),
+        customer?.assignedBdoId,
+      ];
+      await notifyUsers(targets, {
+        type: "document.rejected",
+        title: `${label} not accepted on ${shipment.referenceNo}`,
+        body: doc?.verificationNote ?? "Please send a corrected copy.",
+        actionUrl: "/dashboard",
+        priority: 1,
+      });
+    }
   },
 
   "lead.converted": async (payload) => {
@@ -323,9 +486,25 @@ const HANDLERS = {
   },
 
   // A BDO picked an unclaimed query up — it is theirs now, and everyone else's pool
-  // just shrank. Notification-free: the claimer already knows, and the fan-out row
-  // below refreshes the other BDOs' lists.
-  "query.claimed": async () => {},
+  // just shrank. The other BDOs' lists are refreshed by the fan-out row below; Ops
+  // is told because they now know who to send the quote to for a decision.
+  "query.claimed": async (payload) => {
+    const claimer = payload.claimedById
+      ? await prisma.user.findUnique({
+          where: { id: payload.claimedById },
+          select: { email: true, employee: { select: { firstName: true, lastName: true } } },
+        })
+      : null;
+    const who = claimer?.employee
+      ? `${claimer.employee.firstName} ${claimer.employee.lastName}`
+      : claimer?.email ?? "a BDO";
+    await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
+      type: "query.claimed",
+      title: `Query ${payload.referenceNo} claimed`,
+      body: `${who} owns it now — the quote decision goes to them.`,
+      actionUrl: "/admin/queries",
+    });
+  },
 
   "query.stale": async (payload) => {
     const targets = [payload.raisedById, ...(await usersWithRole("asm"))];
@@ -347,6 +526,10 @@ const HANDLERS = {
   },
 
   // ── Quotation ──
+  // The people who may DECIDE on it: the portal customer, the customer's BDO, and —
+  // for a website query — the web_manager who owns that channel. An unclaimed
+  // customer (storefront signup, bank-LC conversion) has no BDO yet, so the whole
+  // Sales floor is told the quote is waiting on a claim.
   "quotation.sent": async (payload) => {
     const query = await prisma.query.findUnique({ where: { id: payload.queryId } });
     if (!query) return;
@@ -354,14 +537,24 @@ const HANDLERS = {
     const targets = [
       ...(await customerPortalUsers(query.customerId)),
       customer?.assignedBdoId,
+      ...(query.raisedVia === "portal" ? await usersWithRole("web_manager") : []),
     ];
     await notifyUsers(targets, {
       type: "quotation.sent",
       title: `Quotation ${payload.referenceNo} sent`,
       body: "A quotation is ready for a decision.",
-      actionUrl: "/admin/quotations",
+      actionUrl: "/admin/queries",
       priority: 1,
     });
+    if (customer && !customer.assignedBdoId) {
+      await notifyUsers(await usersWithRole("bdo", "asm"), {
+        type: "quotation.sent",
+        title: `Unclaimed quote ${payload.referenceNo} awaits a decision`,
+        body: `Query ${query.referenceNo} has no BDO — claim it in Queries to decide on the customer's behalf.`,
+        actionUrl: "/admin/queries",
+        priority: 1,
+      });
+    }
   },
 
   "quotation.rejected": async (payload) => {
@@ -370,6 +563,37 @@ const HANDLERS = {
       title: `Quotation ${payload.referenceNo} rejected`,
       body: "The customer requested a revision.",
       actionUrl: "/admin/quotations",
+    });
+  },
+
+  // ── Sales recorded the customer's verbal yes (ADR-056). Not an order yet: Ops is
+  //    told an order is EXPECTED so it can plan, and told again if the link lapses. ──
+  "quotation.acceptance_claimed": async (payload) => {
+    const until = payload.expiresAt ? new Date(payload.expiresAt).toLocaleDateString() : "it expires";
+    await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
+      type: "quotation.acceptance_claimed",
+      title: `Expected order — ${payload.referenceNo}`,
+      body: `Sales says the customer accepted (${payload.via}). Nothing to do until the customer confirms through their link, or a signed copy is verified.`,
+      actionUrl: "/admin/queries",
+      priority: 0,
+    });
+    await notifyUsers([payload.claimedById], {
+      type: "quotation.acceptance_claimed",
+      title: `Acceptance recorded for ${payload.referenceNo}`,
+      body: `The customer's link is live until ${until}. The shipment is created the moment they confirm.`,
+      actionUrl: "/admin/queries",
+      priority: 0,
+    });
+  },
+
+  "quotation.acceptance_lapsed": async (payload) => {
+    const targets = [payload.claimedById, ...(await usersWithRole("ops_manager", "ops_exec"))];
+    await notifyUsers(targets, {
+      type: "quotation.acceptance_lapsed",
+      title: `${payload.referenceNo} — customer never confirmed`,
+      body: "The approval link expired unused. Record the acceptance again to send a fresh link, or ask for a signed copy.",
+      actionUrl: "/admin/queries",
+      priority: 1,
     });
   },
 
@@ -385,6 +609,26 @@ const HANDLERS = {
       title: `Shipment ${payload.shipmentRef} created`,
       body: `Services: ${(payload.services ?? []).join(", ")}`,
       actionUrl: "/admin/shipments",
+      priority: 1,
+    });
+    // The receipt (ADR-056): the customer's portal users and their BDO are told the
+    // acceptance was recorded and what it created. Before this only Ops heard, so a
+    // wrongly recorded approval produced no signal to the one party who would know.
+    const customer = payload.customerId
+      ? await prisma.customer.findUnique({ where: { id: payload.customerId }, select: { assignedBdoId: true } })
+      : null;
+    await notifyUsers(await customerPortalUsers(payload.customerId), {
+      type: "quotation.approved",
+      title: `You approved quotation ${payload.quotationRef ?? ""}`.trim(),
+      body: `Consort has started shipment ${payload.shipmentRef}. If you did not approve this, contact Consort immediately.`,
+      actionUrl: "/dashboard",
+      priority: 1,
+    });
+    await notifyUsers([customer?.assignedBdoId], {
+      type: "quotation.approved",
+      title: `Customer approved — shipment ${payload.shipmentRef} created`,
+      body: `Approved via ${payload.approvalChannel ?? "the customer"}.`,
+      actionUrl: "/admin/queries",
       priority: 1,
     });
   },
@@ -430,6 +674,16 @@ const HANDLERS = {
     // hold that landed before the first task was created must not lose it forever.
     await createNextStepTask(payload.shipmentId);
     emitToRooms([`shipment:${payload.shipmentId}`], "shipment:updated", { shipmentId: payload.shipmentId });
+  },
+
+  // The registers were linked, or the path was recomposed (ADR-057). Re-raising the
+  // first task is idempotent (RULE-AE-04): a task that already exists is a no-op, a
+  // freshly recomposed path gets its first one.
+  "shipment.updated": async (payload) => {
+    await createNextStepTask(payload.shipmentId);
+    const rooms = [`shipment:${payload.shipmentId}`];
+    if (payload.customerId) rooms.push(`customer:${payload.customerId}`);
+    emitToRooms(rooms, "shipment:updated", { shipmentId: payload.shipmentId });
   },
 
   "shipment.cancelled": async (payload) => {
@@ -481,6 +735,76 @@ const HANDLERS = {
       body: payload.escalate ? "Escalated to Management (30d+)." : "Chase payment.",
       actionUrl: "/admin/finance",
       priority: payload.escalate ? 2 : 1,
+    });
+  },
+
+  // ── Trade alerts (roadmap §7.2) ─────────────────────────────────────────────
+  // The nightly sweeps have detected these for a while, but nothing consumed the
+  // events, so an instrument could expire and a DA payment fall due with no one
+  // told. Accounts owns the money; Operations owns the shipment it sits on.
+
+  "fi.expiring": async (payload) => {
+    const shipment = await prisma.shipment.findFirst({
+      where: { financialInstrumentId: payload.financialInstrumentId },
+      select: { id: true, referenceNo: true, opsOwnerId: true },
+    });
+    const targets = [
+      ...(await usersWithRole("accounts")),
+      ...(shipment?.opsOwnerId ? [shipment.opsOwnerId] : await usersWithRole("ops_manager", "ops_exec")),
+    ];
+    await notifyUsers(targets, {
+      type: "fi.expiring",
+      title: payload.expired
+        ? `Financial Instrument ${payload.fiNumber} has expired`
+        : `Financial Instrument ${payload.fiNumber} expires in ${payload.daysLeft} day(s)`,
+      body: shipment
+        ? `On shipment ${shipment.referenceNo}. Nothing can be drawn against an expired instrument.`
+        : "Not yet attached to a shipment.",
+      actionUrl: shipment ? `/admin/shipments/${shipment.id}` : "/admin/trade",
+      priority: payload.expired ? 2 : 1,
+    });
+  },
+
+  "fi.da_due": async (payload) => {
+    const shipment = payload.shipmentId
+      ? await prisma.shipment.findUnique({
+          where: { id: payload.shipmentId },
+          select: { id: true, referenceNo: true, opsOwnerId: true },
+        })
+      : null;
+    const overdue = (payload.daysLeft ?? 0) < 0;
+    const due = new Date(payload.dueDate).toISOString().slice(0, 10);
+    const targets = [
+      ...(await usersWithRole("accounts")),
+      ...(shipment?.opsOwnerId ? [shipment.opsOwnerId] : []),
+    ];
+    await notifyUsers(targets, {
+      type: "fi.da_due",
+      title: overdue
+        ? `DA payment overdue by ${Math.abs(payload.daysLeft)} day(s)`
+        : `DA payment due in ${payload.daysLeft} day(s)`,
+      body: `B/L ${payload.blNumber ?? "—"} — due ${due}. Computed from the shipped-on-board date, not typed in.`,
+      actionUrl: shipment ? `/admin/shipments/${shipment.id}` : "/admin/trade",
+      priority: overdue ? 2 : 1,
+    });
+  },
+
+  // Reported, never enforced: the desk needs to SEE that two documents disagree.
+  "trade.mismatch_detected": async (payload) => {
+    const shipment = await prisma.shipment.findUnique({
+      where: { id: payload.shipmentId },
+      select: { id: true, opsOwnerId: true },
+    });
+    const targets = [
+      ...(shipment?.opsOwnerId ? [shipment.opsOwnerId] : await usersWithRole("ops_manager", "ops_exec")),
+      ...(await usersWithRole("accounts")),
+    ];
+    await notifyUsers(targets, {
+      type: "trade.mismatch_detected",
+      title: `Documents disagree on ${payload.referenceNo}`,
+      body: (payload.alerts ?? []).map((a) => a.message).join(" "),
+      actionUrl: `/admin/shipments/${payload.shipmentId}`,
+      priority: 1,
     });
   },
 

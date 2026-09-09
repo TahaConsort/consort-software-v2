@@ -24,7 +24,10 @@ const MANAGEMENT_PERMS = [
   "lead.create", "lead.read", "lead.update", "lead.convert", "lead.reopen",
   "visit.read",
   "query.read",
-  "quotation.read", "quotation.approve", "quotation.reject",
+  // No `quotation.approve` for anyone internal since ADR-056: a shipment is born only
+  // from the customer's own acceptance. Management records the claim and relays the
+  // secure link like the sales floor does.
+  "quotation.read", "quotation.share", "quotation.reject",
   "shipment.read", "shipment.step.reopen", "shipment.hold", "shipment.resume",
   "shipment.cancel", "shipment.close", "shipment.force_override", "shipment.schedule",
   "invoice.create",
@@ -47,6 +50,46 @@ const MANAGEMENT_PERMS = [
   "trade.cargo.manage", "trade.transport.manage", "trade.customs.manage",
   "trade.invoice.manage", "trade.invoice.issue",
   "fi.manage", "fi.close",
+  // Ops shipment ownership — Management reassigns or releases a claimed shipment.
+  "shipment.assign",
+  // Signed-document verification (Rate Confirmation before Order Lock).
+  "document.verify",
+];
+
+// ── Operations — ONE permission set for both ops roles (product decision
+// 2026-09-08: "only one role for ops for now"). `ops_manager` and `ops_exec` stay
+// as enum values so existing users and the ~30 hardcoded role lists keep working,
+// but they can do exactly the same things. This deliberately collapses the former
+// manager-only gates — quotation.send (RULE-QT-01 four-eyes on outbound pricing),
+// shipment.force_override, shipment.close (RULE-SH-12), hold/resume/cancel,
+// document.publish/delete, vendor.manage — onto every ops user. Four-eyes on
+// money now sits at quotation APPROVAL (a different role decides) and at invoice
+// ISSUE (Accounts). Re-split here if the desk grows a real manager tier again.
+const OPS_PERMS = [
+  "query.read",
+  "quotation.create", "quotation.read", "quotation.send", "quotation.revise",
+  "shipment.read", "shipment.step.complete", "shipment.step.reopen",
+  "shipment.hold", "shipment.resume", "shipment.cancel", "shipment.close", "shipment.force_override", "shipment.schedule",
+  // Take ownership of a shipment — from then on only the owner works its steps and flow.
+  "shipment.claim",
+  "invoice.create",
+  "task.read", "task.update", "task.complete", "task.reassign",
+  "document.upload", "document.read", "document.publish", "document.delete",
+  // Verify the customer's signed Rate Confirmation — the gate on Order Lock.
+  "document.verify",
+  "chat.read", "chat.send", "report.read", "dashboard.read",
+  "lc.read", "lc.convert",
+  "vendor.read", "vendor.manage",
+  // Ops runs the rate requests end to end — they are the ones on the phone to the
+  // transporter, so they also pick the winning vendor.
+  "rfq.read", "rfq.manage", "rfq.award",
+  // Ops keeps the fleet masters current — they meet the driver and the truck.
+  "fleet.read", "fleet.manage",
+  // Operations owns the cargo-side paperwork: parties, containers, packing list,
+  // B/L, and the PURCHASE commercial invoice (the vendor billing Consort).
+  // Issuing the SALE invoice is deliberately withheld — that is Accounts (four-eyes).
+  "trade.read", "trade.party.manage", "trade.contract.manage",
+  "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
 ];
 
 export const PERMISSIONS_BY_ROLE = {
@@ -67,7 +110,7 @@ export const PERMISSIONS_BY_ROLE = {
     "query.create", "query.read", "query.update", "query.cancel",
     // Pick up a storefront self-signup nobody owns yet (§5.20).
     "query.claim",
-    "quotation.read", "quotation.approve", "quotation.reject",
+    "quotation.read", "quotation.share", "quotation.reject",
     "shipment.read",
     "task.read", "task.update", "task.complete", "task.reassign",
     "document.upload", "document.read", "document.publish", "document.delete",
@@ -83,11 +126,12 @@ export const PERMISSIONS_BY_ROLE = {
     "query.create", "query.read", "query.update", "query.cancel",
     // Pick up a storefront self-signup nobody owns yet (§5.20).
     "query.claim",
-    // Decide on quotes on the customer's behalf (verbal acceptance on a call),
-    // scoped to the BDO's OWN queries — deliberate relaxation of RULE-QT-03.
-    // quotation.share: give a SENT quote to the customer over mail/phone/WhatsApp
-    // and record how — for any customer origin (form / bank LC / BDO).
-    "quotation.read", "quotation.share", "quotation.approve", "quotation.reject",
+    // quotation.share: give a SENT quote to the customer over mail/phone/WhatsApp,
+    // record the customer's verbal acceptance and relay the secure link — for any
+    // customer origin (form / bank LC / BDO). The former on-behalf `quotation.approve`
+    // is gone (ADR-056): a verbal yes is recorded as a claim, and the shipment is
+    // created only by the customer's own act or a signed copy Operations verified.
+    "quotation.read", "quotation.share", "quotation.reject",
     "shipment.read",
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
@@ -96,46 +140,9 @@ export const PERMISSIONS_BY_ROLE = {
     "trade.read",
   ],
 
-  ops_manager: [
-    "query.read",
-    "quotation.create", "quotation.read", "quotation.send", "quotation.revise",
-    "shipment.read", "shipment.step.complete", "shipment.step.reopen",
-    "shipment.hold", "shipment.resume", "shipment.cancel", "shipment.close", "shipment.force_override", "shipment.schedule",
-    "invoice.create",
-    "task.read", "task.update", "task.complete", "task.reassign",
-    "document.upload", "document.read", "document.publish", "document.delete",
-    "chat.read", "chat.send", "report.read", "dashboard.read",
-    "lc.read", "lc.convert",
-    "vendor.read", "vendor.manage",
-    "rfq.read", "rfq.manage", "rfq.award",
-    "fleet.read", "fleet.manage",
-    // Operations owns the cargo-side paperwork: parties, containers, packing list,
-    // B/L, and the PURCHASE commercial invoice (the vendor billing Consort).
-    // Issuing the SALE invoice is deliberately withheld — that is Accounts (four-eyes).
-    "trade.read", "trade.party.manage", "trade.contract.manage",
-    "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
-  ],
-
-  ops_exec: [
-    "query.read",
-    "quotation.create", "quotation.read", "quotation.revise",
-    "shipment.read", "shipment.step.complete", "shipment.schedule",
-    "task.read", "task.update", "task.complete",
-    "document.upload", "document.read",
-    "chat.read", "chat.send", "dashboard.read",
-    "lc.read", "lc.convert",
-    "vendor.read",
-    // Ops executives run the rate requests end to end — they are the ones on the
-    // phone to the transporter, so they also pick the winning vendor.
-    "rfq.read", "rfq.manage", "rfq.award",
-    // Ops executives keep the fleet masters current — they are the people who
-    // meet the driver and the truck, so they add them, not just read them.
-    "fleet.read", "fleet.manage",
-    // Same cargo-side scope as ops_manager: the executive is the one keying the
-    // packing list and the B/L off the vendor's paperwork.
-    "trade.read", "trade.party.manage", "trade.contract.manage",
-    "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
-  ],
+  // Both ops roles share OPS_PERMS — see the note above it.
+  ops_manager: OPS_PERMS,
+  ops_exec: OPS_PERMS,
 
   // Owns the WEBSITE query channel (queries raised via the storefront/portal).
   // Sales-shaped but channel-scoped: query/quotation middleware limits every read
@@ -143,7 +150,7 @@ export const PERMISSIONS_BY_ROLE = {
   // channel is theirs by role, not by claiming customers.
   web_manager: [
     "query.read", "query.update", "query.cancel",
-    "quotation.read", "quotation.share", "quotation.approve", "quotation.reject",
+    "quotation.read", "quotation.share", "quotation.reject",
     "document.upload", "document.read",
     "chat.read", "chat.send", "report.read", "dashboard.read",
   ],
@@ -209,6 +216,8 @@ export const PERMISSIONS_BY_ROLE = {
 
   customer: [
     "query.create", "query.read", "query.update", "query.cancel",
+    // The ONLY holder of `quotation.approve` (ADR-056): the portal click is the
+    // customer's own act, which is exactly what a binding order needs behind it.
     "quotation.read", "quotation.approve", "quotation.reject",
     "shipment.read",
     // Inbound uploads only — a customer who supplies their own CRO has to be able to

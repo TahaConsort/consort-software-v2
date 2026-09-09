@@ -22,6 +22,16 @@ import { DEFAULT_CURRENCY } from "../utils/currency.js";
 import { deriveTaskTemplateData } from "../utils/taskTemplates.js";
 import { allocateRef } from "../utils/referenceNumber.js";
 import { seedDemoLcReferral } from "../modules/lc/lc.seed.js";
+// The roadmap path (§4/§5, ADR-057) lives in its own module so this factory seed and
+// scripts/applyRoadmapWorkflow.js write the same rows from one source (ADR-001).
+import {
+  TRADE_DOCUMENT_TYPES,
+  TRADE_STEP_TEMPLATES,
+  TRADE_STEP_ACTION_TEMPLATES,
+  TRADE_STEP_HINTS,
+  CHARGE_TYPE_STEP_REMAP,
+} from "./tradeWorkflow.js";
+import { ROADMAP_PARTIES } from "./roadmapParties.js";
 
 const DEPARTMENTS = [
   { code: "management", name: "Management" },
@@ -36,9 +46,12 @@ const DEPARTMENTS = [
 // The DB form of WORKFLOW §4a.1 / DATABASE §8 — the composition source of truth
 // (ADR-001/040). utils/composition.js reads this table and never re-encodes the mapping.
 //
-// There are NO composition gates: every ACTIVE row composes onto every shipment, in
-// canonical order. A step that should no longer appear is marked `active: false` — never
-// deleted — so shipments composed while it was live still resolve it by step code.
+// ONE composition gate: `appliesToKinds`. Freight forwarding (rows 10–180) and export
+// trade (rows 200–270, spliced in from tradeWorkflow.js) are different processes and
+// never compose onto each other's shipments. Within a kind there are no further gates:
+// every ACTIVE row composes onto every shipment of that kind, in canonical order. A step
+// that should no longer appear is marked `active: false` — never deleted — so shipments
+// composed while it was live still resolve it by step code.
 //
 // Canonical numbers are stable reporting keys and are RE-SPACED to multiples of 10 so
 // future steps can be inserted without renumbering. This is safe because every
@@ -198,9 +211,23 @@ const OTD_STEP_TEMPLATES = [
     ownerDepartment: "transport", 
     requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered", active: false },
   { canonicalNo: 180, stepCode: "empty_return", title: "Empty Container Return (EIR)",
-    ownerDepartment: "operations", 
+    ownerDepartment: "operations",
     requiredDocTypes: ["eir_empty_return"], dueOffsetHours: 48, derivedStatus: "delivered" },
-];
+
+  // The roadmap path (§5) is spliced in from prisma/tradeWorkflow.js — since ADR-057 it
+  // is THE path for every shipment, whichever kind it was born as.
+  ...TRADE_STEP_TEMPLATES,
+].map((t) => ({
+  // Everything declared above without an explicit `appliesToKinds` is a freight-
+  // forwarding row. The spread keeps a row's own value where it has one.
+  appliesToKinds: ["forwarding"],
+  ...t,
+  // ADR-057 retires the forwarding path: every forwarding row except Order Lock is
+  // inactive — kept, never deleted, so shipments composed while it was live still
+  // resolve it by step code (INV-14). Order Lock stays: it is the customer's signed Rate
+  // Confirmation in front of the roadmap steps on a quotation-born shipment.
+  active: t.stepCode === "order_lock" || TRADE_STEP_TEMPLATES.some((r) => r.stepCode === t.stepCode) ? (t.active ?? true) : false,
+}));
 
 // ── Step hints (ADR-051) ──────────────────────────────────────────────────────
 // One plain-language line per step on what completing it actually means — merged onto
@@ -208,7 +235,7 @@ const OTD_STEP_TEMPLATES = [
 // steps. Ported from the frontend's old hardcoded STEP_HINTS map so admin-created steps
 // and seeded steps read from the same column.
 const STEP_HINTS = {
-  order_lock: "Attach the signed Rate Confirmation (RC) — the order locks against it and nothing downstream moves until it is on file.",
+  order_lock: "The unsigned Rate Confirmation is published to the portal — the customer signs it and uploads it back. Verify the signed copy, then lock the order. Nothing downstream moves until then.",
   order_confirmed: "Collect the customer's document pack and confirm the order — work the checklist below.",
   transporter_assigned: "Book a transporter for the run and agree the rate.",
   vehicle_dispatched: "Send the vehicle to the customer's pickup point.",
@@ -237,6 +264,7 @@ const STEP_HINTS = {
   port_job_completed: "Cargo handed over at the port — the job is complete.",
   import_empty_return: "Return the empty container to the yard or dry port; capture the empty-return EIR. This is the last step of the job.",
   empty_return: "Return the empty container to the yard; capture the empty-return EIR.",
+  ...TRADE_STEP_HINTS,
 };
 
 // ── Document-type vocabulary (ADR-051) ────────────────────────────────────────
@@ -244,7 +272,18 @@ const STEP_HINTS = {
 // DOC_TYPES Zod list. UPSERTED (never deleted) so admin-added types survive every
 // seed run, factory reset included. `customerUploadable` replaces the old hardcoded
 // portal allowlist; `lc` is on it for the customer-managed LC flow (ADR-050).
-const CUSTOMER_UPLOADABLE = ["cro", "lc", "commercial_invoice", "packing_list", "authority_letterhead"];
+// `rate_confirmation` is here so the customer can send back the copy they signed —
+// the system generates the unsigned RC and publishes it to the portal for exactly that.
+// `quotation_acceptance` is the customer's signed copy of the quotation itself — the
+// paper path to approval (ADR-056): a portal customer may send it in, sales may upload
+// it on their behalf, and Operations' verification is what creates the shipment.
+const CUSTOMER_UPLOADABLE = ["cro", "lc", "commercial_invoice", "packing_list", "authority_letterhead", "rate_confirmation", "quotation_acceptance"];
+// Types that only count once Operations has verified them.
+// The Order Lock step is the reason this exists: the order locks against a SIGNED
+// rate confirmation, so the auto-generated one must not satisfy it on its own. The
+// signed quotation acceptance is the same idea one stage earlier: an upload by sales
+// proves nothing until a different department has looked at it.
+const REQUIRES_VERIFICATION = ["rate_confirmation", "quotation_acceptance"];
 const DOCUMENT_TYPES = [
   { code: "gd", label: "GD / Customs Declaration" },
   { code: "bol", label: "Bill of Lading (BOL)" },
@@ -257,6 +296,7 @@ const DOCUMENT_TYPES = [
   { code: "authority_letterhead", label: "Authority Letterhead" },
   { code: "undertaking", label: "Undertaking" },
   { code: "quotation", label: "Quotation" },
+  { code: "quotation_acceptance", label: "Signed Quotation Acceptance" },
   { code: "rate_confirmation", label: "Rate Confirmation (RC)" },
   { code: "lc", label: "Letter of Credit / SWIFT Advice" },
   { code: "cro", label: "Container Release Order (CRO)" },
@@ -278,11 +318,17 @@ const DOCUMENT_TYPES = [
   { code: "insurance", label: "Insurance Certificate" },
   { code: "tax_certificate", label: "Tax Certificate (NTN/STRN)" },
   { code: "other", label: "Other" },
-].map((t, i) => ({
-  ...t,
-  customerUploadable: CUSTOMER_UPLOADABLE.includes(t.code),
-  sortOrder: (i + 1) * 10,
-}));
+]
+  .map((t, i) => ({
+    ...t,
+    customerUploadable: CUSTOMER_UPLOADABLE.includes(t.code),
+    requiresVerification: REQUIRES_VERIFICATION.includes(t.code),
+    sortOrder: (i + 1) * 10,
+  }))
+  // The roadmap §4 register, appended AFTER the numbering map: these rows carry their
+  // own sortOrder and flags, and splicing them into the list above would renumber every
+  // master-data type below them for no reason.
+  .concat(TRADE_DOCUMENT_TYPES);
 
 // ── Sub-action catalog (ADR-048) ──────────────────────────────────────────────
 // The checklist that hangs under a main step. Gated exactly like the step catalog
@@ -296,72 +342,78 @@ const OTD_STEP_ACTION_TEMPLATES = [
   // ── Order lock. No gates anywhere any more,
   //    so local trucking, loading-point-to-port and international all carry it.
   //    The order cannot lock until the signed RC is on the shipment.
-  { stepCode: "order_lock", actionCode: "rate_confirmation", title: "Rate Confirmation (RC)", kind: "document", docType: "rate_confirmation", sortOrder: 10, required: true, services: [] },
+  { stepCode: "order_lock", actionCode: "rate_confirmation", title: "Rate Confirmation (RC)", kind: "document", docType: "rate_confirmation", sortOrder: 10, required: true },
 
   // Order confirmation — INTERNATIONAL. The full export document pack the customer
   // must hand over before the order is confirmed.
-  { stepCode: "order_confirmed", actionCode: "packing_list",         title: "Packing List",           kind: "document", docType: "packing_list",          sortOrder: 10, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "gd",                   title: "GD / Customs Declaration", kind: "document", docType: "gd",                  sortOrder: 20, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "packing_list",         title: "Packing List",           kind: "document", docType: "packing_list",          sortOrder: 10, required: true },
+  { stepCode: "order_confirmed", actionCode: "gd",                   title: "GD / Customs Declaration", kind: "document", docType: "gd",                  sortOrder: 20, required: true },
   // Auto-satisfied: the approved quotation is rendered to PDF and attached to the
   // shipment at approval (shipment.service.js), so this item is already ticked.
-  { stepCode: "order_confirmed", actionCode: "quotation",            title: "Quotation (auto-attached)", kind: "document", docType: "quotation",          sortOrder: 30, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "undertaking",          title: "Undertaking",            kind: "document", docType: "undertaking",           sortOrder: 40, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "sales_tax_invoice",    title: "Sales Tax Invoice",      kind: "document", docType: "sales_tax_invoice",     sortOrder: 50, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "commercial_invoice",   title: "Commercial Invoice",     kind: "document", docType: "commercial_invoice",    sortOrder: 60, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "certificate_of_origin", title: "Certificate of Origin", kind: "document", docType: "certificate_of_origin", sortOrder: 70, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "quotation",            title: "Quotation (auto-attached)", kind: "document", docType: "quotation",          sortOrder: 30, required: true },
+  { stepCode: "order_confirmed", actionCode: "undertaking",          title: "Undertaking",            kind: "document", docType: "undertaking",           sortOrder: 40, required: true },
+  { stepCode: "order_confirmed", actionCode: "sales_tax_invoice",    title: "Sales Tax Invoice",      kind: "document", docType: "sales_tax_invoice",     sortOrder: 50, required: true },
+  { stepCode: "order_confirmed", actionCode: "commercial_invoice",   title: "Commercial Invoice",     kind: "document", docType: "commercial_invoice",    sortOrder: 60, required: true },
+  { stepCode: "order_confirmed", actionCode: "certificate_of_origin", title: "Certificate of Origin", kind: "document", docType: "certificate_of_origin", sortOrder: 70, required: true },
 
   // Order confirmation — LOADING POINT → PORT. The job stops at the terminal gate, so
   // it needs the shipping pack, not the full export/trade pack.
-  { stepCode: "order_confirmed", actionCode: "lp_packing_list",       title: "Packing List",          kind: "document", docType: "packing_list",          sortOrder: 10, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "lp_commercial_invoice", title: "Commercial Invoice",    kind: "document", docType: "commercial_invoice",    sortOrder: 20, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "lp_authority_letter",   title: "Authority Letterhead",  kind: "document", docType: "authority_letterhead",  sortOrder: 30, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "lp_packing_list",       title: "Packing List",          kind: "document", docType: "packing_list",          sortOrder: 10, required: true },
+  { stepCode: "order_confirmed", actionCode: "lp_commercial_invoice", title: "Commercial Invoice",    kind: "document", docType: "commercial_invoice",    sortOrder: 20, required: true },
+  { stepCode: "order_confirmed", actionCode: "lp_authority_letter",   title: "Authority Letterhead",  kind: "document", docType: "authority_letterhead",  sortOrder: 30, required: true },
 
   // Order confirmation — PORT → CONSIGNEE. What the customer must hand over before we
   // can take their container off the terminal. The BOL proves title, the delivery order
   // is the line's release, the gate pass is what the terminal actually wants at the
   // gate, and the free days tell us the clock we are racing before detention starts.
-  { stepCode: "order_confirmed", actionCode: "pc_bol",           title: "Bill of Lading (BOL)",              kind: "document", docType: "bol",            sortOrder: 10, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_delivery_order", title: "Delivery Order (DO)",              kind: "document", docType: "delivery_order", sortOrder: 20, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_gate_pass",     title: "Gate Pass",                         kind: "document", docType: "gate_pass",      sortOrder: 30, required: true, services: [] },
-  { stepCode: "order_confirmed", actionCode: "pc_free_days",     title: "Free days confirmed with customer", kind: "manual",   docType: null,             sortOrder: 40, required: true, services: [] },
+  { stepCode: "order_confirmed", actionCode: "pc_bol",           title: "Bill of Lading (BOL)",              kind: "document", docType: "bol",            sortOrder: 10, required: true },
+  { stepCode: "order_confirmed", actionCode: "pc_delivery_order", title: "Delivery Order (DO)",              kind: "document", docType: "delivery_order", sortOrder: 20, required: true },
+  { stepCode: "order_confirmed", actionCode: "pc_gate_pass",     title: "Gate Pass",                         kind: "document", docType: "gate_pass",      sortOrder: 30, required: true },
+  { stepCode: "order_confirmed", actionCode: "pc_free_days",     title: "Free days confirmed with customer", kind: "manual",   docType: null,             sortOrder: 40, required: true },
 
   // Customs clearance — the merged step's working checklist.
-  { stepCode: "customs_clearance", actionCode: "gd_filed",         title: "GD filed in WeBOC / PSW",        kind: "manual",   docType: null,               sortOrder: 10, required: true, services: [] },
-  { stepCode: "customs_clearance", actionCode: "duty_paid",        title: "Duty & taxes paid",              kind: "manual",   docType: null,               sortOrder: 20, required: true, services: [] },
-  { stepCode: "customs_clearance", actionCode: "gd_doc",           title: "GD document attached",           kind: "document", docType: "gd",               sortOrder: 30, required: true, services: [] },
-  { stepCode: "customs_clearance", actionCode: "exam_scheduled",   title: "Examination scheduled",          kind: "manual",   docType: null,               sortOrder: 40, required: true, services: [] },
-  { stepCode: "customs_clearance", actionCode: "cargo_examined",   title: "Cargo examined & seal applied",  kind: "manual",   docType: null,               sortOrder: 50, required: true, services: [] },
-  { stepCode: "customs_clearance", actionCode: "inspection_cert",  title: "Inspection certificate attached", kind: "document", docType: "inspection_cert", sortOrder: 60, required: true, services: [] },
+  { stepCode: "customs_clearance", actionCode: "gd_filed",         title: "GD filed in WeBOC / PSW",        kind: "manual",   docType: null,               sortOrder: 10, required: true },
+  { stepCode: "customs_clearance", actionCode: "duty_paid",        title: "Duty & taxes paid",              kind: "manual",   docType: null,               sortOrder: 20, required: true },
+  { stepCode: "customs_clearance", actionCode: "gd_doc",           title: "GD document attached",           kind: "document", docType: "gd",               sortOrder: 30, required: true },
+  { stepCode: "customs_clearance", actionCode: "exam_scheduled",   title: "Examination scheduled",          kind: "manual",   docType: null,               sortOrder: 40, required: true },
+  { stepCode: "customs_clearance", actionCode: "cargo_examined",   title: "Cargo examined & seal applied",  kind: "manual",   docType: null,               sortOrder: 50, required: true },
+  { stepCode: "customs_clearance", actionCode: "inspection_cert",  title: "Inspection certificate attached", kind: "document", docType: "inspection_cert", sortOrder: 60, required: true },
+
+  // The export-trade checklists (roadmap §5) come from prisma/tradeWorkflow.js.
+  ...TRADE_STEP_ACTION_TEMPLATES,
 ];
 
 // Admin-extensible charge catalog. `defaultDirection`/`defaultStepCode`/`service` are hints
-// used when seeding charges at approval and when adding ad-hoc charges.
+// used when seeding charges at approval and when adding ad-hoc charges. The step each
+// charge lands on is the roadmap step (CHARGE_TYPE_STEP_REMAP, ADR-057) — the forwarding
+// codes these once named are inactive.
 const CHARGE_TYPES = [
-  { code: "ocean_freight",          label: "Ocean Freight",              defaultDirection: "payable",    defaultStepCode: "vessel_booked",          service: "sea_freight" },
-  { code: "lolo",                   label: "LOLO (Lift-On/Lift-Off)",    defaultDirection: "payable",    defaultStepCode: "empty_container_pickup", service: "local_transport" },
-  { code: "inland_transport",       label: "Inland Transport / Trucking", defaultDirection: "payable",   defaultStepCode: "inland_transit",         service: "local_transport" },
-  { code: "fuel_surcharge",         label: "Fuel Surcharge",             defaultDirection: "payable",    defaultStepCode: "in_transit",             service: "local_transport" },
-  { code: "loading_labour",         label: "Loading / Unloading Labour", defaultDirection: "payable",    defaultStepCode: "goods_loaded",           service: "local_transport" },
-  { code: "cro_charges",            label: "CRO / Container Release Charges", defaultDirection: "payable", defaultStepCode: "cro_released",        service: "port_handling" },
-  { code: "customs_clearance",      label: "Customs Clearance / Agent Fee", defaultDirection: "payable", defaultStepCode: "customs_clearance",     service: "customs_clearance" },
-  { code: "port_handling",          label: "Port Handling / THC",        defaultDirection: "payable",    defaultStepCode: "port_handover",          service: "port_handling" },
-  { code: "documentation_fee",      label: "Documentation / BL Fee",     defaultDirection: "receivable", defaultStepCode: "bol_issued",             service: "sea_freight" },
-  { code: "do_fee",                 label: "Delivery Order Fee",         defaultDirection: "payable",    defaultStepCode: "destination_do",         service: "destination_services" },
-  { code: "agency_fee",             label: "Destination Agency Fee",     defaultDirection: "payable",    defaultStepCode: "destination_do",         service: "destination_services" },
-  { code: "detention_demurrage",    label: "Detention / Demurrage",      defaultDirection: "payable",    defaultStepCode: null,                     service: null },
-  { code: "lc_charges",             label: "LC / Bank Charges",          defaultDirection: "payable",    defaultStepCode: "bol_submitted",          service: "lc_finance" },
-  { code: "freight_forwarding_fee", label: "Freight Forwarding Service Fee", defaultDirection: "receivable", defaultStepCode: null,                 service: null },
-  { code: "other",                  label: "Other",                      defaultDirection: null,         defaultStepCode: null,                     service: null },
-];
+  { code: "ocean_freight",          label: "Ocean Freight",              defaultDirection: "payable",    service: "sea_freight" },
+  { code: "lolo",                   label: "LOLO (Lift-On/Lift-Off)",    defaultDirection: "payable",    service: "local_transport" },
+  { code: "inland_transport",       label: "Inland Transport / Trucking", defaultDirection: "payable",   service: "local_transport" },
+  { code: "fuel_surcharge",         label: "Fuel Surcharge",             defaultDirection: "payable",    service: "local_transport" },
+  { code: "loading_labour",         label: "Loading / Unloading Labour", defaultDirection: "payable",    service: "local_transport" },
+  { code: "cro_charges",            label: "CRO / Container Release Charges", defaultDirection: "payable", service: "port_handling" },
+  { code: "customs_clearance",      label: "Customs Clearance / Agent Fee", defaultDirection: "payable", service: "customs_clearance" },
+  { code: "port_handling",          label: "Port Handling / THC",        defaultDirection: "payable",    service: "port_handling" },
+  { code: "documentation_fee",      label: "Documentation / BL Fee",     defaultDirection: "receivable", service: "sea_freight" },
+  { code: "do_fee",                 label: "Delivery Order Fee",         defaultDirection: "payable",    service: "destination_services" },
+  { code: "agency_fee",             label: "Destination Agency Fee",     defaultDirection: "payable",    service: "destination_services" },
+  { code: "detention_demurrage",    label: "Detention / Demurrage",      defaultDirection: "payable",    service: null },
+  { code: "lc_charges",             label: "LC / Bank Charges",          defaultDirection: "payable",    service: "lc_finance" },
+  { code: "freight_forwarding_fee", label: "Freight Forwarding Service Fee", defaultDirection: "receivable", service: null },
+  { code: "other",                  label: "Other",                      defaultDirection: null,         service: null },
+].map((ct) => ({ ...ct, defaultStepCode: CHARGE_TYPE_STEP_REMAP[ct.code] ?? null }));
 
-// Demo vendors (staging). Reference numbers manually numbered; the runtime allocator
-// is kept in step below.
+// Demo vendors (staging), followed by the roadmap §2 party directory (ADR-057).
+// Reference numbers manually numbered; the runtime allocator is kept in step below.
 const VENDORS = [
   { name: "Karachi Container Yard Ltd",  type: "container_yard",   city: "Karachi", country: "PK", paymentTermsDays: 7,  currency: "PKR" },
   { name: "National Highway Transporters", type: "transporter",    city: "Lahore",  country: "PK", paymentTermsDays: 15, currency: "PKR" },
   { name: "Blue Ocean Shipping Line",    type: "shipping_line",    city: "Karachi", country: "PK", paymentTermsDays: 30, currency: "USD" },
   { name: "Clearwell Customs Agents",    type: "customs_agent",    city: "Karachi", country: "PK", paymentTermsDays: 15, currency: "PKR" },
   { name: "Jebel Ali Destination Agency", type: "destination_agent", city: "Dubai", country: "AE", paymentTermsDays: 30, currency: "USD" },
+  ...ROADMAP_PARTIES,
 ];
 
 const PORTS = [
@@ -527,7 +579,8 @@ const CLEAR_STEPS = [
   // The buy side hangs off the query (vendor_rfqs.query_id is RESTRICT), so it has
   // to go before queries — and off the vendor, so it goes before vendors too.
   "vendorQuoteLine", "vendorQuote", "vendorRfq",
-  "quotationChargeLine", "quotation", "query",
+  // Approval links point at a quotation, so they clear before it.
+  "approvalLink", "quotationChargeLine", "quotation", "query",
   "visitPlan", "outreach", "leadStatusHistory", "lead",
   "refreshToken", "activationToken", "loginActivity",
   "user", "customer", "contact", "company", "employee",
@@ -665,7 +718,15 @@ export async function seedTemplates() {
   for (const t of DOCUMENT_TYPES) {
     await prisma.documentType.upsert({
       where: { code: t.code },
-      update: { label: t.label, customerUploadable: t.customerUploadable, sortOrder: t.sortOrder },
+      // `requiresVerification` is restated on update as well: before it was, the RC
+      // gate depended on scripts/seedRcVerification.js having been run once, and a
+      // database where it never had been let the auto-generated RC lock the order.
+      update: {
+        label: t.label,
+        customerUploadable: t.customerUploadable,
+        requiresVerification: t.requiresVerification,
+        sortOrder: t.sortOrder,
+      },
       create: t,
     });
   }

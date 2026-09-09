@@ -17,11 +17,12 @@ export const getReference = async () => {
 };
 
 /**
- * Preview the OTD path a shipment runs — the same composition it gets at quote approval.
- * Every shipment runs the one path now, so this takes no inputs.
- * → { steps, stepCount, departments, requiredDocTypes }
+ * Preview the OTD path a shipment runs — the same composition it gets at creation.
+ * `kind` picks the path: freight forwarding (the default, and what a quotation becomes)
+ * or export trade. They are different processes, so there is no combined preview.
+ * → { kind, steps, stepCount, departments, requiredDocTypes }
  */
-export const composeServices = async () => {
-  const res = await api.post("/services/compose", {});
+export const composeServices = async (kind = "forwarding") => {
+  const res = await api.post("/services/compose", { kind });
   return res.data;
 };

@@ -9,7 +9,11 @@
     "dev": "nodemon server.js",
     "postinstall": "prisma generate",
     "verify:events": "node scripts/verifyEventTopics.js",
-    "verify:outbox": "node scripts/verifyOutboxHygiene.js"
+    "verify:outbox": "node scripts/verifyOutboxHygiene.js",
+    "verify:ops": "node scripts/verifyOpsOwnership.js",
+    "verify:lc": "node scripts/verifyLcExtraction.js",
+    "verify:rc": "node scripts/verifyRcGate.js",
+    "verify:mail": "node scripts/verifyMailer.js"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +32,7 @@
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
+    "nodemailer": "^10.0.1",
     "nodemon": "^3.1.14",
     "pdfkit": "^0.19.1",
     "socket.io": "^4.8.3",

@@ -21,17 +21,27 @@ export const useShipmentStore = createResourceStore({
   topics: [TOPICS.SHIPMENTS],
 
   state: { shipments: [] },
-  filters: { status: "", exceptionState: "" },
+  // `owner` is the ops-ownership lens: "me" my desk, "none" the claimable pool,
+  // "" everything I can see.
+  filters: { status: "", exceptionState: "", owner: "" },
 
   load: async ({ filters }) => {
     const params = {};
     if (filters.status) params.status = filters.status;
     if (filters.exceptionState) params.exceptionState = filters.exceptionState;
+    if (filters.owner) params.opsOwnerId = filters.owner;
     const res = await shipmentService.listShipments(params);
     return { shipments: res.data ?? [] };
   },
 
-  actions: ({ get }) => ({
+  actions: ({ get, mutate }) => ({
     fetchShipments: () => get().fetch(),
+
+    // Claiming moves the job onto my desk and its queued operations tasks with it,
+    // so the task list is invalidated alongside the shipment list.
+    claim: (id) =>
+      mutate(() => shipmentService.claimShipment(id), {
+        invalidates: [TOPICS.SHIPMENTS, TOPICS.TASKS, TOPICS.DASHBOARD],
+      }),
   }),
 });

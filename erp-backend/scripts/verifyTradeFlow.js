@@ -631,6 +631,9 @@ const run = async () => {
   };
 
   console.log("Party CRUD (as ops_exec)");
+  // Party writes are ops-owner work since ops ownership landed (2026-09-08): the
+  // shipment has to be claimed first, or every write below is refused with 409.
+  await api(tokens.ops_exec, "POST", `/shipments/${S}/claim`);
   let r = await api(tokens.ops_exec, "GET", `/shipments/${S}/parties`);
   check("GET parties on a fresh shipment is 200 and empty", r.status === 200 && r.body?.data?.parties?.length === 0, `got ${r.status}`);
   check(
@@ -734,7 +737,11 @@ const run = async () => {
   await prisma.shipment.update({ where: { id: S }, data: { exceptionState: "none" } });
 
   console.log("\nAudit + delete");
+  // Only the ops OWNER may change parties (ops ownership, 2026-09-08) — a second ops
+  // user is refused, so the delete has to come from whoever claimed it above.
   r = await api(tokens.ops_manager, "DELETE", `/shipments/${S}/parties/${notify2}`);
+  check("a non-owner ops user cannot delete a party (403)", r.status === 403, `got ${r.status}`);
+  r = await api(tokens.ops_exec, "DELETE", `/shipments/${S}/parties/${notify2}`);
   check("DELETE party is 200", r.status === 200, `got ${r.status}`);
   r = await api(tokens.ops_exec, "DELETE", `/shipments/${S}/parties/${notify2}`);
   check("deleting the same party twice is 404", r.status === 404, `got ${r.status}`);

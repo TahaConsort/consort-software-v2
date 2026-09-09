@@ -158,6 +158,7 @@ export const replaceActions = async (stepCode, actions, actorId) => {
           title: a.title,
           kind: a.kind ?? "manual",
           docType: a.kind === "document" ? a.docType : null,
+          recordType: a.kind === "record" ? a.recordType : null,
           sortOrder: a.sortOrder,
           required: a.required ?? true,
         })),
@@ -193,6 +194,7 @@ export const createDocType = async (body, actorId) => {
         code: body.code,
         label: body.label,
         customerUploadable: body.customerUploadable ?? false,
+        requiresVerification: body.requiresVerification ?? false,
         sortOrder: body.sortOrder ?? 0,
       },
     });
@@ -243,11 +245,14 @@ export const deleteDocType = async (code, actorId) => {
 
 /* ── Catalog lint (RULE-SVC-06 and friends) ── */
 
+/** The paths a shipment can run. Each is linted on its own. */
+const SHIPMENT_KINDS = ["forwarding", "trade"];
+
 /**
- * Compose every package × CRO × LC combo (plus the intl destination add-on) against
- * the LIVE catalog and report what a human should look at before the next approval:
- * empty paths, paths that never reach `delivered`, dangling docTypes, steps no combo
- * composes. Warnings, not blocks — a half-built draft catalog is a valid working state.
+ * Compose each shipment kind's path against the LIVE catalog and report what a human
+ * should look at before the next approval: empty paths, paths that never reach
+ * `delivered`, dangling docTypes, steps no path composes. Warnings, not blocks — a
+ * half-built draft catalog is a valid working state.
  */
 export const validateCatalog = async () => {
   const [templates, actionTemplates, docTypes] = await Promise.all([
@@ -257,16 +262,19 @@ export const validateCatalog = async () => {
   ]);
   const known = new Set(docTypes.map((d) => d.code));
 
-  // There is one path now — every active template, in canonical order — so the old
-  // package x CRO x LC matrix collapses to a single row. Kept as an array so the admin
-  // panel and its callers keep the same shape.
-  const path = composeOtdPath(templates);
-  const composedCodes = new Set(path.map((s) => s.stepCode));
-  const deliveredSteps = path.filter((s) => s.derivedStatus === "delivered").length;
-  const issues = [];
-  if (path.length === 0) issues.push("empty path");
-  if (deliveredSteps === 0) issues.push("no step derives 'delivered' — this path can never settle");
-  const combos = [{ stepCount: path.length, deliveredSteps, issues }];
+  // One row per kind. Linting the union instead would hide exactly the failure this
+  // matters for: a path with no `delivered` step can never settle, and a kind whose
+  // steps were all deactivated composes nothing — both invisible if the two are merged.
+  const composedCodes = new Set();
+  const combos = SHIPMENT_KINDS.map((kind) => {
+    const path = composeOtdPath(templates, kind);
+    for (const s of path) composedCodes.add(s.stepCode);
+    const deliveredSteps = path.filter((s) => s.derivedStatus === "delivered").length;
+    const issues = [];
+    if (path.length === 0) issues.push("empty path");
+    if (deliveredSteps === 0) issues.push("no step derives 'delivered' — this path can never settle");
+    return { kind, stepCount: path.length, deliveredSteps, issues };
+  });
 
   const danglingDocTypes = [];
   for (const t of templates) {

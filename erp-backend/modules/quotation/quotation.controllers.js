@@ -4,16 +4,18 @@ import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
 import { allocateRef } from "../../utils/referenceNumber.js";
 import { DEFAULT_CURRENCY } from "../../utils/currency.js";
-import { isManagement, hasRole } from "../auth/auth.middleware.js";
 import { scopedQuotationWhere, quotationInScope } from "./quotation.middleware.js";
 import { createShipmentFromApproval } from "../shipment/shipment.service.js";
+import { assertApprovable } from "../approval/approval.service.js";
 
 /**
  * Quotation (CRM_MASTER §5.7, WORKFLOW §4/§9, RULE-QT).
- *   draft → sent (ops_manager only) → approved | rejected | expired
+ *   draft → sent (any ops role — RULE-QT-01's manager-only send was relaxed with
+ *   the single ops permission set, 2026-09-08) → approved | rejected | expired
  * Approval is the system's pivot (RULE-QT-07): one transaction births the
  * shipment, its composed OTD steps, OTC milestones, chat channel and draft
- * invoice — all or nothing.
+ * invoice — all or nothing. Since ADR-056 only the CUSTOMER'S own act reaches it:
+ * the portal click here, or the link / signed-copy paths in modules/approval.
  */
 
 const emitEvent = (tx, eventType, payload) =>
@@ -192,17 +194,22 @@ export const updateQuotation = catchAsync(async (req, res, next) => {
   res.json({ success: true, message: "Quotation updated", data: hydrated });
 });
 
-/* ── POST /api/quotations/:id/send ── (ops_manager only — RULE-QT-01) */
+/* ── POST /api/quotations/:id/send ── (any ops role — quotation.send) */
 export const sendQuotation = catchAsync(async (req, res, next) => {
   const quotation = await prisma.quotation.findUnique({
     where: { id: req.params.id },
-    include: { chargeLines: true },
+    include: { chargeLines: true, query: { select: { status: true } } },
   });
   if (!quotation || !quotationInScope(req, quotation)) return next(new AppError("Quotation not found", 404));
   if (quotation.status !== "draft") {
     return next(new AppError(`Only a draft can be sent (this one is ${quotation.status})`, 409));
   }
   if (!quotation.chargeLines.length) return next(new AppError("Add at least one charge line before sending", 422));
+  // The query may have been cancelled or expired while the draft sat there — a quote
+  // for a dead enquiry must not reach the customer.
+  if (!["open", "quoted", "revision_requested"].includes(quotation.query.status)) {
+    return next(new AppError(`Cannot send a quotation for a ${quotation.query.status} query`, 409));
+  }
 
   const updated = await prisma.$transaction(async (tx) => {
     const u = await tx.quotation.update({
@@ -257,19 +264,29 @@ export const shareQuotation = catchAsync(async (req, res, next) => {
 });
 
 /* ── POST /api/quotations/:id/approve ── THE PIVOT (RULE-QT-07, WORKFLOW §9) */
+/**
+ * The portal customer's own click — the only approval an authenticated user can make
+ * (ADR-056). The other two customer-attributable acts live in modules/approval: the
+ * one-time link, and a signed copy verified by Operations.
+ *
+ * An internal user never reaches the pivot here. Their `quotation.approve` permission
+ * is gone, so the route already refuses them; the role check below is the statement
+ * of intent in case a permission set is ever widened by hand.
+ */
 export const approveQuotation = catchAsync(async (req, res, next) => {
+  if (req.user.role !== "customer") {
+    return next(new AppError(
+      "Consort staff no longer approve on the customer's behalf — record the acceptance and send the customer the secure link (ADR-056)",
+      403,
+    ));
+  }
+
   const quotation = await prisma.quotation.findUnique({
     where: { id: req.params.id },
     include: { chargeLines: { orderBy: { sortOrder: "asc" } }, query: true },
   });
   if (!quotation || !quotationInScope(req, quotation)) return next(new AppError("Quotation not found", 404));
-  if (quotation.status !== "sent") {
-    return next(new AppError(`Only a sent quotation can be approved (this one is ${quotation.status})`, 409));
-  }
-  // Validity (RULE-QT-08).
-  if (quotation.validityDate && new Date(quotation.validityDate) < new Date()) {
-    return next(new AppError("This quotation has expired and cannot be approved", 409));
-  }
+
   // Optimistic concurrency (If-Match) — MANDATORY; guards double-click / two
   // tabs (RULE-QT-08, EDGE-QT-01).
   const ifMatch = req.body.rowVersion ?? req.headers["if-match"];
@@ -289,61 +306,14 @@ export const approveQuotation = catchAsync(async (req, res, next) => {
   }
 
   const customer = await prisma.customer.findUnique({ where: { id: quotation.query.customerId } });
-  if (!customer) return next(new AppError("Customer not found", 404));
-
-  // Who may approve, and on whose behalf:
-  if (req.user.role === "customer") {
-    // A portal customer may only approve their own (scope C).
-    if (req.user.customerId !== customer.id) {
-      return next(new AppError("Quotation not found", 404));
-    }
-  } else if (hasRole(req.user, "web_manager") && quotation.query.raisedVia === "portal") {
-    // The web_manager owns the WEBSITE channel: portal-raised quotes are theirs to
-    // decide even when they ALSO hold bdo (which alone is limited to raised-by-me).
-    // Checked before the bdo branch so the channel authority wins for a dual-role
-    // user. Standard four-eyes still applies: never on a customer they own.
-    if (req.user.id === customer.assignedBdoId) {
-      return next(new AppError("The owning BDO cannot approve their own quotation (RULE-QT-03)", 403));
-    }
-  } else if (hasRole(req.user, "bdo") && !hasRole(req.user, "asm") && !isManagement(req.user)) {
-    // A BDO may approve on the customer's behalf (verbal acceptance on a call),
-    // but ONLY for a query they themselves raised — a deliberate, scoped
-    // relaxation of the RULE-QT-03 four-eyes bar (product decision 2026-07).
-    // quotationInScope already limits a BDO to their own queries; this is the
-    // explicit guard so the intent is enforced here too, not just by scope.
-    if (quotation.query.raisedById !== req.user.id) {
-      return next(new AppError("A BDO can only approve a quotation for a query they raised", 403));
-    }
-  } else if (req.user.id === customer.assignedBdoId) {
-    // Any OTHER internal approver (ASM/Management) is still held to four-eyes:
-    // the owning BDO must not slip a self-approval through a non-BDO path (RULE-QT-03).
-    return next(new AppError("The owning BDO cannot approve their own quotation (RULE-QT-03)", 403));
+  // A portal customer may only approve their own (scope C).
+  if (!customer || req.user.customerId !== customer.id) {
+    return next(new AppError("Quotation not found", 404));
   }
 
-  // Credit standing (RULE-QT-08) — outstanding receivables + this quote must fit
-  // inside the customer's credit limit (when one is set).
-  if (customer.creditLimit != null) {
-    const invoices = await prisma.invoice.findMany({
-      where: { shipment: { customerId: customer.id }, status: { in: ["issued", "part_paid"] } },
-      select: { totalAmount: true, payments: { select: { amount: true } } },
-    });
-    const outstanding = invoices.reduce(
-      (sum, inv) => sum + Number(inv.totalAmount) - inv.payments.reduce((a, p) => a + Number(p.amount), 0),
-      0,
-    );
-    const exposure = outstanding + Number(quotation.totalAmount);
-    if (exposure > Number(customer.creditLimit)) {
-      return next(new AppError(
-        `CREDIT_LIMIT_EXCEEDED — outstanding ${outstanding.toFixed(2)} + this quotation exceeds the credit limit ${Number(customer.creditLimit).toFixed(2)} (RULE-QT-08)`,
-        422,
-      ));
-    }
-  }
-
-  // BDO folds into the `asm` channel — the "internal, on the customer's behalf"
-  // bucket — since the ApprovalChannel enum has no dedicated `bdo` member.
-  const approvalChannel =
-    req.user.role === "customer" ? "customer_portal" : isManagement(req.user) ? "management" : "asm";
+  // Status, cancelled query, validity and credit standing — the same guard every
+  // acceptance channel runs (RULE-QT-08). The customer is never told their limit.
+  await assertApprovable(prisma, { quotation, customer, audience: "customer" });
 
   let result;
   try {
@@ -354,7 +324,7 @@ export const approveQuotation = catchAsync(async (req, res, next) => {
           query: quotation.query,
           customer,
           actorId: req.user.id,
-          approvalChannel,
+          approvalChannel: "customer_portal",
         });
       },
       // The pivot writes the shipment, its whole composed path, charges, the chat

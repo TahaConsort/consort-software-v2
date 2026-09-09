@@ -34,6 +34,23 @@ export const scheduleSchema = z
   .refine((d) => d.etd || d.eta, { message: "Provide an ETD and/or an ETA" })
   .refine((d) => !d.etd || !d.eta || d.eta >= d.etd, { message: "ETA cannot be before ETD" });
 
+// Management hands a shipment to another ops person, or releases it back to the
+// claimable pool with an explicit null. `null` must be spelled out rather than
+// omitted, so a malformed body can never silently unassign a live job.
+export const assignShipmentSchema = z.object({
+  ownerId: z.string().uuid().nullable(),
+});
+
+// Link the roadmap's Step 1 registers to a shipment (ADR-057): a Trade Contract and/or a
+// Financial Instrument. A quotation-born shipment has neither at birth, and the step
+// cannot complete until both are on it.
+export const tradeLinksSchema = z
+  .object({
+    contractId: z.string().uuid().optional(),
+    financialInstrumentId: z.string().uuid().optional(),
+  })
+  .refine((d) => d.contractId || d.financialInstrumentId, { message: "Provide a contract and/or a financial instrument to link" });
+
 // ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§7) ─────────
 // A party row points at exactly one party record — a `vendors` row (the party
 // directory, which already carries NTN/STRN/REX/VAT/IBAN/SWIFT) or a CRM `customers`

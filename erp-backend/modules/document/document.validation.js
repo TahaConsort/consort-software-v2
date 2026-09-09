@@ -30,6 +30,7 @@ export const DOC_TYPES = [
   "authority_letterhead",
   "undertaking", // customer's undertaking letter — part of the export order-confirmation pack
   "quotation", // the approved quotation, auto-rendered onto the shipment at approval (ADR-048)
+  "quotation_acceptance", // the customer's SIGNED quotation — verified by Ops, it creates the shipment (ADR-056)
   "rate_confirmation", // RC — the signed rate the order is locked against (gates order_lock)
   "lc",
   "cro",
@@ -43,6 +44,12 @@ export const DOC_TYPES = [
   "delivery_order",
   "gate_pass",
   "proof", // evidence attached to a specific step (pickup photo, gate pass, …)
+  // Export trade document register (roadmap §4). packing_list, commercial_invoice, bol
+  // and gd are shared with the forwarding path and already listed above.
+  "trade_contract", // sales contract / proforma invoice — the root record
+  "financial_instrument", // bank EXP registration
+  "terminal_invoice", // port / terminal handling invoice
+  "forwarder_invoice", // freight forwarder's invoice
   // Master-data paperwork — vendors, drivers and own vehicles
   "cnic", // national ID card scan (driver)
   "driving_license",
@@ -71,6 +78,7 @@ export const DOC_TYPE_LABELS = {
   authority_letterhead: "Authority Letterhead",
   undertaking: "Undertaking",
   quotation: "Quotation",
+  quotation_acceptance: "Signed Quotation Acceptance",
   rate_confirmation: "Rate Confirmation (RC)",
   lc: "Letter of Credit / SWIFT Advice",
   cro: "Container Release Order (CRO)",
@@ -84,6 +92,10 @@ export const DOC_TYPE_LABELS = {
   delivery_order: "Delivery Order (DO)",
   gate_pass: "Gate Pass",
   proof: "Proof / Evidence",
+  trade_contract: "Sales Contract / Proforma Invoice",
+  financial_instrument: "Financial Instrument (Bank EXP Registration)",
+  terminal_invoice: "Port / Terminal Handling Invoice",
+  forwarder_invoice: "Freight Forwarder's Invoice",
   cnic: "CNIC (National ID)",
   driving_license: "Driving Licence",
   vehicle_registration: "Vehicle Registration",
@@ -121,3 +133,18 @@ export const listQuerySchema = z.object({
 export const deleteSchema = z.object({
   reason: z.string().max(300).optional(),
 });
+
+/**
+ * Ops sign-off on a document whose type requires it (the signed Rate Confirmation
+ * before Order Lock). A rejection must say why: that note is what reaches the
+ * customer, and "rejected" with no reason just restarts the same round trip.
+ */
+export const verifySchema = z
+  .object({
+    status: z.enum(["verified", "rejected"]),
+    note: z.string().max(500).optional(),
+  })
+  .refine((d) => d.status !== "rejected" || (d.note?.trim().length ?? 0) >= 3, {
+    message: "Say why it was rejected so the customer knows what to send instead",
+    path: ["note"],
+  });

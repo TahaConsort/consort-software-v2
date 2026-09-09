@@ -8,12 +8,15 @@ import {
   departmentsOnPath,
   isPermittedOutOfOrder,
   OTC_MILESTONES,
+  RECORD_TYPE_LABELS,
 } from "../../utils/composition.js";
-import { buildDocumentFileName, missingRequiredDocs } from "../document/document.service.js";
+import { buildDocumentFileName, documentGateFor, requiredDocTypesForStep } from "../document/document.service.js";
+import { verificationRequiredCodes } from "../document/docTypes.cache.js";
 import { docTypeLabel } from "../document/document.validation.js";
 import { renderQuotationPdf } from "../../utils/quotationPdf.js";
 import { renderCustomerRcPdf } from "../../utils/rcPdf.js";
 import { maybeSettleTx } from "../otc/otc.service.js";
+import { hasRole, isManagement } from "../auth/auth.middleware.js";
 
 /**
  * Shipment shared logic (CRM_MASTER §5.8/5.9/5.10, RULE-SH/RULE-QT-07).
@@ -32,6 +35,69 @@ const emitEvent = (tx, eventType, payload, correlationId) =>
 
 const stepIdOf = (stepRows, stepCode) => stepRows.find((s) => s.stepCode === stepCode)?.id ?? null;
 
+/**
+ * Seed the party list from what the registers already name (roadmap §2/§3), so the desk
+ * starts with the customer, the vendor, the bank and the buyer filled in rather than
+ * blank. Roles are per shipment from this point on. Insert-if-absent on (role, party),
+ * so calling it again when a contract or instrument is linked later adds only what is
+ * new. Runs inside `tx`.
+ */
+export const seedShipmentParties = async (tx, shipment, { contract, financialInstrument, customer }) => {
+  const rows = [];
+  if (customer) rows.push({ role: "customer", customerId: customer.id });
+  if (contract?.vendorId) rows.push({ role: "vendor", vendorId: contract.vendorId });
+  if (financialInstrument?.bankVendorId) rows.push({ role: "bank", vendorId: financialInstrument.bankVendorId });
+  if (financialInstrument?.buyerVendorId) rows.push({ role: "buyer", vendorId: financialInstrument.buyerVendorId });
+
+  let added = 0;
+  for (const p of rows) {
+    const exists = await tx.shipmentParty.findFirst({
+      where: { shipmentId: shipment.id, role: p.role, vendorId: p.vendorId ?? null, customerId: p.customerId ?? null },
+      select: { id: true },
+    });
+    if (exists) continue;
+    await tx.shipmentParty.create({
+      data: { shipmentId: shipment.id, role: p.role, vendorId: p.vendorId ?? null, customerId: p.customerId ?? null },
+    });
+    added += 1;
+  }
+  return added;
+};
+
+/**
+ * Is a `record` sub-action satisfied on this shipment (ADR-057)? Derived, never stored:
+ * the contract register is satisfied by a linked contract, the instrument register by a
+ * linked instrument that is still ACTIVE — an expired or cancelled one cannot back an
+ * order, and a closed one belongs to a finished one.
+ */
+export const recordSatisfaction = (shipment, financialInstrument) => ({
+  contract: {
+    satisfied: !!shipment.contractId,
+    ref: shipment.contract?.referenceNo ?? null,
+    detail: shipment.contract?.contractNo ?? null,
+  },
+  financial_instrument: {
+    satisfied: !!shipment.financialInstrumentId && financialInstrument?.status === "active",
+    ref: financialInstrument?.referenceNo ?? null,
+    detail: financialInstrument
+      ? `${financialInstrument.fiNumber}${financialInstrument.status !== "active" ? ` (${financialInstrument.status})` : ""}`
+      : null,
+  },
+});
+
+/** The shipment row plus the two registers a `record` item derives from. */
+const loadRegisters = (client, shipmentId) =>
+  client.shipment.findUnique({
+    where: { id: shipmentId },
+    select: {
+      id: true,
+      contractId: true,
+      financialInstrumentId: true,
+      contract: { select: { referenceNo: true, contractNo: true } },
+      financialInstrument: { select: { referenceNo: true, fiNumber: true, status: true } },
+    },
+  });
+
 const audit = (tx, { actorId, action, resourceType, resourceId, diff, correlationId }) =>
   tx.auditLog.create({
     data: {
@@ -49,20 +115,33 @@ const audit = (tx, { actorId, action, resourceType, resourceId, diff, correlatio
  * the shipment and everything that hangs off it. Runs inside `tx`.
  *
  * @param quotation  quotation row WITH chargeLines included
+ * @param actorId    who DECIDED. Null on the approval-link channel (ADR-055): the
+ *                   customer decided, and no internal user may be credited with it.
+ * @param authorId   who the generated PDFs are attributed to. `documents.uploaded_by_id`
+ *                   is NOT nullable, so when `actorId` is null this must be supplied —
+ *                   otherwise both PDFs fail inside their best-effort catch and the
+ *                   shipment silently arrives with no quotation and no Rate Confirmation.
  * @returns { shipment }
  */
-export const createShipmentFromApproval = async (tx, { quotation, query, customer, actorId, approvalChannel }) => {
+export const createShipmentFromApproval = async (
+  tx,
+  { quotation, query, customer, actorId, approvalChannel, authorId = actorId },
+) => {
   const correlationId = crypto.randomUUID();
   // The service set is FROZEN onto the shipment below (INV-14). The path is composed
   // once, here, and never recomposed, even if the query is later edited.
   const services = quotation.services;
 
   // Compose the OTD path from the seeded templates (single source — ADR-001).
+  // A quotation-born shipment is `forwarding` by kind — where it was born — which since
+  // ADR-057 composes Order Lock (the customer's signed Rate Confirmation) in front of
+  // the roadmap's eight steps. A contract-born shipment (createTradeShipmentTx) walks
+  // the same eight without Order Lock.
   const templates = await tx.otdStepTemplate.findMany();
   if (templates.length === 0) {
     throw new Error("OTD step templates are not seeded — run `node prisma/seed.js` before approving quotes.");
   }
-  const path = composeOtdPath(templates);
+  const path = composeOtdPath(templates, "forwarding");
 
   // quotation → approved (RULE-QT-07); query → shipment_created.
   await tx.quotation.update({
@@ -87,6 +166,9 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       customerId: customer.id,
       services,
       status: "booking",
+      // Direction is a per-shipment fact (roadmap §1). A quotation-born shipment is the
+      // export cycle unless Ops says otherwise on the shipment itself.
+      direction: "export",
       // The only route detail a query still carries. Ports, contacts, inland mode and
       // the import detention terms start null and are set on the shipment itself.
       pickupAddress: query.pickupAddress ?? null,
@@ -116,17 +198,18 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
   );
   if (actionData.length) await tx.otdStepAction.createMany({ data: actionData });
 
-  // The approved quotation, rendered and attached as a real shipment document so the
-  // "Quotation" item on the order-confirmation pack is satisfied on arrival rather than
-  // asked of the customer. Best-effort by design: a rendering failure must not roll back
-  // an approval, and the item stays satisfiable by a manual upload of the same docType.
-  if (actionData.some((a) => a.docType === "quotation")) {
+  // The approved quotation, rendered and attached as a real shipment document — the
+  // customer's accepted offer, the nearest thing to the roadmap's §4.1 proforma — and
+  // hung on Step 1 (Contract & Instrument registration). Best-effort by design: a
+  // rendering failure must not roll back an approval, and the file stays attachable by
+  // a manual upload of the same docType.
+  {
     try {
       const file = await renderQuotationPdf({ quotation, query, customer, shipmentRef: referenceNo });
       if (file) {
-        // Named by the same rule as an uploaded document, so the order-confirmation
-        // pack reads uniformly. `shipmentRef` is passed explicitly: this shipment row
-        // is still uncommitted inside `tx` and a lookup would come back empty.
+        // Named by the same rule as an uploaded document. `shipmentRef` is passed
+        // explicitly: this shipment row is still uncommitted inside `tx` and a lookup
+        // would come back empty.
         const fileName = await buildDocumentFileName({
           ownerType: "shipment",
           ownerId: shipment.id,
@@ -140,12 +223,14 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
           data: {
             ownerType: "shipment",
             ownerId: shipment.id,
-            otdStepId: stepIdOf(stepRows, "order_confirmed"),
+            // Step 1 of the roadmap path; the retired `order_confirmed` step is the
+            // fallback only for a catalog that has not been migrated yet.
+            otdStepId: stepIdOf(stepRows, "trade_contract_registered") ?? stepIdOf(stepRows, "order_confirmed") ?? stepRows[0]?.id ?? null,
             ...file,
             fileName,
             docType: "quotation",
             scanStatus: "clean", // generated by us — never touched an upload path
-            uploadedById: actorId,
+            uploadedById: authorId,
           },
         });
       }
@@ -154,11 +239,13 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
     }
   }
 
-  // The customer Rate Confirmation, rendered at approval so the order_lock step's
-  // "Rate Confirmation (RC)" requirement is satisfied on arrival — the customer just
-  // confirmed the rate by approving, and this document is that confirmation. A signed
-  // copy can still be uploaded alongside. Best-effort, same contract as the quotation
-  // PDF above: a rendering failure must never roll back an approval.
+  // The customer Rate Confirmation, rendered at approval and PUBLISHED to the portal so
+  // the customer can download it, sign it and upload the signed copy back. It no longer
+  // satisfies the order_lock gate on its own: `rate_confirmation` requires an ops
+  // verification (document_types.requires_verification), and this copy lands
+  // `unverified`. Publishing is safe by construction — the customer RC carries no cost,
+  // vendor or margin (utils/rcPdf.js). Best-effort, same contract as the quotation PDF
+  // above: a rendering failure must never roll back an approval.
   if (actionData.some((a) => a.docType === "rate_confirmation")) {
     try {
       const file = await renderCustomerRcPdf({ quotation, query, customer, shipmentRef: referenceNo });
@@ -181,7 +268,10 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
             fileName,
             docType: "rate_confirmation",
             scanStatus: "clean", // generated by us — never touched an upload path
-            uploadedById: actorId,
+            isPublished: true, // the customer has to be able to fetch it to sign it
+            publishedById: authorId,
+            publishedAt: new Date(),
+            uploadedById: authorId,
           },
         });
       }
@@ -200,6 +290,10 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
       amount: [1, 2].includes(m.milestoneNo) ? receivableTotal : undefined,
     })),
   });
+
+  // The customer is a party on their own shipment from birth (roadmap §2); the vendor,
+  // bank and buyer follow when the contract and instrument are linked at Step 1.
+  await seedShipmentParties(tx, shipment, { customer });
 
   // Shipment chat channel + members (RULE-CH-01) — the department heads whose
   // departments are on the composed path + the customer's BDO (never the
@@ -253,13 +347,18 @@ export const createShipmentFromApproval = async (tx, { quotation, query, custome
     action: "quotation.approve",
     resourceType: "shipment",
     resourceId: shipment.id,
-    diff: { quotationId: quotation.id, services, stepCount: path.length },
+    // `approvalChannel` is the provenance of the whole order — which of the customer's
+    // acts created this shipment (ADR-056) — so it belongs on the audit row, not only
+    // on the quotation column.
+    diff: { quotationId: quotation.id, approvalChannel, services, stepCount: path.length },
     correlationId,
   });
   await emitEvent(tx, "quotation.approved", {
     shipmentId: shipment.id,
     shipmentRef: referenceNo,
     quotationId: quotation.id,
+    quotationRef: quotation.referenceNo,
+    approvalChannel,
     queryId: query.id,
     customerId: customer.id,
     services,
@@ -357,6 +456,34 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
   if (!inOrder && priorPending.length === 1) {
     if (isPermittedOutOfOrder(priorPending[0].stepCode, freshStep.stepCode)) inOrder = true;
   }
+
+  // RULE-QT-09 — a HARD gate cannot be skipped by anyone. A pending earlier step whose
+  // required documents include a type that needs Operations' verification (the signed
+  // Rate Confirmation on Order Lock) is a contract gate, not a paperwork gate: it is
+  // the customer's countersignature on the order, and `shipment.force_override` —
+  // which every ops user holds — must not walk past it. Data-driven off
+  // `document_types.requires_verification`, so it needs no template flag and covers a
+  // future verified type for free.
+  if (!inOrder) {
+    const needsVerification = await verificationRequiredCodes();
+    const hardGates = [];
+    for (const s of priorPending) {
+      const required = await requiredDocTypesForStep(s);
+      if (required.some((t) => needsVerification.has(t))) hardGates.push(s);
+    }
+    if (hardGates.length) {
+      const titles = await tx.otdStepTemplate.findMany({
+        where: { stepCode: { in: hardGates.map((s) => s.stepCode) } },
+        select: { stepCode: true, title: true },
+      });
+      const titleOf = (code) => titles.find((t) => t.stepCode === code)?.title ?? code;
+      throw new AppError(
+        `${hardGates.map((s) => titleOf(s.stepCode)).join(", ")} must be completed first — this gate cannot be overridden (RULE-QT-09)`,
+        403,
+      );
+    }
+  }
+
   const forced = !inOrder;
   if (forced) {
     if (!canForce) {
@@ -367,10 +494,10 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
     }
   }
 
-  // The two "is the work actually done" gates, reported TOGETHER. They are evaluated as
-  // one because a step can fail both, and telling someone about the missing document
-  // only for them to discover four open checklist items on the retry is a round trip
-  // nobody needs.
+  // The three "is the work actually done" gates, reported TOGETHER. They are evaluated
+  // as one because a step can fail all of them, and telling someone about the missing
+  // document only for them to discover four open checklist items on the retry is a
+  // round trip nobody needs.
   //
   //   RULE-SH-06 — mandatory documents. Covers BOTH the template's requiredDocTypes and
   //                its required `document` sub-actions, which is how a package-dependent
@@ -379,21 +506,39 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
   //                deliberately absent here: they are derived from the files on record
   //                and already covered above, so a document blocks a step in exactly
   //                one place.
-  const [missing, pendingActions] = await Promise.all([
-    missingRequiredDocs(live, freshStep),
+  //   ADR-057    — required RECORD sub-actions: the Trade Contract and the active
+  //                Financial Instrument linked to the shipment. Derived from the
+  //                registers, never stored, same as documents.
+  const [gate, pendingActions, recordActions, registers] = await Promise.all([
+    documentGateFor(live, freshStep),
     tx.otdStepAction.findMany({
       where: { otdStepId: freshStep.id, kind: "manual", required: true, status: { not: "done" } },
       select: { title: true },
       orderBy: { sortOrder: "asc" },
     }),
+    tx.otdStepAction.findMany({
+      where: { otdStepId: freshStep.id, kind: "record", required: true },
+      select: { recordType: true },
+    }),
+    loadRegisters(tx, live.id),
   ]);
+  const records = recordSatisfaction(registers, registers?.financialInstrument);
+  const unlinked = recordActions
+    .map((a) => a.recordType)
+    .filter((t) => t && !records[t]?.satisfied);
   // The message is read by whoever owns the step, so it names the work that is
   // outstanding in their words — no rule citations, and document types spelled out
   // rather than shown as raw codes.
-  if (missing.length || pendingActions.length) {
+  if (gate.missing.length || gate.unverified.length || pendingActions.length || unlinked.length) {
     const parts = [];
+    if (unlinked.length) parts.push(`registers not linked: ${unlinked.map((t) => RECORD_TYPE_LABELS[t] ?? t).join(", ")}`);
     if (pendingActions.length) parts.push(`checklist items still open: ${pendingActions.map((a) => a.title).join(", ")}`);
-    if (missing.length) parts.push(`documents not attached: ${missing.map(docTypeLabel).join(", ")}`);
+    if (gate.missing.length) parts.push(`documents not attached: ${gate.missing.map(docTypeLabel).join(", ")}`);
+    // Attached but not signed off — a different job, for a different person, so it is
+    // named separately rather than folded into "not attached".
+    if (gate.unverified.length) {
+      parts.push(`awaiting verification: ${gate.unverified.map(docTypeLabel).join(", ")}`);
+    }
     throw new AppError(`This step isn't finished — ${parts.join("; ")}`, 422);
   }
 
@@ -458,14 +603,15 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
  */
 export const withStepActions = async (client, shipmentId, steps) => {
   if (!steps.length) return steps;
-  const [actions, docs, templates] = await Promise.all([
+  const [actions, docs, templates, registers] = await Promise.all([
     client.otdStepAction.findMany({
       where: { otdStepId: { in: steps.map((s) => s.id) } },
       orderBy: { sortOrder: "asc" },
     }),
     client.document.findMany({
       where: { ownerType: "shipment", ownerId: shipmentId, deletedAt: null },
-      select: { docType: true, id: true, fileName: true },
+      select: { docType: true, id: true, fileName: true, verificationStatus: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
     }),
     // OtdStep persists neither title nor hint — both resolve from the template by
     // stepCode at read time (ADR-051), so admin edits show on every shipment view.
@@ -473,7 +619,10 @@ export const withStepActions = async (client, shipmentId, steps) => {
       where: { stepCode: { in: [...new Set(steps.map((s) => s.stepCode))] } },
       select: { stepCode: true, title: true, hint: true },
     }),
+    // The registers a `record` item derives from (ADR-057) — one read for the page.
+    loadRegisters(client, shipmentId),
   ]);
+  const records = recordSatisfaction(registers ?? {}, registers?.financialInstrument);
   const tplByCode = new Map(templates.map((t) => [t.stepCode, t]));
   const decorate = (s) => ({
     ...s,
@@ -482,19 +631,42 @@ export const withStepActions = async (client, shipmentId, steps) => {
   });
   if (!actions.length) return steps.map((s) => ({ ...decorate(s), actions: [], actionSummary: null }));
 
+  // A VERIFIED document wins over an unverified one of the same type, then the newest.
+  // Without the preference the checklist would point at the auto-generated Rate
+  // Confirmation rather than the signed copy the customer actually uploaded, and the
+  // Verify button would sign off the wrong file.
+  const needsVerification = await verificationRequiredCodes();
   const docByType = new Map();
-  for (const d of docs) if (d.docType && !docByType.has(d.docType)) docByType.set(d.docType, d);
+  for (const d of docs) {
+    if (!d.docType) continue;
+    const held = docByType.get(d.docType);
+    if (!held || (held.verificationStatus !== "verified" && d.verificationStatus === "verified")) {
+      docByType.set(d.docType, d);
+    }
+  }
 
   const byStep = new Map();
   for (const a of actions) {
     const doc = a.kind === "document" && a.docType ? docByType.get(a.docType) ?? null : null;
-    const satisfied = a.kind === "document" ? !!doc : a.status === "done";
+    const mustVerify = !!a.docType && needsVerification.has(a.docType);
+    const record = a.kind === "record" && a.recordType ? records[a.recordType] ?? null : null;
+    const satisfied =
+      a.kind === "document"
+        ? !!doc && (!mustVerify || doc.verificationStatus === "verified")
+        : a.kind === "record"
+          ? !!record?.satisfied
+          : a.status === "done";
     const list = byStep.get(a.otdStepId) ?? [];
     list.push({
       actionCode: a.actionCode,
       title: a.title,
       kind: a.kind,
       docType: a.docType,
+      // A `record` item says which register and, once linked, which row — so the UI can
+      // show "TCN-2026-00003 · AST/09/25/002" and offer Register when it is not there.
+      recordType: a.recordType ?? null,
+      recordRef: record?.ref ?? null,
+      recordDetail: record?.detail ?? null,
       required: a.required,
       sortOrder: a.sortOrder,
       notes: a.notes,
@@ -504,6 +676,9 @@ export const withStepActions = async (client, shipmentId, steps) => {
       // So the UI can link straight to the evidence instead of hunting the doc list.
       documentId: doc?.id ?? null,
       documentName: doc?.fileName ?? null,
+      // Drives the Verify / Reject controls and the badge on the checklist row.
+      requiresVerification: mustVerify,
+      verificationStatus: doc?.verificationStatus ?? null,
     });
     byStep.set(a.otdStepId, list);
   }
@@ -581,6 +756,46 @@ export const assertPayableWritable = (shipment, action = "record vendor costs") 
   }
 };
 
+/* ──────────────────── Ops ownership of a shipment (2026-09-08) ────────────────
+ * A shipment is CLAIMED by one ops person, and from then on only they run it:
+ * its steps, its schedule, its parties, its trade documents, its money. Three
+ * ops people no longer all write to the same job. Unclaimed is the default —
+ * approval mints the shipment with no owner and the Action Engine queues the
+ * first operations task instead of assigning it, so claiming is the act that
+ * starts the work.
+ *
+ * Deliberately narrow: this binds OPS only. Compliance, Transport, Finance and
+ * Management are untouched — RULE-SH-04 already confines each department to the
+ * steps it owns, and blocking them here would stall a job whose ops owner is on
+ * leave. Management reassigns or releases with `shipment.assign`.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+const OPS_ROLES = ["ops_manager", "ops_exec"];
+
+/** Does this actor's authority over a shipment come from being its ops owner? */
+export const isOpsActor = (user) =>
+  !isManagement(user) && hasRole(user, ...OPS_ROLES);
+
+/**
+ * Throw when an ops user touches a shipment that is not theirs.
+ * `action` completes "…before you <action>." / "…so you cannot <action>."
+ */
+export const assertOpsOwner = async (req, shipment, action = "work this shipment") => {
+  if (!isOpsActor(req.user)) return;
+  if (!shipment.opsOwnerId) {
+    throw new AppError(`This shipment is unclaimed — claim it before you ${action}.`, 409);
+  }
+  if (shipment.opsOwnerId === req.user.id) return;
+  const owner = await prisma.user.findUnique({
+    where: { id: shipment.opsOwnerId },
+    select: { email: true, employee: { select: { firstName: true, lastName: true } } },
+  });
+  const who = owner?.employee
+    ? `${owner.employee.firstName} ${owner.employee.lastName}`
+    : owner?.email ?? "another ops user";
+  throw new AppError(`${who} owns this shipment, so you cannot ${action}.`, 403);
+};
+
 export { emitEvent as emitShipmentEvent, audit as auditShipment };
 
 /**
@@ -605,9 +820,10 @@ export const createTradeShipmentTx = async (tx, { contract, financialInstrument,
   if (templates.length === 0) {
     throw new AppError("OTD step templates are not seeded — the composition catalog is empty", 500);
   }
-  const path = composeOtdPath(templates);
+  // The export-trade path (roadmap §5), not the forwarding one.
+  const path = composeOtdPath(templates, "trade");
   if (path.length === 0) {
-    throw new AppError("The workflow catalog composes no steps — every step template is inactive", 422);
+    throw new AppError("The workflow catalog composes no trade steps — every trade step template is inactive", 422);
   }
 
   const referenceNo = await allocateRef(tx, "shipment");
@@ -663,19 +879,7 @@ export const createTradeShipmentTx = async (tx, { contract, financialInstrument,
   // Seed the party list from what the contract and the instrument already name, so the
   // desk starts with the vendor, the bank and the buyer filled in rather than blank
   // (roadmap §2/§3). Roles are per shipment from this point on.
-  const partyRows = [
-    { role: "vendor", vendorId: contract.vendorId },
-    { role: "customer", customerId: customer.id },
-  ];
-  if (financialInstrument) {
-    partyRows.push({ role: "bank", vendorId: financialInstrument.bankVendorId });
-    if (financialInstrument.buyerVendorId) partyRows.push({ role: "buyer", vendorId: financialInstrument.buyerVendorId });
-  }
-  for (const p of partyRows) {
-    await tx.shipmentParty.create({
-      data: { shipmentId: shipment.id, role: p.role, vendorId: p.vendorId ?? null, customerId: p.customerId ?? null },
-    });
-  }
+  await seedShipmentParties(tx, shipment, { contract, financialInstrument, customer });
 
   await audit(tx, {
     actorId,

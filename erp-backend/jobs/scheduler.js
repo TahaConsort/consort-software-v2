@@ -143,6 +143,37 @@ const sweepQuotations = async () => {
   }
 };
 
+/* ── Recorded acceptances whose link expired unused (ADR-056) ──
+   Sales said the customer accepted, the link went out, and nobody clicked it. The
+   quotation is still `sent` and the claim stays on it as history; this only tells
+   the claimer and Ops that the expected order did not confirm, once per week. ── */
+export const sweepAcceptanceLapses = async () => {
+  const now = new Date();
+  const claimed = await prisma.quotation.findMany({
+    where: { status: "sent", acceptanceClaimedAt: { not: null } },
+    select: {
+      id: true, referenceNo: true, queryId: true, acceptanceClaimedById: true,
+      approvalLinks: {
+        orderBy: { createdAt: "desc" },
+        take: 1,
+        select: { expiresAt: true, revokedAt: true, decidedAt: true },
+      },
+    },
+  });
+  for (const q of claimed) {
+    const link = q.approvalLinks[0];
+    // No link, a deliberately cancelled one, a decided one, or one still live: nothing lapsed.
+    if (!link || link.revokedAt || link.decidedAt || new Date(link.expiresAt) > now) continue;
+    if (await recentlyEmitted("quotation.acceptance_lapsed", "quotationId", q.id)) continue;
+    await emit("quotation.acceptance_lapsed", {
+      quotationId: q.id,
+      referenceNo: q.referenceNo,
+      queryId: q.queryId,
+      claimedById: q.acceptanceClaimedById,
+    });
+  }
+};
+
 /* ── Invoice overdue (nightly 01:10) — 7d → chase, 30d → escalate ── */
 const sweepInvoices = async () => {
   const overdue = await prisma.invoice.findMany({
@@ -380,6 +411,7 @@ export const runSweepsOnce = async () => {
   await sweepLeadStaleness();
   await sweepQueries();
   await sweepQuotations();
+  await sweepAcceptanceLapses();
   await sweepInvoices();
   await sweepTasks();
   await sweepEta();

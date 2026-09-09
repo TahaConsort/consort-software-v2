@@ -65,12 +65,25 @@ export const QUERY_CHANNEL_LABELS = {
 };
 export const RAISED_VIA_TO_CHANNEL = { bdo: "bdo", bank_lc: "bank_lc", portal: "website" };
 
-// How the BDO gave a sent quote to the customer (Quotation.sharedVia).
+// How the BDO gave a sent quote to the customer (Quotation.sharedVia), and how the
+// customer's verbal yes arrived (Quotation.acceptanceClaimedVia) — the same enum.
 export const QUOTE_SHARE_CHANNEL_LABELS = {
   email: "Email",
   phone: "Phone",
   whatsapp: "WhatsApp",
   in_person: "In person",
+};
+
+// Which of the customer's own acts approved the quotation (Quotation.approvalChannel,
+// ADR-056). The three internal values are history: no internal role approves any more.
+export const APPROVAL_CHANNEL_LABELS = {
+  approval_link: "secure link",
+  customer_portal: "customer portal",
+  signed_copy: "signed copy",
+  bdo: "BDO (legacy)",
+  asm: "ASM (legacy)",
+  web_manager: "web manager (legacy)",
+  management: "management (legacy)",
 };
 
 // The derived shipment statuses — a shorter service path only ever reaches its
@@ -99,6 +112,10 @@ export const SHIPMENT_STATUS_LABELS = {
   destination_inspection: "Destination Inspection",
   destination_do: "Delivery Order Issued",
   destination_pickup: "Destination Pickup",
+  // Export-trade rungs (roadmap §5 steps 2, 3 and 6)
+  packing_confirmed: "Packing Confirmed",
+  invoice_raised: "Invoice Raised",
+  logistics_settled: "Logistics Settled",
   delivered: "Delivered",
   settled: "Settled",
   closed: "Closed",
@@ -194,24 +211,77 @@ export const PAYMENT_STATE_CLASS = {
 
 // ── Vendors — the counterparties on payable invoices ──
 
+/**
+ * Every value VendorType can hold. This map stays COMPLETE even though only a subset
+ * is selectable (below): shipments, RFQs and the parties panel all render
+ * `VENDOR_TYPE_LABELS[v.type]`, so dropping a key here would print a raw enum string
+ * on every vendor already filed under it.
+ */
 export const VENDOR_TYPE_LABELS = {
-  transporter: "Transporter",
-  shipping_line: "Shipping Line",
-  container_yard: "Container Yard",
-  customs_agent: "Customs Agent",
-  destination_agent: "Destination Agent",
-  port_terminal: "Port Terminal",
-  rail_operator: "Rail Operator",
-  freight_forwarder: "Freight Forwarder",
-  ocean_carrier: "Ocean Carrier",
-  exporter: "Exporter",
-  buyer: "Buyer",
+  // ── The roadmap's party directory (§2/§3) ──
+  buyer: "Customer / Importer",
+  exporter: "Goods Supplier",
   bank: "Bank",
+  ocean_carrier: "Ocean Carrier",
+  shipping_line: "Carrier's Agent",
+  freight_forwarder: "Freight Forwarder",
+  port_terminal: "Port / Container Terminal",
+  customs_agent: "Customs Clearing Agent",
+  destination_agent: "Destination Agent",
+  other: "Other Party",
+  // ── Not named anywhere in the roadmap: rendered on existing rows, never offered ──
+  transporter: "Transporter",
+  container_yard: "Container Yard",
+  rail_operator: "Rail Operator",
   driver: "Driver",
-  other: "Other",
 };
 
-export const VENDOR_TYPE_OPTIONS = Object.entries(VENDOR_TYPE_LABELS).map(([value, label]) => ({ value, label }));
+/**
+ * The party types the Export Shipment Workflow roadmap names, ordered by its §3
+ * stakeholder table. This is exactly the set `prisma/roadmapParties.js` files its
+ * twelve §2 parties under, so the picker and the seeded directory agree.
+ *
+ * Every value is a pre-existing VendorType, so none of this needs a schema change:
+ *  · `exporter` carries "Goods Supplier" — the roadmap classifies Ahmad Saeed Textiles
+ *    and Alisha Fatima Textile as Vendors whose ROLE on the shipping documents is
+ *    Exporter/Shipper, which is the enum's original meaning.
+ *  · `shipping_line` carries "Carrier's Agent" — United Marine Agencies, named on the
+ *    HMM card as the agent that issues the B/L for the carrier.
+ *  · `other` covers the two §2 parties with no role of their own: Javed Latif
+ *    (additional notify party) and SAS METM/Consort itself.
+ *
+ * Dropped, because the roadmap never mentions them: transporter, container_yard,
+ * rail_operator, and driver — drivers are own-fleet master data with their own screen
+ * (/admin/drivers), never a counterparty on a payable invoice.
+ */
+export const ROADMAP_VENDOR_TYPES = [
+  "buyer",
+  "exporter",
+  "bank",
+  "ocean_carrier",
+  "shipping_line",
+  "freight_forwarder",
+  "port_terminal",
+  "customs_agent",
+  "destination_agent",
+  "other",
+];
+
+/** What a user can pick or filter by — the roadmap set only. */
+export const VENDOR_TYPE_OPTIONS = ROADMAP_VENDOR_TYPES.map((value) => ({
+  value,
+  label: VENDOR_TYPE_LABELS[value],
+}));
+
+/**
+ * The options to show when EDITING a vendor. A row already filed under a dropped type
+ * would otherwise open with a Select that matches nothing, and saving would silently
+ * rewrite its type — so its current value is appended rather than hidden.
+ */
+export const vendorTypeOptionsFor = (currentType) =>
+  currentType && !ROADMAP_VENDOR_TYPES.includes(currentType)
+    ? [...VENDOR_TYPE_OPTIONS, { value: currentType, label: `${VENDOR_TYPE_LABELS[currentType] ?? currentType} (legacy)` }]
+    : VENDOR_TYPE_OPTIONS;
 
 // ── Vendor rate requests (RFQ) — the buy side of a query ──
 

@@ -14,25 +14,28 @@
  * `taxPercent` and `taxAmount`.
  */
 import prisma from "../config/prisma.js";
+import { CHARGE_TYPE_STEP_REMAP } from "../prisma/tradeWorkflow.js";
 
+// The step each charge lands on is the roadmap step (ADR-057) — one map, shared with the
+// seed, so a retired forwarding step code can never be reintroduced here by hand.
 const TYPES = [
   // Qasim International Container Terminal — §4.7
-  { code: "seal_breaking", label: "Seal Breaking / Affixing", service: "port_handling", step: "port_handover" },
-  { code: "customs_seal", label: "Customs Seal", service: "port_handling", step: "port_handover" },
-  { code: "data_processing", label: "Data Processing Charges", service: "port_handling", step: "port_handover" },
-  { code: "document_copying", label: "Document Copying", service: "port_handling", step: "port_handover" },
-  { code: "export_examination", label: "Export Examination", service: "customs_clearance", step: "customs_clearance" },
-  { code: "examination_survey", label: "Examination Survey", service: "customs_clearance", step: "customs_clearance" },
-  { code: "fuel_adjustment", label: "Fuel Adjustment Factor", service: "port_handling", step: "port_handover" },
-  { code: "general_cargo_handling", label: "General Cargo Handling", service: "port_handling", step: "port_handover" },
-  { code: "pqa_wharfage", label: "PQA Wharfage", service: "port_handling", step: "port_handover" },
-  { code: "container_weighment", label: "Container Weighment (VGM)", service: "port_handling", step: "port_handover" },
-  { code: "bank_service_charge", label: "Bank Service Charge", service: null, step: null },
+  { code: "seal_breaking", label: "Seal Breaking / Affixing", service: "port_handling" },
+  { code: "customs_seal", label: "Customs Seal", service: "port_handling" },
+  { code: "data_processing", label: "Data Processing Charges", service: "port_handling" },
+  { code: "document_copying", label: "Document Copying", service: "port_handling" },
+  { code: "export_examination", label: "Export Examination", service: "customs_clearance" },
+  { code: "examination_survey", label: "Examination Survey", service: "customs_clearance" },
+  { code: "fuel_adjustment", label: "Fuel Adjustment Factor", service: "port_handling" },
+  { code: "general_cargo_handling", label: "General Cargo Handling", service: "port_handling" },
+  { code: "pqa_wharfage", label: "PQA Wharfage", service: "port_handling" },
+  { code: "container_weighment", label: "Container Weighment (VGM)", service: "port_handling" },
+  { code: "bank_service_charge", label: "Bank Service Charge", service: null },
   // Freight forwarder — §4.8
-  { code: "bl_fee", label: "Bill of Lading Fee", service: "sea_freight", step: "bol_issued" },
-  { code: "cro_release", label: "CRO (Container Release Order)", service: "port_handling", step: "cro_released" },
-  { code: "seal_charge", label: "Seal Charge", service: "port_handling", step: "cro_released" },
-];
+  { code: "bl_fee", label: "Bill of Lading Fee", service: "sea_freight" },
+  { code: "cro_release", label: "CRO (Container Release Order)", service: "port_handling" },
+  { code: "seal_charge", label: "Seal Charge", service: "port_handling" },
+].map((t) => ({ ...t, step: CHARGE_TYPE_STEP_REMAP[t.code] ?? null }));
 
 async function run() {
   let created = 0;

@@ -55,37 +55,32 @@ export const useQuotationStore = createResourceStore({
       /**
        * RULE-QT-08 — approval requires the quotation's `rowVersion` as If-Match.
        *
-       * `rowVersion` is read from the live list rather than from a value the calling
-       * screen captured earlier: send/revise/reject all bump it without demanding an
-       * If-Match of their own, so a snapshot taken when a dialog opened was routinely
-       * stale by the time the user clicked, and the user was told to reload.
+       * The portal customer's own click (the only caller since ADR-056). `rowVersion`
+       * is read from the live list rather than from a value the calling screen captured
+       * earlier: send/revise all bump it without demanding an If-Match of their own.
        *
-       * If the server still reports a conflict, refetch once and retry with the value it
-       * gives us. One retry only — a second conflict is a genuine race with another
-       * person, and silently looping would hide it.
+       * A conflict is NOT retried. The whole point of If-Match on a binding order is
+       * that the customer approves the figures they were looking at; if the quote
+       * changed underneath them, the list is refreshed and they are asked to look again
+       * rather than having the click silently re-fired against numbers they never saw.
        */
       approveQuotation: async (id, rowVersion) => {
         const known = () => get().quotations.find((q) => q.id === id)?.rowVersion;
-        const attempt = (version) =>
-          mutate(() => quotationService.approveQuotation(id, version), {
+        try {
+          return await mutate(() => quotationService.approveQuotation(id, rowVersion ?? known()), {
             invalidates: [
               TOPICS.QUOTATIONS, TOPICS.QUERIES, TOPICS.SHIPMENTS,
               TOPICS.TASKS, TOPICS.INVOICES, TOPICS.DASHBOARD,
             ],
           });
-
-        try {
-          return await attempt(rowVersion ?? known());
         } catch (err) {
-          const conflict = err?.status === 412 || err?.status === 428;
-          if (!conflict) throw err;
-          // The 412/428 body carries the current rowVersion so the client can heal
-          // itself instead of asking the user to reload (see quotation.controllers.js).
-          const fresh = err?.data?.rowVersion ?? err?.data?.data?.rowVersion;
-          await get().refetch();
-          const retryWith = fresh ?? known();
-          if (retryWith == null || retryWith === (rowVersion ?? known())) throw err;
-          return attempt(retryWith);
+          if (err?.status === 412 || err?.status === 428) {
+            await get().refetch();
+            const e = new Error("This quotation changed since you opened it — please review the updated figures and approve again");
+            e.status = err.status;
+            throw e;
+          }
+          throw err;
         }
       },
     };

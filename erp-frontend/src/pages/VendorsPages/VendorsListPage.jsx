@@ -9,13 +9,13 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
 } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { VENDOR_TYPE_LABELS, VENDOR_TYPE_OPTIONS, DEFAULT_CURRENCY } from "@/lib/catalog";
+import { VENDOR_TYPE_LABELS, VENDOR_TYPE_OPTIONS, vendorTypeOptionsFor, DEFAULT_CURRENCY } from "@/lib/catalog";
 import DocumentsDialog from "@/components/DocumentsDialog";
 import { useAuthStore } from "@/store/authStore";
-import { listVendors, createVendor, updateVendor, deactivateVendor, deleteVendor } from "@/services/vendorService";
+import { listVendors, createVendor, updateVendor, deactivateVendor, deleteVendor, requestVendorQuote } from "@/services/vendorService";
 
 const EMPTY = {
-  name: "", type: "transporter", contactName: "", email: "", phone: "",
+  name: "", type: "exporter", contactName: "", email: "", phone: "",
   city: "", country: "", taxId: "", paymentTermsDays: "", currency: "",
   strn: "", rexNo: "", vatNo: "", bankName: "", bankBranch: "", iban: "", swiftCode: "", accountTitle: "", website: "", notes: "",
 };
@@ -23,6 +23,8 @@ const EMPTY = {
 export default function VendorsListPage({ lockedType }) {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission("vendor.manage");
+  // Emailing for rates is a buy-side action, gated the same way the server gates it.
+  const canRequestQuote = hasPermission("rfq.manage");
   const typeLabel = lockedType ? VENDOR_TYPE_LABELS[lockedType] ?? lockedType : null;
 
   const [vendors, setVendors] = useState([]);
@@ -37,6 +39,10 @@ export default function VendorsListPage({ lockedType }) {
   
   // Hard delete confirmation state
   const [vendorToDelete, setVendorToDelete] = useState(null);
+
+  // Rate-request email: the vendor being asked, and the optional note that rides along.
+  const [quoteFor, setQuoteFor] = useState(null);
+  const [quoteMessage, setQuoteMessage] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -147,24 +153,50 @@ export default function VendorsListPage({ lockedType }) {
     }
   };
 
+  /**
+   * Ask a vendor for rates by email. This opens a confirm step rather than sending on
+   * the click: the mail leaves the building the moment it is sent, and there is no
+   * unsend — so the address being mailed is shown before it goes.
+   */
   const handleGetQuote = (v) => {
-    toast.success(`Quote request sent to ${v.name}`);
+    if (!v.email) return toast.error(`${v.name} has no email address on file — add one first`);
+    setQuoteMessage("");
+    setQuoteFor(v);
   };
 
+  const sendQuoteRequest = async () => {
+    if (!quoteFor) return;
+    setBusy(true);
+    try {
+      const res = await requestVendorQuote(quoteFor.id, {
+        message: quoteMessage.trim() || undefined,
+      });
+      toast.success(res?.message || `Rate request emailed to ${quoteFor.email}`);
+      setQuoteFor(null);
+    } catch (err) {
+      toast.error(err?.message || "Could not send the rate request");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+// Per-type chip colour. Keyed on every VendorType, not just the offered ones, so a
+// vendor still filed under a dropped type keeps a readable chip instead of falling
+// through to the neutral one.
 const getTypeColor = (type) => {
   const colors = {
-    transporter: "bg-blue-700/10 text-blue-700 border-blue-200/60",
+    buyer: "bg-rose-700/10 text-rose-700 border-rose-200/60",
+    exporter: "bg-pink-700/10 text-pink-700 border-pink-200/60",
+    bank: "bg-yellow-700/10 text-yellow-700 border-yellow-200/60",
+    ocean_carrier: "bg-teal-700/10 text-teal-700 border-teal-200/60",
     shipping_line: "bg-cyan-700/10 text-cyan-700 border-cyan-200/60",
-    container_yard: "bg-amber-700/10 text-amber-700 border-amber-200/60",
+    freight_forwarder: "bg-fuchsia-700/10 text-fuchsia-700 border-fuchsia-200/60",
+    port_terminal: "bg-orange-700/10 text-orange-700 border-orange-200/60",
     customs_agent: "bg-purple-700/10 text-purple-700 border-purple-200/60",
     destination_agent: "bg-indigo-700/10 text-indigo-700 border-indigo-200/60",
-    port_terminal: "bg-orange-700/10 text-orange-700 border-orange-200/60",
+    transporter: "bg-blue-700/10 text-blue-700 border-blue-200/60",
+    container_yard: "bg-amber-700/10 text-amber-700 border-amber-200/60",
     rail_operator: "bg-emerald-700/10 text-emerald-700 border-emerald-200/60",
-    freight_forwarder: "bg-fuchsia-700/10 text-fuchsia-700 border-fuchsia-200/60",
-    ocean_carrier: "bg-teal-700/10 text-teal-700 border-teal-200/60",
-    exporter: "bg-pink-700/10 text-pink-700 border-pink-200/60",
-    buyer: "bg-rose-700/10 text-rose-700 border-rose-200/60",
-    bank: "bg-yellow-700/10 text-yellow-700 border-yellow-200/60",
     driver: "bg-lime-700/10 text-lime-700 border-lime-200/60",
     other: "bg-gray-700/10 text-gray-700 border-gray-200/60",
   };
@@ -313,9 +345,17 @@ const getTypeColor = (type) => {
                     <Button size="sm" variant="secondary" className="h-8 gap-1.5 text-xs font-medium" onClick={() => setDocsFor(v)}>
                       <Paperclip className="w-3.5 h-3.5" /> Docs
                     </Button>
-                    <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs font-medium text-white bg-primary! border-none hover:text-white hover:bg-primary/90" onClick={() => handleGetQuote(v)}>
-                      <MessageSquare className="w-3.5 h-3.5" /> Quote
-                    </Button>
+                    {canRequestQuote && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-8 gap-1.5 text-xs font-medium text-white bg-primary! border-none hover:text-white hover:bg-primary/90"
+                        onClick={() => handleGetQuote(v)}
+                        title={v.email ? `Email ${v.email} for rates` : "No email address on file"}
+                      >
+                        <MessageSquare className="w-3.5 h-3.5" /> Quote
+                      </Button>
+                    )}
                   </div>
                   {canManage && (
                     <div className="flex gap-1.5">
@@ -338,6 +378,40 @@ const getTypeColor = (type) => {
           </div>
         )}
       </div>
+
+      {/* Rate-request email — confirm before it leaves, since there is no unsend. */}
+      <Dialog open={!!quoteFor} onOpenChange={(v) => !v && !busy && setQuoteFor(null)}>
+        <DialogContent size="md">
+          <DialogHeader>
+            <DialogTitle>Request rates from {quoteFor?.name}</DialogTitle>
+            <DialogDescription>
+              An email goes to <strong>{quoteFor?.email}</strong>. Replies come back to you, not to
+              the shared mailbox.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2 py-2">
+            <Label htmlFor="v-quote-msg">Add a note (optional)</Label>
+            <Input
+              id="v-quote-msg"
+              value={quoteMessage}
+              onChange={(e) => setQuoteMessage(e.target.value)}
+              placeholder="e.g. Karachi → Antwerp, 1x40HC, ready 12 Oct"
+              disabled={busy}
+              autoFocus
+            />
+            <p className="text-xs text-muted-foreground">
+              Included in the vendor's copy above the sign-off. Leave blank to send the standard request.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setQuoteFor(null)} disabled={busy}>Cancel</Button>
+            <Button onClick={sendQuoteRequest} disabled={busy} className="gap-2">
+              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />}
+              Send request
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Delete Confirmation Dialog */}
       <Dialog open={!!vendorToDelete} onOpenChange={(v) => !v && setVendorToDelete(null)}>
@@ -379,9 +453,11 @@ const getTypeColor = (type) => {
                     {!lockedType && (
                       <div className="space-y-2">
                         <Label>Type</Label>
+                        {/* Editing a vendor filed under a dropped type keeps that type in
+                            the list, so opening the form cannot silently rewrite it. */}
                         <Select value={form.type} onValueChange={(v) => setForm((p) => ({ ...p, type: v }))}>
                           <SelectTrigger className="w-full bg-background"><SelectValue /></SelectTrigger>
-                          <SelectContent>{VENDOR_TYPE_OPTIONS.map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}</SelectContent>
+                          <SelectContent>{vendorTypeOptionsFor(editing?.type).map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}</SelectContent>
                         </Select>
                       </div>
                     )}

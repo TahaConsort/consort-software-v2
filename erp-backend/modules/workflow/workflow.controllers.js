@@ -27,6 +27,8 @@ export const getMeta = catchAsync(async (req, res) => {
         code: t.code,
         label: t.label,
         customerUploadable: t.customerUploadable,
+        // Documents of this type only satisfy a step gate once ops verifies them.
+        requiresVerification: t.requiresVerification,
         active: t.active,
       })),
       stepCodePattern: STEP_CODE_RE.source,

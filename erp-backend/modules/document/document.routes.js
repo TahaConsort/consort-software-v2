@@ -8,11 +8,12 @@ import {
   publishDocument,
   deleteDocument,
   requiredDocsForShipment,
+  verifyDocument,
 } from "./document.controllers.js";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireDocumentAccess, uploadSingle } from "./document.middleware.js";
 import { validate, validateQuery } from "../../middleware/validate.middleware.js";
-import { uploadSchema, listQuerySchema, deleteSchema } from "./document.validation.js";
+import { uploadSchema, listQuerySchema, deleteSchema, verifySchema } from "./document.validation.js";
 
 /**
  * Documents (CRM_MASTER §5.13) at /api/documents. Internal by default (INV-10);
@@ -33,6 +34,9 @@ router.get("/:id/preview", requirePermission("document.read"), previewDocument);
 
 router.post("/", requirePermission("document.upload"), uploadSingle("file"), validate(uploadSchema), uploadDocument);
 router.post("/:id/publish", requirePermission("document.publish"), publishDocument);
+// Ops signs off a document whose TYPE requires it (the signed Rate Confirmation before
+// Order Lock). Only the shipment's ops owner may do it — enforced in the controller.
+router.post("/:id/verification", requirePermission("document.verify"), validate(verifySchema), verifyDocument);
 router.delete("/:id", requirePermission("document.delete"), validate(deleteSchema), deleteDocument);
 
 export default router;

@@ -119,6 +119,13 @@ export const useShipmentDetailStore = createResourceStore({
           invalidates: [shipmentTopic(id())],
         }),
 
+      /** Roadmap Step 1 (ADR-057): the registers change the checklist, the parties and
+       *  the trade stage — all on this shipment's own aggregate. */
+      linkTradeRegisters: (payload) =>
+        mutate(() => shipmentService.linkTradeRegisters(id(), payload), {
+          invalidates: [shipmentTopic(id()), TOPICS.SHIPMENTS],
+        }),
+
       /* ── OTC milestones ────────────────────────────────────────────────────── */
 
       /** Can flip the shipment to `settled` and lock the whole order (RULE-SH-12). */
@@ -145,6 +152,17 @@ export const useShipmentDetailStore = createResourceStore({
         mutate(() => shipmentService.setSchedule(id(), payload), {
           invalidates: [shipmentTopic(id()), TOPICS.SHIPMENTS, TOPICS.TASKS],
         }),
+
+      /* ── Ops ownership ─────────────────────────────────────────────────────── */
+      /* Claiming hands this shipment's queued operations tasks to the claimer, so
+         the task queue is dirtied along with the shipment and the list. */
+
+      claim: () =>
+        mutate(() => shipmentService.claimShipment(id()), { invalidates: lifecycleTopics() }),
+
+      // Management: hand it to another ops user, or `null` to release it.
+      assign: (ownerId) =>
+        mutate(() => shipmentService.assignShipment(id(), ownerId), { invalidates: lifecycleTopics() }),
 
       /* ── Money recorded from a step ────────────────────────────────────────── */
       /* Routed through here rather than straight at financeService, so the Accounts

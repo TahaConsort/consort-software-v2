@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import prisma from "../../config/prisma.js";
 import { AppError } from "../../utils/AppError.js";
 import { catchAsync } from "../../utils/catchAsync.js";
@@ -7,7 +8,9 @@ import {
   auditShipment,
   withStepActions,
   assertShipmentUnlocked,
+  assertOpsOwner,
   createTradeShipmentTx,
+  seedShipmentParties,
 } from "./shipment.service.js";
 import { recomputeTradeStage } from "../trade/trade.service.js";
 import { PARTY_CONFIDENTIAL_FIELDS, EXPECTED_EXPORT_ROLES } from "../../utils/partyRoles.js";
@@ -22,6 +25,18 @@ import { PARTY_CONFIDENTIAL_FIELDS, EXPECTED_EXPORT_ROLES } from "../../utils/pa
 
 const hydrate = async (shipments) => {
   const customerIds = [...new Set(shipments.map((s) => s.customerId))];
+  const ownerIds = [...new Set(shipments.map((s) => s.opsOwnerId).filter(Boolean))];
+  const owners = ownerIds.length
+    ? await prisma.user.findMany({
+        where: { id: { in: ownerIds } },
+        select: { id: true, email: true, employee: { select: { firstName: true, lastName: true } } },
+      })
+    : [];
+  const ownerById = new Map(owners.map((u) => [u.id, u]));
+  const ownerNameOf = (id) => {
+    const u = ownerById.get(id);
+    return u?.employee ? `${u.employee.firstName} ${u.employee.lastName}` : u?.email ?? null;
+  };
   const customers = await prisma.customer.findMany({
     where: { id: { in: customerIds } },
     select: { id: true, referenceNo: true, companyId: true },
@@ -38,6 +53,7 @@ const hydrate = async (shipments) => {
       ...s,
       customerRef: c?.referenceNo ?? "—",
       customerCompany: c ? companyName.get(c.companyId) ?? "—" : "—",
+      opsOwnerName: s.opsOwnerId ? ownerNameOf(s.opsOwnerId) : null,
     };
   });
 };
@@ -161,6 +177,11 @@ export const listShipments = catchAsync(async (req, res) => {
   const extra = {};
   if (req.query.status) extra.status = req.query.status;
   if (req.query.exceptionState) extra.exceptionState = req.query.exceptionState;
+  // Ops ownership filters for the list toolbar: "me" is my desk, "none" the
+  // claimable pool. Anything else is read as a literal user id.
+  if (req.query.opsOwnerId === "me") extra.opsOwnerId = req.user.id;
+  else if (req.query.opsOwnerId === "none") extra.opsOwnerId = null;
+  else if (req.query.opsOwnerId) extra.opsOwnerId = req.query.opsOwnerId;
   const where = scopedShipmentWhere(req, extra);
   const shipments = await prisma.shipment.findMany({ where, orderBy: { createdAt: "desc" } });
   res.json({ success: true, data: await hydrate(shipments) });
@@ -207,6 +228,7 @@ export const getShipment = catchAsync(async (req, res, next) => {
 export const holdShipment = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  await assertOpsOwner(req, shipment, "put it on hold");
   if (shipment.exceptionState !== "none") {
     return next(new AppError(`Shipment is already ${shipment.exceptionState}`, 409));
   }
@@ -244,6 +266,7 @@ export const holdShipment = catchAsync(async (req, res, next) => {
 export const resumeShipment = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  await assertOpsOwner(req, shipment, "resume it");
   if (shipment.exceptionState !== "on_hold") return next(new AppError("Shipment is not on hold", 409));
 
   await prisma.$transaction(async (tx) => {
@@ -294,6 +317,7 @@ export const resumeShipment = catchAsync(async (req, res, next) => {
 export const setSchedule = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  await assertOpsOwner(req, shipment, "change its schedule");
   if (["settled", "closed"].includes(shipment.status) || shipment.exceptionState === "cancelled") {
     return next(new AppError("The schedule of a finished or cancelled shipment cannot change", 409));
   }
@@ -327,10 +351,12 @@ export const setSchedule = catchAsync(async (req, res, next) => {
 export const cancelShipment = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  await assertOpsOwner(req, shipment, "cancel it");
   if (["closed", "settled"].includes(shipment.status) || shipment.exceptionState === "cancelled") {
     return next(new AppError("Shipment cannot be cancelled at this stage", 409));
   }
 
+  let unwound = false;
   await prisma.$transaction(async (tx) => {
     await tx.shipment.update({
       where: { id: shipment.id },
@@ -345,23 +371,70 @@ export const cancelShipment = catchAsync(async (req, res, next) => {
       where: { shipmentId: shipment.id, status: { in: ["draft", "issued", "part_paid"] } },
       data: { status: "void", voidedById: req.user.id, voidedAt: new Date(), voidReason: "Shipment cancelled" },
     });
+
+    // Unwind the enquiry when the order never locked (ADR-056). Before Order Lock there
+    // is no verified signed Rate Confirmation — the customer never countersigned the
+    // order — so a cancellation here means the acceptance did not hold. Leaving the
+    // quotation `approved` and the query `shipment_created` stranded the enquiry: INV-08
+    // blocked any re-quote. The quotation becomes `rejected` with the reason on it and
+    // the query returns to `revision_requested`, exactly as a customer rejection does.
+    // After Order Lock the customer DID sign; that is a real cancellation, left as is.
+    if (shipment.quotationId) {
+      const orderLock = await tx.otdStep.findFirst({
+        where: { shipmentId: shipment.id, stepCode: "order_lock" },
+        select: { status: true },
+      });
+      if (orderLock && orderLock.status !== "done") {
+        const quotation = await tx.quotation.findUnique({ where: { id: shipment.quotationId } });
+        if (quotation?.status === "approved") {
+          await tx.quotation.update({
+            where: { id: quotation.id },
+            data: {
+              status: "rejected",
+              rejectionReason: `Shipment cancelled before Order Lock: ${req.body.reason}`,
+              rowVersion: { increment: 1 },
+            },
+          });
+          await tx.query.update({ where: { id: quotation.queryId }, data: { status: "revision_requested" } });
+          await tx.auditLog.create({
+            data: {
+              actorId: req.user.id,
+              action: "quotation.unwound",
+              resourceType: "quotation",
+              resourceId: quotation.id,
+              diff: { shipmentId: shipment.id, reason: req.body.reason },
+              correlationId: crypto.randomUUID(),
+            },
+          });
+          unwound = true;
+        }
+      }
+    }
+
     await auditShipment(tx, {
       actorId: req.user.id,
       action: "shipment.cancel",
       resourceType: "shipment",
       resourceId: shipment.id,
-      diff: { reason: req.body.reason },
+      diff: { reason: req.body.reason, unwound },
     });
-    await emitShipmentEvent(tx, "shipment.cancelled", { shipmentId: shipment.id, reason: req.body.reason });
+    await emitShipmentEvent(tx, "shipment.cancelled", { shipmentId: shipment.id, reason: req.body.reason, unwound });
   });
 
-  res.json({ success: true, message: "Shipment cancelled — open tasks cancelled and unpaid invoices voided" });
+  res.json({
+    success: true,
+    message: unwound
+      ? "Shipment cancelled — open tasks cancelled, unpaid invoices voided, and the enquiry reopened for a new quote"
+      : "Shipment cancelled — open tasks cancelled and unpaid invoices voided",
+    data: { unwound },
+  });
 });
 
 /* ── POST /api/shipments/:id/close ── (RULE-SH-12) */
 export const closeShipment = catchAsync(async (req, res, next) => {
   const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
   if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  await assertOpsOwner(req, shipment, "close it");
   if (shipment.status !== "settled") {
     return next(new AppError("Only a settled shipment can be closed", 409));
   }
@@ -498,10 +571,18 @@ export const listShipmentParties = catchAsync(async (req, res, next) => {
   const parties = await hydrateParties(rows, req.user.role === "customer");
 
   // Which roadmap roles are still unfilled — reported, never enforced: a shipment is
-  // assembled over weeks and the carrier is unknown when the contract is signed.
+  // assembled over weeks and the carrier is unknown when the contract is signed. Every
+  // shipment on the roadmap path expects them (ADR-057), whichever kind it was born as
+  // — a contract-born shipment always is; a quotation-born one is once it carries the
+  // roadmap steps. A shipment frozen on the retired forwarding path is left alone.
+  const onRoadmap =
+    shipment.kind === "trade" ||
+    !!(await prisma.otdStep.findFirst({
+      where: { shipmentId: shipment.id, stepCode: { startsWith: "trade_" } },
+      select: { id: true },
+    }));
   const filled = new Set(rows.map((r) => r.role));
-  const missingRoles =
-    shipment.kind === "trade" ? EXPECTED_EXPORT_ROLES.filter((r) => !filled.has(r)) : [];
+  const missingRoles = onRoadmap ? EXPECTED_EXPORT_ROLES.filter((r) => !filled.has(r)) : [];
 
   res.json({ success: true, data: { shipmentId: shipment.id, parties, missingRoles } });
 });
@@ -511,6 +592,7 @@ export const addShipmentParty = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentForParty(req);
   if (!shipment) return next(new AppError("Shipment not found", 404));
   assertShipmentUnlocked(shipment, "change its parties");
+  await assertOpsOwner(req, shipment, "change its parties");
 
   const { role, vendorId, customerId, notes } = req.body;
 
@@ -556,6 +638,7 @@ export const updateShipmentParty = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentForParty(req);
   if (!shipment) return next(new AppError("Shipment not found", 404));
   assertShipmentUnlocked(shipment, "change its parties");
+  await assertOpsOwner(req, shipment, "change its parties");
 
   const existing = await prisma.shipmentParty.findFirst({
     where: { id: req.params.partyId, shipmentId: shipment.id },
@@ -606,6 +689,7 @@ export const removeShipmentParty = catchAsync(async (req, res, next) => {
   const shipment = await loadShipmentForParty(req);
   if (!shipment) return next(new AppError("Shipment not found", 404));
   assertShipmentUnlocked(shipment, "change its parties");
+  await assertOpsOwner(req, shipment, "change its parties");
 
   const existing = await prisma.shipmentParty.findFirst({
     where: { id: req.params.partyId, shipmentId: shipment.id },
@@ -625,6 +709,209 @@ export const removeShipmentParty = catchAsync(async (req, res, next) => {
   });
 
   res.json({ success: true, message: "Party removed" });
+});
+
+/* ── POST /api/shipments/:id/claim ── (ops ownership, 2026-09-08) */
+/**
+ * Take ownership of an unclaimed shipment. From here only the claimer runs its
+ * operations steps, schedule, parties, trade documents and money — the same
+ * "mine or nobody's" shape Sales already uses for queries. Idempotent for the
+ * current owner so a double-click is harmless.
+ */
+export const claimShipment = catchAsync(async (req, res, next) => {
+  const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
+  if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "claim it");
+  if (shipment.opsOwnerId === req.user.id) {
+    return res.json({ success: true, message: "You already own this shipment", data: { opsOwnerId: req.user.id } });
+  }
+  if (shipment.opsOwnerId) {
+    const owner = await prisma.user.findUnique({
+      where: { id: shipment.opsOwnerId },
+      select: { email: true, employee: { select: { firstName: true, lastName: true } } },
+    });
+    const who = owner?.employee
+      ? `${owner.employee.firstName} ${owner.employee.lastName}`
+      : owner?.email ?? "another ops user";
+    return next(new AppError(`Already claimed by ${who}`, 409));
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shipment.update({
+      where: { id: shipment.id },
+      data: { opsOwnerId: req.user.id, opsClaimedAt: new Date() },
+    });
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: "shipment.claim",
+      resourceType: "shipment",
+      resourceId: shipment.id,
+      diff: { opsOwnerId: req.user.id },
+    });
+    await emitShipmentEvent(tx, "shipment.claimed", {
+      shipmentId: shipment.id,
+      shipmentRef: shipment.referenceNo,
+      ownerId: req.user.id,
+    });
+  });
+
+  res.json({
+    success: true,
+    message: `You own ${shipment.referenceNo} — its steps are yours to work`,
+    data: { opsOwnerId: req.user.id },
+  });
+});
+
+/* ── POST /api/shipments/:id/assign ── (Management reassigns or releases) */
+/**
+ * Hand a shipment to a different ops person, or release it back to the pool with
+ * `ownerId: null` — the escape hatch for an owner who is on leave. Management only
+ * (`shipment.assign`), so one ops user can never take a job off a colleague.
+ */
+export const assignShipment = catchAsync(async (req, res, next) => {
+  const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
+  if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "change who owns it");
+
+  const { ownerId } = req.body;
+  if (ownerId) {
+    const target = await prisma.user.findUnique({
+      where: { id: ownerId },
+      select: { id: true, isActive: true, role: true, roles: true },
+    });
+    if (!target || !target.isActive) return next(new AppError("That user was not found", 404));
+    const held = target.roles?.length ? target.roles : [target.role];
+    if (!held.some((r) => ["ops_manager", "ops_exec"].includes(r))) {
+      return next(new AppError("A shipment can only be owned by an Operations user", 422));
+    }
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.shipment.update({
+      where: { id: shipment.id },
+      data: { opsOwnerId: ownerId ?? null, opsClaimedAt: ownerId ? new Date() : null },
+    });
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: ownerId ? "shipment.assign" : "shipment.release",
+      resourceType: "shipment",
+      resourceId: shipment.id,
+      diff: { from: shipment.opsOwnerId, to: ownerId ?? null },
+    });
+    // Spelled out rather than computed so the event catalog stays statically
+    // greppable (scripts/verifyEventTopics.js scans for the literals).
+    const payload = {
+      shipmentId: shipment.id,
+      shipmentRef: shipment.referenceNo,
+      ownerId: ownerId ?? null,
+      reassignedBy: req.user.id,
+    };
+    if (ownerId) await emitShipmentEvent(tx, "shipment.claimed", payload);
+    else await emitShipmentEvent(tx, "shipment.released", payload);
+  });
+
+  res.json({
+    success: true,
+    message: ownerId ? "Shipment reassigned" : "Shipment released back to the pool",
+    data: { opsOwnerId: ownerId ?? null },
+  });
+});
+
+/* ── PATCH /api/shipments/:id/trade-links ── (roadmap Step 1 on a quotation-born shipment, ADR-057) */
+/**
+ * Link the Step 1 registers — a Trade Contract and/or a Financial Instrument — to a
+ * shipment that was born without them. The `record` items on Step 1 derive from these
+ * two columns, so this is what lets the step complete; it also seeds the vendor, bank
+ * and buyer parties the registers name and re-derives the trade stage.
+ *
+ * Refuses a contract for another customer, an instrument of a different vendor than the
+ * contract's, an instrument that is not active, an instrument already carried by another
+ * shipment (one instrument, one shipment — roadmap §7), and a locked order.
+ */
+export const linkTradeRegisters = catchAsync(async (req, res, next) => {
+  const shipment = await prisma.shipment.findUnique({ where: { id: req.params.id } });
+  if (!shipment || !(await shipmentInScope(req, shipment))) return next(new AppError("Shipment not found", 404));
+  assertShipmentUnlocked(shipment, "link its contract or instrument");
+
+  const contractId = req.body.contractId ?? shipment.contractId ?? null;
+  const contract = contractId ? await prisma.tradeContract.findUnique({ where: { id: contractId } }) : null;
+  if (req.body.contractId) {
+    if (!contract) return next(new AppError("Contract not found", 404));
+    if (contract.status === "cancelled") return next(new AppError("That contract is cancelled", 409));
+    if (contract.customerId && contract.customerId !== shipment.customerId) {
+      return next(new AppError("That contract belongs to a different customer", 422));
+    }
+  }
+
+  let financialInstrument = null;
+  if (req.body.financialInstrumentId) {
+    financialInstrument = await prisma.financialInstrument.findUnique({ where: { id: req.body.financialInstrumentId } });
+    if (!financialInstrument) return next(new AppError("Financial instrument not found", 404));
+    if (financialInstrument.status !== "active") {
+      return next(new AppError(`That instrument is ${financialInstrument.status} — only an active instrument can back an order`, 409));
+    }
+    if (contract && financialInstrument.vendorId !== contract.vendorId) {
+      return next(new AppError("That instrument was registered by a different vendor than the contract names", 422));
+    }
+    if (financialInstrument.customerId && financialInstrument.customerId !== shipment.customerId) {
+      return next(new AppError("That instrument names a different customer", 422));
+    }
+    const taken = await prisma.shipment.findFirst({
+      where: { financialInstrumentId: financialInstrument.id, id: { not: shipment.id } },
+      select: { referenceNo: true },
+    });
+    if (taken) return next(new AppError(`That instrument already backs shipment ${taken.referenceNo}`, 409));
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const u = await tx.shipment.update({
+      where: { id: shipment.id },
+      data: {
+        ...(req.body.contractId ? { contractId: contract.id } : {}),
+        ...(financialInstrument ? { financialInstrumentId: financialInstrument.id } : {}),
+        // Fill what the shipment does not know yet from what the registers say — the
+        // same fallbacks a contract-born shipment gets at birth.
+        incoterm: shipment.incoterm ?? financialInstrument?.incoterm ?? contract?.incoterm ?? null,
+        destinationPort: shipment.destinationPort ?? financialInstrument?.portOfDischarge ?? null,
+        rowVersion: { increment: 1 },
+      },
+    });
+    const customer = await tx.customer.findUnique({ where: { id: shipment.customerId } });
+    const partiesAdded = await seedShipmentParties(tx, u, {
+      contract: req.body.contractId ? contract : null,
+      financialInstrument,
+      customer,
+    });
+    await recomputeTradeStage(tx, u.id, req.user.id);
+    await auditShipment(tx, {
+      actorId: req.user.id,
+      action: "shipment.trade_links",
+      resourceType: "shipment",
+      resourceId: u.id,
+      diff: {
+        contractId: req.body.contractId ?? null,
+        financialInstrumentId: financialInstrument?.id ?? null,
+        partiesAdded,
+      },
+    });
+    await emitShipmentEvent(tx, "shipment.updated", { shipmentId: u.id, shipmentRef: u.referenceNo, customerId: u.customerId });
+    return u;
+  });
+
+  const linked = [
+    req.body.contractId ? `contract ${contract.referenceNo}` : null,
+    financialInstrument ? `instrument ${financialInstrument.fiNumber}` : null,
+  ].filter(Boolean);
+  res.json({
+    success: true,
+    message: `Linked ${linked.join(" and ")} to ${shipment.referenceNo}`,
+    data: {
+      contractId: updated.contractId,
+      financialInstrumentId: updated.financialInstrumentId,
+      tradeStage: updated.tradeStage,
+      rowVersion: updated.rowVersion,
+    },
+  });
 });
 
 /* ── POST /api/shipments/trade ── (roadmap Step 1; supersedes INV-03 for kind=trade) */

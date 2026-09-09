@@ -24,10 +24,21 @@ const money = (n, ccy) =>
     : `${ccy ?? ""} ${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.trim();
 const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 
-const Fact = ({ label, value }) => (
+/**
+ * `required` marks the two fields every vendor must now carry (email and phone). Rows
+ * created before that rule can still be missing them, and a silent "—" gives Ops no
+ * reason to go and fill it in — so the gap is called out where it is.
+ */
+const Fact = ({ label, value, required }) => (
   <div className="min-w-0">
     <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
-    <p className="text-sm break-words">{value || "—"}</p>
+    {value ? (
+      <p className="text-sm break-words">{value}</p>
+    ) : required ? (
+      <p className="text-sm font-medium text-destructive">Missing — required</p>
+    ) : (
+      <p className="text-sm break-words">—</p>
+    )}
   </div>
 );
 
@@ -154,8 +165,8 @@ const VendorDetailPage = () => {
             <p className="text-xs font-semibold mb-3">Contact</p>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               <Fact label="Contact" value={vendor.contactName} />
-              <Fact label="Email" value={vendor.email} />
-              <Fact label="Phone" value={vendor.phone} />
+              <Fact label="Email" value={vendor.email} required />
+              <Fact label="Phone" value={vendor.phone} required />
               <Fact label="Website" value={vendor.website} />
               <Fact label="Address" value={vendor.address} />
               <Fact label="City" value={vendor.city} />

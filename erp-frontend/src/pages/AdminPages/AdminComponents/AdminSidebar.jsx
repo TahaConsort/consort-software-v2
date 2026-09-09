@@ -6,6 +6,7 @@ import {
   Settings,
   User,
   Users,
+  IdCard,
   Target,
   Handshake,
   CalendarClock,
@@ -80,11 +81,14 @@ const NAV_ITEMS = [
       { name: "All Vendors", icon: Truck, path: "/admin/vendors", roles: VENDOR_ROLES },
       { name: "Shipping Lines", icon: Ship, path: "/admin/vendors/shipping-lines", roles: VENDOR_ROLES },
       { name: "Transporters", icon: Truck, path: "/admin/vendors/transporters", roles: VENDOR_ROLES },
-      { name: "Drivers", icon: Users, path: "/admin/vendors/drivers", roles: FLEET_NAV_ROLES },
       { name: "Trucks", icon: Truck, path: "/admin/vendors/trucks", roles: FLEET_NAV_ROLES },
       { name: "Dumpers", icon: Truck, path: "/admin/vendors/dumpers", roles: FLEET_NAV_ROLES },
     ],
   },
+  // Drivers are own-fleet master data, not counterparties — a driver is never billed,
+  // so the screen sits at the top level rather than inside Vendors, next to the
+  // directory it is repeatedly mistaken for.
+  { name: "Drivers", icon: IdCard, path: "/admin/drivers", roles: FLEET_NAV_ROLES },
   { name: "Chat", icon: MessagesSquare, path: "/admin/chat", roles: NON_MGMT_INTERNAL },
   { name: "Notifications", icon: Bell, path: "/admin/notifications", roles: NON_MGMT_INTERNAL, badge: "unread" },
   { name: "Action Engine", icon: Cpu, path: "/admin/action-engine", roles: [] }, // Management only (§5.12)

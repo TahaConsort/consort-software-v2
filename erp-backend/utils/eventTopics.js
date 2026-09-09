@@ -101,6 +101,12 @@ export const EVENT_TOPICS = {
   },
   // BDO recorded giving the sent quote to the customer (mail/phone/WhatsApp).
   "quotation.shared": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES], roles: [...OPS, ...SALES] },
+  // Sales recorded the customer's verbal yes (ADR-056) — the queries row now reads
+  // "awaiting confirmation" for everyone who can see it. Management rides along: it
+  // holds `quotation.share` too since the on-behalf approve went away.
+  "quotation.acceptance_claimed": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES, ...MGMT] },
+  // The link behind a recorded acceptance expired unused.
+  "quotation.acceptance_lapsed": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES, ...MGMT] },
   "quotation.rejected": { topics: () => [TOPICS.QUOTATIONS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...SALES] },
   // RULE-QT-07: approval creates the shipment, composes the OTD path and seeds tasks.
   // The widest fan-out in the app.
@@ -123,7 +129,16 @@ export const EVENT_TOPICS = {
   "shipment.cancelled": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS, TOPICS.INVOICES], roles: ALL_INTERNAL, scoped: shipmentScoped },
   "shipment.closed": { topics: (p) => [...shipmentTopics(p), TOPICS.INVOICES], roles: ALL_INTERNAL, scoped: shipmentScoped },
   "shipment.scheduled": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS], roles: ALL_INTERNAL, scoped: shipmentScoped },
+  // The shipment's own record changed outside the step machine — the Step 1 registers
+  // were linked (ADR-057), or its path was recomposed. The detail aggregate re-reads and
+  // the Action Engine re-checks whether a first task is now due.
+  "shipment.updated": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS], roles: ALL_INTERNAL, scoped: shipmentScoped },
   "shipment.eta_breached": { topics: shipmentTopics, roles: [...OPS, ...MGMT], scoped: shipmentScoped },
+  // Ops ownership (2026-09-08). Claiming moves the job off everyone else's
+  // claimable list and moves its queued operations tasks onto one desk, so both
+  // the shipment room and the task list have to refresh.
+  "shipment.claimed": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS], roles: [...OPS, ...MGMT], scoped: shipmentScoped },
+  "shipment.released": { topics: (p) => [...shipmentTopics(p), TOPICS.TASKS], roles: [...OPS, ...MGMT], scoped: shipmentScoped },
   // Export Shipment Workflow roadmap §2/§7 — the party list feeds the shipment header,
   // the trade-document panels (a B/L needs its carrier, a GD its clearing agent) and the
   // vendor detail page, so it invalidates the shipment room and the vendor list alike.
@@ -184,6 +199,8 @@ export const EVENT_TOPICS = {
       ...(p.ownerType && p.ownerId ? [documentsTopic(p.ownerType, p.ownerId)] : []),
       ...(p.shipmentId ? [shipmentTopic(p.shipmentId)] : []),
       TOPICS.SHIPMENTS,
+      // A signed quotation acceptance changes what the queries row says (ADR-056).
+      ...(p.ownerType === "quotation" ? [TOPICS.QUOTATIONS, TOPICS.QUERIES] : []),
     ],
     roles: [],
     scoped: shipmentScoped,

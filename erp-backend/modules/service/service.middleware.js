@@ -20,5 +20,7 @@ export const requireServiceAccess = requireRole(
   "transport_manager",
   "transport_exec",
   "accounts",
+  // Owns the website channel — edits portal queries, so needs the service picker.
+  "web_manager",
   "customer",
 );

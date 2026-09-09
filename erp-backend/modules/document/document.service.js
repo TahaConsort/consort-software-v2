@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import prisma from "../../config/prisma.js";
-import { docTypeLabels } from "./docTypes.cache.js";
+import { docTypeLabels, verificationRequiredCodes } from "./docTypes.cache.js";
 import { docTypeLabel } from "./document.validation.js";
 
 /**
@@ -239,7 +239,7 @@ export const requiredDocTypesByStep = async (shipmentId) => {
  * The two sources are a union, never a replacement, so a step can carry a fixed
  * requirement AND a package-dependent checklist without the gate drifting between them.
  */
-const requiredDocTypesForStep = async (step) => {
+export const requiredDocTypesForStep = async (step) => {
   const [tpl, actions] = await Promise.all([
     prisma.otdStepTemplate.findUnique({
       where: { stepCode: step.stepCode },
@@ -254,26 +254,57 @@ const requiredDocTypesForStep = async (step) => {
 };
 
 /**
- * Which of a step's mandatory documents are NOT yet attached to the shipment
- * (RULE-SH-06). A step with no required types always returns []. Attachment is
- * matched on a live (not soft-deleted) shipment-owned document of that docType.
- * @returns string[] of missing docType codes
+ * The RULE-SH-06 document gate for one step, split into its two failure modes.
+ *
+ *   missing     — no live document of that type is attached at all
+ *   unverified  — a document IS attached, but its type requires an ops sign-off
+ *                 (document_types.requires_verification) and none has been given
+ *
+ * The split exists so the refusal can say which it is: "attach the Rate Confirmation"
+ * and "verify the Rate Confirmation" are different jobs for different people, and one
+ * message covering both sends the wrong person looking.
+ *
+ * A `rejected` document counts for nothing — that is what makes a bad signed copy
+ * replaceable: upload a correct one and the gate reads the new file.
+ */
+export const documentGateFor = async (shipment, step) => {
+  const required = await requiredDocTypesForStep(step);
+  if (required.length === 0) return { missing: [], unverified: [] };
+
+  const [present, needsVerification] = await Promise.all([
+    prisma.document.findMany({
+      where: {
+        ownerType: "shipment",
+        ownerId: shipment.id,
+        docType: { in: required },
+        deletedAt: null,
+      },
+      select: { docType: true, verificationStatus: true },
+    }),
+    verificationRequiredCodes(),
+  ]);
+
+  const missing = [];
+  const unverified = [];
+  for (const type of required) {
+    const docs = present.filter((d) => d.docType === type);
+    if (!docs.length) { missing.push(type); continue; }
+    if (needsVerification.has(type) && !docs.some((d) => d.verificationStatus === "verified")) {
+      unverified.push(type);
+    }
+  }
+  return { missing, unverified };
+};
+
+/**
+ * Which of a step's mandatory documents do NOT satisfy it (RULE-SH-06) — attached or
+ * not. Kept as the flat union so every existing caller keeps working; the step
+ * completion path uses documentGateFor directly to word its refusal properly.
+ * @returns string[] of docType codes
  */
 export const missingRequiredDocs = async (shipment, step) => {
-  const required = await requiredDocTypesForStep(step);
-  if (required.length === 0) return [];
-
-  const present = await prisma.document.findMany({
-    where: {
-      ownerType: "shipment",
-      ownerId: shipment.id,
-      docType: { in: required },
-      deletedAt: null,
-    },
-    select: { docType: true },
-  });
-  const have = new Set(present.map((d) => d.docType));
-  return required.filter((t) => !have.has(t));
+  const { missing, unverified } = await documentGateFor(shipment, step);
+  return [...missing, ...unverified];
 };
 
 /**

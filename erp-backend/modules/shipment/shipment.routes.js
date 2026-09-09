@@ -12,7 +12,10 @@ import {
   addShipmentParty,
   updateShipmentParty,
   removeShipmentParty,
+  claimShipment,
+  assignShipment,
   createTradeShipment,
+  linkTradeRegisters,
 } from "./shipment.controllers.js";
 import { protect, requirePermission } from "../auth/auth.middleware.js";
 import { requireShipmentAccess, attachShipmentScope } from "./shipment.middleware.js";
@@ -24,6 +27,8 @@ import {
   scheduleSchema,
   addPartySchema,
   updatePartySchema,
+  assignShipmentSchema,
+  tradeLinksSchema,
 } from "./shipment.validation.js";
 import { createTradeShipmentSchema } from "../trade/trade.validation.js";
 
@@ -47,6 +52,12 @@ router.get("/:id/pnl", requirePermission("report.read"), getShipmentPnl);
 // Schedule (ETD/ETA) — enables the ETA-breach sweep (WORKFLOW §14).
 router.patch("/:id/schedule", requirePermission("shipment.schedule"), validate(scheduleSchema), setSchedule);
 
+// Ops ownership — one ops person runs a shipment end to end. Claiming is what
+// starts the work (the first operations task sits queued until then); Management
+// reassigns or releases it.
+router.post("/:id/claim", requirePermission("shipment.claim"), claimShipment);
+router.post("/:id/assign", requirePermission("shipment.assign"), validate(assignShipmentSchema), assignShipment);
+
 // Exceptions — orthogonal to progress (RULE-SH-08).
 router.post("/:id/hold", requirePermission("shipment.hold"), validate(holdSchema), holdShipment);
 router.post("/:id/resume", requirePermission("shipment.resume"), validate(resumeSchema), resumeShipment);
@@ -58,6 +69,9 @@ router.post("/:id/close", requirePermission("shipment.close"), closeShipment);
 // approved quotation, which is why INV-03 needed superseding (ADR-053). Static path,
 // declared BEFORE /:id so "trade" is never read as a shipment id.
 router.post("/trade", requirePermission("trade.contract.manage"), validate(createTradeShipmentSchema), createTradeShipment);
+// Step 1 on a quotation-born shipment (ADR-057): link the Trade Contract and the
+// Financial Instrument the `record` checklist items derive from.
+router.patch("/:id/trade-links", requirePermission("trade.contract.manage"), validate(tradeLinksSchema), linkTradeRegisters);
 
 // Parties — who plays which role ON THIS SHIPMENT (Export Shipment Workflow roadmap
 // §2/§7). Reads ride `trade.read`, so every department that can see the shipment can see

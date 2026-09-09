@@ -163,7 +163,7 @@
   --primary-foreground: #ffffff;
 
   /* Base */
-  --background: #09090b;
+  --background: #000000;
   --foreground: #fafafa;
 
   /* Muted */
@@ -171,7 +171,7 @@
   --muted-foreground: #a1a1aa;
 
   /* Accent */
-  --accent: #18181b;
+  --accent: #0f0f0f;
   --accent-foreground: #fafafa;
 
   /* Borders / Inputs */
@@ -184,7 +184,7 @@
   --destructive-foreground: #fafafa;
 
   /* Card */
-  --card: #09090b;
+  --card: #18181b ;
   --card-foreground: #fafafa;
 
   /* Popover */

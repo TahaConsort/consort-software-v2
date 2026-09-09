@@ -13,8 +13,18 @@ import {
   requiredDocTypesByStep,
   isStepMandatoryDoc,
 } from "./document.service.js";
-import { getDocTypes, isValidDocType, isCustomerUploadable, customerUploadableCodes } from "./docTypes.cache.js";
-import { lockReason } from "../shipment/shipment.service.js";
+import {
+  getDocTypes,
+  isValidDocType,
+  isCustomerUploadable,
+  customerUploadableCodes,
+  verificationRequiredCodes,
+} from "./docTypes.cache.js";
+import { lockReason, assertOpsOwner } from "../shipment/shipment.service.js";
+import { approveFromSignedCopy } from "../approval/approval.service.js";
+
+/** The one quotation-owned type that has a gate to open: the signed acceptance (ADR-056). */
+const QUOTATION_ACCEPTANCE = "quotation_acceptance";
 
 /**
  * A locked order's paperwork is frozen with it (RULE-SH-12) — no new uploads,
@@ -56,7 +66,9 @@ const emitDocumentsChanged = async (tx, doc, { change, actorRole }) => {
     customerId: null,
   };
 
-  if (doc.ownerType === "shipment" && (change === "publish" || actorRole === "customer")) {
+  payload.actorRole = actorRole ?? null;
+
+  if (doc.ownerType === "shipment" && (change === "publish" || change === "reject" || actorRole === "customer")) {
     const shipment = await tx.shipment.findUnique({
       where: { id: doc.ownerId },
       select: { customerId: true },
@@ -103,6 +115,10 @@ const publicShape = (d) => ({
   docType: d.docType,
   isPublished: d.isPublished,
   scanStatus: d.scanStatus,
+  verificationStatus: d.verificationStatus,
+  verifiedById: d.verifiedById ?? null,
+  verifiedAt: d.verifiedAt ?? null,
+  verificationNote: d.verificationNote ?? null,
   uploadedById: d.uploadedById,
   publishedAt: d.publishedAt,
   createdAt: d.createdAt,
@@ -117,7 +133,12 @@ export const listDocTypes = catchAsync(async (req, res) => {
     success: true,
     data: rows
       .filter((t) => t.active)
-      .map((t) => ({ code: t.code, label: t.label, customerUploadable: t.customerUploadable })),
+      .map((t) => ({
+        code: t.code,
+        label: t.label,
+        customerUploadable: t.customerUploadable,
+        requiresVerification: t.requiresVerification,
+      })),
   });
 });
 
@@ -370,8 +391,11 @@ export const deleteDocument = catchAsync(async (req, res, next) => {
   const locked = await shipmentLockReason(doc.ownerType, doc.ownerId, "remove its documents");
   if (locked) return next(new AppError(locked, 409));
 
-  // A step-mandatory document cannot be deleted (RULE-DOC-04).
-  if (await isStepMandatoryDoc(doc)) {
+  // A step-mandatory document cannot be deleted (RULE-DOC-04) — UNLESS ops rejected
+  // it. A rejected document satisfies no gate, so keeping it is not protecting the
+  // record, it is stranding the step: this is how a wrong or unsigned Rate
+  // Confirmation gets replaced by the right one.
+  if (doc.verificationStatus !== "rejected" && (await isStepMandatoryDoc(doc))) {
     return next(new AppError("This document is mandatory for a shipment step and cannot be deleted", 409));
   }
 
@@ -396,10 +420,16 @@ export const requiredDocsForShipment = catchAsync(async (req, res, next) => {
   const present = allTypes.length
     ? await prisma.document.findMany({
         where: { ownerType: "shipment", ownerId: shipment.id, docType: { in: allTypes }, deletedAt: null },
-        select: { docType: true, id: true },
+        select: { docType: true, id: true, verificationStatus: true },
       })
     : [];
   const have = new Set(present.map((d) => d.docType));
+  // A type that needs an ops sign-off is only "had" once one has been given; until
+  // then it is reported as awaiting verification rather than as missing.
+  const needsVerification = await verificationRequiredCodes();
+  const verified = new Set(
+    present.filter((d) => d.verificationStatus === "verified").map((d) => d.docType),
+  );
 
   const steps = await prisma.otdStep.findMany({
     where: { shipmentId: shipment.id },
@@ -416,9 +446,120 @@ export const requiredDocsForShipment = catchAsync(async (req, res, next) => {
         status: s.status,
         required,
         missing: required.filter((t) => !have.has(t)),
+        unverified: required.filter((t) => have.has(t) && needsVerification.has(t) && !verified.has(t)),
       };
     })
     .filter((s) => s.required.length > 0);
 
   res.json({ success: true, data: { shipmentId: shipment.id, checklist } });
+});
+
+/* ── POST /api/documents/:id/verification ── (ops signs off a signed document) */
+/**
+ * Some documents are only worth anything once a human has looked at them. The
+ * customer's signed Rate Confirmation is the case that drives this: the system
+ * generates the unsigned RC, the customer signs and uploads it, and the order does
+ * not lock until Operations confirms the upload really is a signed copy of the rate
+ * that was agreed.
+ *
+ * Which types need it is data, not code — `document_types.requires_verification`
+ * (editable in the Workflow admin panel), so the same mechanism covers any future
+ * document that needs a second pair of eyes.
+ *
+ * `rejected` is a real outcome, not an error: it leaves the gate closed, tells the
+ * customer why, and makes the document deletable so a corrected copy can replace it.
+ */
+export const verifyDocument = catchAsync(async (req, res, next) => {
+  const { status, note } = req.body;
+  const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+  if (!doc || doc.deletedAt) return next(new AppError("Document not found", 404));
+
+  const allowed = await ownerInScope(req.user, doc.ownerType, doc.ownerId, { forWrite: true });
+  if (!allowed) return next(new AppError("Document not found", 404));
+
+  // Two owners have a gate to open. A shipment document (the signed RC before Order
+  // Lock), and the customer's signed quotation on the quotation itself — whose
+  // verification IS the acceptance and creates the shipment (ADR-056). Master data
+  // and everything else has nothing to verify.
+  const signedAcceptance = doc.ownerType === "quotation" && doc.docType === QUOTATION_ACCEPTANCE;
+  if (doc.ownerType !== "shipment" && !signedAcceptance) {
+    return next(new AppError("Only a shipment document or a signed quotation acceptance can be verified", 409));
+  }
+
+  if (signedAcceptance) {
+    // Four-eyes, the real kind: whoever uploaded the scan can never be the one who
+    // says it is genuine. Sales lacks `document.verify` anyway; this holds even if a
+    // multi-role user ends up with both hats.
+    if (doc.uploadedById === req.user.id) {
+      return next(new AppError("The person who uploaded the signed copy cannot verify it — a colleague in Operations has to", 403));
+    }
+  } else {
+    const locked = await shipmentLockReason(doc.ownerType, doc.ownerId, "verify its documents");
+    if (locked) return next(new AppError(locked, 409));
+    // The shipment's ops owner is the one who signs off on it.
+    const shipment = await prisma.shipment.findUnique({ where: { id: doc.ownerId } });
+    await assertOpsOwner(req, shipment, "verify its documents");
+  }
+
+  const needsVerification = await verificationRequiredCodes();
+  if (!doc.docType || !needsVerification.has(doc.docType)) {
+    return next(new AppError("This kind of document does not need verifying", 409));
+  }
+  // Idempotent: clicking Verify twice is not an error.
+  if (doc.verificationStatus === status) {
+    return res.json({ success: true, message: `Already ${status}`, data: publicShape(doc) });
+  }
+
+  let pivot = null;
+  try {
+    const updated = await prisma.$transaction(
+      async (tx) => {
+        const u = await tx.document.update({
+          where: { id: doc.id },
+          data: {
+            verificationStatus: status,
+            verifiedById: req.user.id,
+            verifiedAt: new Date(),
+            verificationNote: note ?? null,
+          },
+        });
+        await audit(tx, req.user.id, status === "verified" ? "document.verify" : "document.reject", doc, {
+          from: doc.verificationStatus,
+          to: status,
+          note: note ?? null,
+        });
+        // The pivot runs in THIS transaction: if the shipment cannot be created (the
+        // quote expired, the customer is over their credit limit, it was approved
+        // another way first) the verification rolls back with it, so the document
+        // never reads "verified" against nothing.
+        if (signedAcceptance && status === "verified") {
+          pivot = await approveFromSignedCopy(tx, { document: u, verifierId: req.user.id });
+        }
+        await emitDocumentsChanged(tx, u, {
+          change: status === "verified" ? "verify" : "reject",
+          actorRole: req.user.role,
+        });
+        return u;
+      },
+      // The signed-copy pivot writes the shipment and everything on it — same headroom
+      // as the other two approval paths.
+      { timeout: 20000 },
+    );
+
+    res.json({
+      success: true,
+      message: pivot
+        ? `Signed acceptance verified — shipment ${pivot.shipment.referenceNo} created with ${pivot.stepCount} OTD steps`
+        : status === "verified" ? "Document verified" : "Document rejected — ask for a corrected copy",
+      data: {
+        ...publicShape(updated),
+        ...(pivot ? { shipmentId: pivot.shipment.id, shipmentRef: pivot.shipment.referenceNo } : {}),
+      },
+    });
+  } catch (err) {
+    if (err?.code === "P2002") {
+      return next(new AppError("This quotation has already been approved (INV-08)", 409));
+    }
+    throw err;
+  }
 });
