@@ -3,54 +3,95 @@ import { Link } from "react-router-dom";
 import {
   PhoneCall,
   RefreshCw,
-  AlertCircle,
   Plus,
-  Loader2,
   CalendarClock,
   AlarmClock,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  CardBody,
+  EmptyState,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
   Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Skeleton,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+} from "@neuctra/ui";
 import toast from "react-hot-toast";
 import { useOutreachStore } from "@/store/outreachStore";
 import { useReferenceStore } from "@/store/referenceStore";
 import { useCustomerStore } from "@/store/customerStore";
+import { OutreachOutcomeBadge } from "../LeadsPages/LeadComponents/leadBadges";
 import {
+  CHIP,
+  NEUTRAL_CHIP,
   OUTREACH_TYPE_LABELS,
   OUTREACH_OUTCOME_LABELS,
-} from "../LeadsPages/LeadComponents/leadBadges";
+} from "../LeadsPages/LeadComponents/leadLabels";
 
-const fmt = (d) => (d ? new Date(d).toLocaleString() : "—");
+const fmt = (d) => (d ? new Date(d).toLocaleString() : "Not set");
 
+/** One 36px baseline across the toolbar. */
+const ACTION_BTN = "h-9 px-3";
+
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+/** How urgent a due follow-up is: past, today, or still ahead. */
 const BUCKET_STYLES = {
-  overdue: "border-red-300 bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-300",
-  today: "border-amber-300 bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-300",
-  upcoming: "border-blue-300 bg-blue-50 text-blue-700 dark:bg-blue-950/30 dark:text-blue-300",
+  overdue: "border-destructive/30 bg-destructive/10 text-destructive",
+  today: "border-warning/30 bg-warning/10 text-warning",
+  upcoming: "border-info/30 bg-info/10 text-info",
 };
 
-const OUTCOME_STYLES = {
-  positive: "border-green-500 text-green-600 bg-green-50 dark:bg-green-950/30",
-  neutral: "",
-  negative: "border-red-400 text-red-600 bg-red-50 dark:bg-red-950/30",
-  no_response: "border-zinc-300 text-zinc-500",
+const BUCKET_LABELS = {
+  overdue: "Overdue",
+  today: "Today",
+  upcoming: "Upcoming",
 };
+
+const TARGET_OPTIONS = [
+  { value: "all", label: "All targets" },
+  { value: "lead", label: "Leads" },
+  { value: "customer", label: "Customers" },
+];
+
+const TYPE_OPTIONS = Object.entries(OUTREACH_TYPE_LABELS).map(
+  ([value, label]) => ({ value, label }),
+);
+const OUTCOME_OPTIONS = Object.entries(OUTREACH_OUTCOME_LABELS).map(
+  ([value, label]) => ({ value, label }),
+);
+
+/**
+ * @neuctra/ui labels its own fields but exports no standalone Label, so headings for
+ * hand-built controls use its label styling (same helper as the quote dialogs).
+ */
+const FieldLabel = ({ htmlFor, children }) => (
+  <label
+    htmlFor={htmlFor}
+    className="mb-1.5 block text-[13px] font-medium leading-none text-foreground"
+  >
+    {children}
+  </label>
+);
 
 /**
  * OutreachListPage (CRM_MASTER §5.5) — the touch log across leads AND
@@ -59,14 +100,24 @@ const OUTCOME_STYLES = {
  */
 const OutreachListPage = () => {
   const {
-    outreach, followUps, followUpCounts, loading, error, busy,
-    filters, setFilter, fetchOutreach, createOutreach,
+    outreach,
+    followUps,
+    followUpCounts,
+    loading,
+    error,
+    busy,
+    filters,
+    setFilter,
+    fetchOutreach,
+    createOutreach,
   } = useOutreachStore();
   const [addOpen, setAddOpen] = useState(false);
 
   // The log and the follow-ups feed arrive in one read now, so there is nothing to
   // sequence here and no half-refreshed state to reason about.
-  useEffect(() => { fetchOutreach(); }, [fetchOutreach]);
+  useEffect(() => {
+    fetchOutreach();
+  }, [fetchOutreach]);
 
   const refresh = () => fetchOutreach();
 
@@ -85,146 +136,273 @@ const OutreachListPage = () => {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-primary/10 text-primary"><PhoneCall className="w-5 h-5" /></div>
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <PhoneCall className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl leading-none font-semibold">Outreach</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Outreach
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
               Touches on leads and customers · follow-ups due
             </p>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          <Select value={filters.target || "all"} onValueChange={(v) => setFilter("target", v === "all" ? "" : v)} items={[{ value: "all", label: "All targets" }, { value: "lead", label: "Leads" }, { value: "customer", label: "Customers" }]}>
-            <SelectTrigger className="w-32 h-9"><SelectValue placeholder="Target" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All targets</SelectItem>
-              <SelectItem value="lead">Leads</SelectItem>
-              <SelectItem value="customer">Customers</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button variant="outline" size="sm" onClick={refresh} disabled={loading} className="gap-2">
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} /> Refresh
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={refresh}
+            disabled={loading}
+            iconBefore={
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            }
+          >
+            Refresh
           </Button>
-          <Button size="sm" className="gap-2" onClick={() => setAddOpen(true)}>
-            <Plus className="w-4 h-4" /> Log Outreach
+          <Select
+            size="md"
+            value={filters.target || "all"}
+            onValueChange={(v) => setFilter("target", v === "all" ? "" : v)}
+            options={TARGET_OPTIONS}
+            placeholder="Target"
+            showCheckIcon={false}
+            className="w-36!"
+            containerClassName="w-36"
+            triggerClassName="h-9"
+          />
+          <Button
+            size="sm"
+            className={ACTION_BTN}
+            onClick={() => setAddOpen(true)}
+            iconBefore={<Plus className="h-4 w-4" />}
+          >
+            Log Outreach
           </Button>
         </div>
       </div>
 
-      {/* Follow-ups-due board (§5.5) */}
-      <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm">
-        <div className="px-4 py-3 border-b flex items-center justify-between">
-          <div className="flex items-center gap-2 text-sm font-semibold">
-            <AlarmClock className="w-4 h-4 text-primary" /> Follow-ups Due
-          </div>
-          <div className="flex items-center gap-2 text-xs">
-            <Badge variant="outline" className={BUCKET_STYLES.overdue}>Overdue {followUpCounts.overdue}</Badge>
-            <Badge variant="outline" className={BUCKET_STYLES.today}>Today {followUpCounts.today}</Badge>
-            <Badge variant="outline" className={BUCKET_STYLES.upcoming}>Next 7d {followUpCounts.upcoming}</Badge>
-          </div>
-        </div>
-        <div className="divide-y max-h-64 overflow-y-auto">
-          {followUps.map((f) => (
-            <div key={f.id} className="px-4 py-2.5 flex items-center gap-3 text-sm">
-              <Badge variant="outline" className={`text-[10px] w-20 justify-center ${BUCKET_STYLES[f.bucket]}`}>
-                {f.bucket === "overdue" ? "Overdue" : f.bucket === "today" ? "Today" : "Upcoming"}
-              </Badge>
-              <span className="flex-1 min-w-0 truncate">
-                {f.targetType === "lead" ? (
-                  <Link to={`/admin/leads/${f.targetId}`} className="font-medium text-primary hover:underline">
-                    {f.targetCompany}
-                  </Link>
-                ) : (
-                  <span className="font-medium">{f.targetCompany}</span>
-                )}
-                <span className="text-muted-foreground"> ({f.targetRef}) — {OUTREACH_TYPE_LABELS[f.type]}{f.notes ? ` · ${f.notes}` : ""}</span>
-              </span>
-              <span className="text-xs text-muted-foreground flex items-center gap-1 flex-shrink-0">
-                <CalendarClock className="w-3.5 h-3.5" /> {fmt(f.followUpAt)}
-              </span>
+      {/* Follow-ups-due board (§5.5). `padding="none"` lets the rows run edge to edge
+          so their dividers meet the card border. */}
+      <Card padding="none" className="overflow-hidden">
+        <CardBody>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-accent px-4 py-3">
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <AlarmClock className="h-4 w-4 text-primary" /> Follow-ups Due
             </div>
-          ))}
-          {followUps.length === 0 && (
-            <p className="px-4 py-6 text-sm text-muted-foreground text-center">
-              No follow-ups due — log outreach with a follow-up date and it lands here.
-            </p>
-          )}
-        </div>
-      </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                variant="soft"
+                size="sm"
+                text={`Overdue ${followUpCounts.overdue}`}
+                className={`${CHIP} ${BUCKET_STYLES.overdue}`}
+              />
+              <Badge
+                variant="soft"
+                size="sm"
+                text={`Today ${followUpCounts.today}`}
+                className={`${CHIP} ${BUCKET_STYLES.today}`}
+              />
+              <Badge
+                variant="soft"
+                size="sm"
+                text={`Next 7d ${followUpCounts.upcoming}`}
+                className={`${CHIP} ${BUCKET_STYLES.upcoming}`}
+              />
+            </div>
+          </div>
 
-      {/* Error */}
+          <div className="max-h-64 divide-y divide-border overflow-y-auto">
+            {followUps.map((f) => (
+              <div
+                key={f.id}
+                className="flex flex-col gap-1.5 px-4 py-2.5 text-sm sm:flex-row sm:items-center sm:gap-3"
+              >
+                <Badge
+                  variant="soft"
+                  size="sm"
+                  text={BUCKET_LABELS[f.bucket] ?? f.bucket}
+                  className={`${CHIP} w-20 justify-center ${BUCKET_STYLES[f.bucket] ?? NEUTRAL_CHIP}`}
+                />
+                <span className="min-w-0 flex-1 truncate">
+                  {f.targetType === "lead" ? (
+                    <Link
+                      to={`/admin/leads/${f.targetId}`}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {f.targetCompany}
+                    </Link>
+                  ) : (
+                    <span className="font-medium">{f.targetCompany}</span>
+                  )}
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({f.targetRef}) · {OUTREACH_TYPE_LABELS[f.type]}
+                    {f.notes ? ` · ${f.notes}` : ""}
+                  </span>
+                </span>
+                <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground">
+                  <CalendarClock className="h-3.5 w-3.5" /> {fmt(f.followUpAt)}
+                </span>
+              </div>
+            ))}
+
+            {followUps.length === 0 && (
+              <EmptyState
+                size="sm"
+                icon={<AlarmClock className="h-5 w-5" />}
+                title="Nothing due"
+                description="Log outreach with a follow-up date and it lands here."
+              />
+            )}
+          </div>
+        </CardBody>
+      </Card>
+
       {error && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <p className="text-sm font-medium flex-1">{error}</p>
-          <Button variant="outline" size="sm" onClick={refresh} className="border-destructive/50 text-destructive hover:bg-destructive/10">Retry</Button>
-        </div>
+        <Callout type="error" title="Couldn't load the outreach log">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={refresh}>
+              Retry
+            </Button>
+          </div>
+        </Callout>
       )}
 
       {/* Touch log */}
-      <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-left border-b">
-            <tr>
-              <th className="p-3 font-semibold text-muted-foreground">When</th>
-              <th className="p-3 font-semibold text-muted-foreground">Target</th>
-              <th className="p-3 font-semibold text-muted-foreground">Type</th>
-              <th className="p-3 font-semibold text-muted-foreground">Outcome</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden md:table-cell">Notes</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden lg:table-cell">By</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden sm:table-cell">Follow-up</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && [...Array(4)].map((_, i) => (
-              <tr key={i} className="border-t animate-pulse">
-                {[...Array(7)].map((_, j) => <td key={j} className="p-3"><div className="h-4 bg-muted rounded w-3/4" /></td>)}
-              </tr>
-            ))}
+      {!loading && outreach.length === 0 && !error ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<PhoneCall />}
+            title="No outreach logged yet"
+            description="Every call, email and meeting recorded against a lead or customer shows up here, including completed visit plans."
+          />
+        </Card>
+      ) : (
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "15%" }}>When</TH>
+                  <TH style={{ ...HEAD_CELL, width: "22%" }}>Target</TH>
+                  <TH style={{ ...HEAD_CELL, width: "11%" }}>Type</TH>
+                  <TH style={{ ...HEAD_CELL, width: "13%" }}>Outcome</TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "19%" }}
+                  >
+                    Notes
+                  </TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "10%" }}
+                  >
+                    By
+                  </TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "10%" }}
+                  >
+                    Follow-up
+                  </TH>
+                </TRow>
+              </THead>
 
-            {!loading && outreach.map((o) => (
-              <tr key={o.id} className="border-t hover:bg-muted/30 transition-colors">
-                <td className="p-3 text-muted-foreground">{fmt(o.occurredAt)}</td>
-                <td className="p-3">
-                  {o.targetType === "lead" ? (
-                    <Link to={`/admin/leads/${o.targetId}`} className="font-medium text-primary hover:underline">
-                      {o.targetCompany}
-                    </Link>
-                  ) : (
-                    <span className="font-medium">{o.targetCompany}</span>
-                  )}{" "}
-                  <span className="text-xs text-muted-foreground">({o.targetRef})</span>
-                </td>
-                <td className="p-3">{OUTREACH_TYPE_LABELS[o.type]}</td>
-                <td className="p-3">
-                  <Badge variant="outline" className={`text-xs ${OUTCOME_STYLES[o.outcome] ?? ""}`}>
-                    {OUTREACH_OUTCOME_LABELS[o.outcome]}
-                  </Badge>
-                </td>
-                <td className="p-3 text-muted-foreground hidden md:table-cell max-w-xs truncate">{o.notes ?? "—"}</td>
-                <td className="p-3 text-muted-foreground hidden lg:table-cell">{o.actorName}</td>
-                <td className="p-3 text-muted-foreground hidden sm:table-cell">{o.followUpAt ? fmt(o.followUpAt) : "—"}</td>
-              </tr>
-            ))}
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(4)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(7)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
 
-            {!loading && outreach.length === 0 && !error && (
-              <tr>
-                <td colSpan="7" className="p-10 text-center">
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                    <PhoneCall className="w-8 h-8 opacity-30" />
-                    <p className="font-medium">No outreach logged yet</p>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                {/* DATA */}
+                {!loading &&
+                  outreach.map((o) => (
+                    <TRow key={o.id} className="bg-card!">
+                      <TD
+                        className="truncate text-muted-foreground"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {fmt(o.occurredAt)}
+                      </TD>
 
-      {addOpen && <LogOutreachDialog busy={busy} onClose={() => setAddOpen(false)} onSubmit={submit} />}
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <div className="truncate">
+                          {o.targetType === "lead" ? (
+                            <Link
+                              to={`/admin/leads/${o.targetId}`}
+                              className="font-medium text-primary hover:underline"
+                            >
+                              {o.targetCompany}
+                            </Link>
+                          ) : (
+                            <span className="font-medium">
+                              {o.targetCompany}
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {o.targetRef}
+                        </div>
+                      </TD>
+
+                      <TD className="truncate" style={{ ...CELL, ...CLIP }}>
+                        {OUTREACH_TYPE_LABELS[o.type] ?? o.type}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <OutreachOutcomeBadge outcome={o.outcome} />
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                        title={o.notes ?? undefined}
+                      >
+                        {o.notes ?? "None"}
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {o.actorName}
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {o.followUpAt ? fmt(o.followUpAt) : "None"}
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
+        </div>
+      )}
+
+      {addOpen && (
+        <LogOutreachDialog
+          busy={busy}
+          onClose={() => setAddOpen(false)}
+          onSubmit={submit}
+        />
+      )}
     </div>
   );
 };
@@ -246,16 +424,33 @@ const LogOutreachDialog = ({ busy, onClose, onSubmit }) => {
     followUpAt: "",
   });
 
-  useEffect(() => { fetchReference("leads"); fetchCustomers(); }, [fetchReference, fetchCustomers]);
+  useEffect(() => {
+    fetchReference("leads");
+    fetchCustomers();
+  }, [fetchReference, fetchCustomers]);
 
-  const openLeads = leads.filter((l) => ["new", "contacted", "qualified"].includes(l.status));
+  const openLeads = leads.filter((l) =>
+    ["new", "contacted", "qualified"].includes(l.status),
+  );
   const activeCustomers = customers.filter((c) => c.isActive);
+
+  const targetOptions = (
+    form.targetType === "lead" ? openLeads : activeCustomers
+  ).map((t) => ({
+    value: t.id,
+    label:
+      form.targetType === "lead"
+        ? `${t.referenceNo} · ${t.company?.name ?? ""}`
+        : `${t.referenceNo} · ${t.companyName}`,
+  }));
 
   const submit = (e) => {
     e.preventDefault();
     if (!form.targetId) return toast.error("Pick a lead or customer");
     onSubmit({
-      ...(form.targetType === "lead" ? { leadId: form.targetId } : { customerId: form.targetId }),
+      ...(form.targetType === "lead"
+        ? { leadId: form.targetId }
+        : { customerId: form.targetId }),
       type: form.type,
       outcome: form.outcome,
       notes: form.notes || undefined,
@@ -265,95 +460,130 @@ const LogOutreachDialog = ({ busy, onClose, onSubmit }) => {
   };
 
   return (
-    <Dialog open onOpenChange={(v) => !v && !busy && onClose()}>
-      <DialogContent size="lg">
-        <DialogHeader>
-          <DialogTitle>Log Outreach</DialogTitle>
-          <DialogDescription>
-            Records a touch that already happened. The first touch on a new lead
-            moves it to Contacted; scheduled future visits belong in Visit Plans.
-          </DialogDescription>
-        </DialogHeader>
+    <Modal isOpen onClose={() => !busy && onClose()} disableOverlayClose={busy}>
+      <ModalContent maxWidth="max-w-2xl" className="flex max-h-[90vh] flex-col">
+        <form onSubmit={submit} className="flex min-h-0 flex-col">
+          <ModalHeader
+            title="Log Outreach"
+            onClose={() => !busy && onClose()}
+          />
 
-        <form onSubmit={submit} className="space-y-4 py-2">
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Target Type</Label>
-              <Select value={form.targetType} onValueChange={(v) => setForm((p) => ({ ...p, targetType: v, targetId: "" }))} items={[{ value: "lead", label: "Lead" }, { value: "customer", label: "Customer" }]}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="lead">Lead</SelectItem>
-                  <SelectItem value="customer">Customer</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-1.5">
-              <Label>{form.targetType === "lead" ? "Lead" : "Customer"}</Label>
-              <Select value={form.targetId} onValueChange={(v) => setForm((p) => ({ ...p, targetId: v }))} items={(form.targetType === "lead" ? openLeads : activeCustomers).map((t) => ({ value: t.id, label: form.targetType === "lead" ? `${t.referenceNo} — ${t.company?.name ?? ""}` : `${t.referenceNo} — ${t.companyName}` }))}>
-                <SelectTrigger><SelectValue placeholder="Select…" /></SelectTrigger>
-                <SelectContent>
-                  {(form.targetType === "lead" ? openLeads : activeCustomers).map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {form.targetType === "lead"
-                        ? `${t.referenceNo} — ${t.company?.name ?? ""}`
-                        : `${t.referenceNo} — ${t.companyName}`}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
+          <ModalBody className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+            <p className="text-sm leading-relaxed text-muted-foreground">
+              Records a touch that already happened. The first touch on a new
+              lead moves it to Contacted; scheduled future visits belong in Visit
+              Plans.
+            </p>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label>Type</Label>
-              <Select value={form.type} onValueChange={(v) => setForm((p) => ({ ...p, type: v }))}>
-                <SelectTrigger><SelectValue>{OUTREACH_TYPE_LABELS[form.type]}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  {Object.entries(OUTREACH_TYPE_LABELS).map(([v, l]) => (
-                    <SelectItem key={v} value={v}>{l}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Select
+                label="Target type"
+                value={form.targetType}
+                onValueChange={(v) =>
+                  setForm((p) => ({ ...p, targetType: v, targetId: "" }))
+                }
+                options={[
+                  { value: "lead", label: "Lead" },
+                  { value: "customer", label: "Customer" },
+                ]}
+                disabled={busy}
+              />
+              <Select
+                label={form.targetType === "lead" ? "Lead" : "Customer"}
+                value={form.targetId}
+                onValueChange={(v) => setForm((p) => ({ ...p, targetId: v }))}
+                options={targetOptions}
+                placeholder="Select…"
+                searchable
+                disabled={busy}
+              />
             </div>
-            <div className="space-y-1.5">
-              <Label>Outcome</Label>
-              <Select value={form.outcome} onValueChange={(v) => setForm((p) => ({ ...p, outcome: v }))}>
-                <SelectTrigger><SelectValue>{OUTREACH_OUTCOME_LABELS[form.outcome]}</SelectValue></SelectTrigger>
-                <SelectContent>
-                  {Object.entries(OUTREACH_OUTCOME_LABELS).map(([v, l]) => (
-                    <SelectItem key={v} value={v}>{l}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <div className="space-y-1.5">
-              <Label htmlFor="or-duration">Duration (min)</Label>
-              <Input id="or-duration" type="number" min="1" value={form.durationMin} onChange={(e) => setForm((p) => ({ ...p, durationMin: e.target.value }))} placeholder="Optional" />
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Select
+                label="Type"
+                value={form.type}
+                onValueChange={(v) => setForm((p) => ({ ...p, type: v }))}
+                options={TYPE_OPTIONS}
+                disabled={busy}
+              />
+              <Select
+                label="Outcome"
+                value={form.outcome}
+                onValueChange={(v) => setForm((p) => ({ ...p, outcome: v }))}
+                options={OUTCOME_OPTIONS}
+                disabled={busy}
+              />
             </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="or-followup">Follow-up (optional)</Label>
-              <Input id="or-followup" type="datetime-local" value={form.followUpAt} onChange={(e) => setForm((p) => ({ ...p, followUpAt: e.target.value }))} />
+
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <Input
+                id="or-duration"
+                type="number"
+                label="Duration (min)"
+                min={1}
+                value={form.durationMin}
+                onChange={(e) =>
+                  setForm((p) => ({ ...p, durationMin: e.target.value }))
+                }
+                placeholder="Optional"
+                disabled={busy}
+              />
+              <div>
+                {/* A follow-up carries a time as well as a date, and @neuctra/ui has no
+                    datetime control (DatePicker is date-only). A native input keeps the
+                    stored value intact rather than flattening it to midnight; the token
+                    classes give it the same surface as the fields beside it. */}
+                <FieldLabel htmlFor="or-followup">
+                  Follow-up (optional)
+                </FieldLabel>
+                <input
+                  id="or-followup"
+                  type="datetime-local"
+                  value={form.followUpAt}
+                  disabled={busy}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, followUpAt: e.target.value }))
+                  }
+                  className="h-10 w-full rounded-md border border-border bg-input px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                />
+              </div>
             </div>
-          </div>
 
-          <div className="space-y-1.5">
-            <Label htmlFor="or-notes">Notes</Label>
-            <Input id="or-notes" value={form.notes} onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))} placeholder="What happened?" />
-          </div>
+            <Input
+              id="or-notes"
+              label="Notes"
+              value={form.notes}
+              onChange={(e) =>
+                setForm((p) => ({ ...p, notes: e.target.value }))
+              }
+              placeholder="What happened?"
+              disabled={busy}
+            />
+          </ModalBody>
 
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>Cancel</Button>
-            <Button type="submit" disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} Log
+          <ModalFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onClose}
+              disabled={busy}
+            >
+              Cancel
             </Button>
-          </DialogFooter>
+            <Button
+              type="submit"
+              disabled={busy}
+              loading={busy}
+              loadingText="Logging…"
+              iconBefore={<Plus className="h-4 w-4" />}
+            >
+              Log
+            </Button>
+          </ModalFooter>
         </form>
-      </DialogContent>
-    </Dialog>
+      </ModalContent>
+    </Modal>
   );
 };
 

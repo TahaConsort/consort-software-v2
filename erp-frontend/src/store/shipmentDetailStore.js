@@ -79,12 +79,11 @@ export const useShipmentDetailStore = createResourceStore({
        * through no fault of their own. One retry only — a second conflict is a genuine race
        * with another person, and looping would hide it.
        */
-      completeStep: async (displayNo, { forceReason } = {}) => {
+      completeStep: async (displayNo) => {
         const attempt = (rowVersion) =>
           mutate(
             () => otdService.completeStep(id(), displayNo, {
               rowVersion,
-              ...(forceReason ? { forceReason } : {}),
             }),
             { invalidates: stepTopics() },
           );
@@ -117,13 +116,6 @@ export const useShipmentDetailStore = createResourceStore({
       updateStepDetails: (displayNo, payload) =>
         mutate(() => otdService.updateStepDetails(id(), displayNo, payload), {
           invalidates: [shipmentTopic(id())],
-        }),
-
-      /** Roadmap Step 1 (ADR-057): the registers change the checklist, the parties and
-       *  the trade stage — all on this shipment's own aggregate. */
-      linkTradeRegisters: (payload) =>
-        mutate(() => shipmentService.linkTradeRegisters(id(), payload), {
-          invalidates: [shipmentTopic(id()), TOPICS.SHIPMENTS],
         }),
 
       /* ── OTC milestones ────────────────────────────────────────────────────── */

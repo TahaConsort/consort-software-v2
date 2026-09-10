@@ -24,7 +24,7 @@ const AdminLayout = () => {
   }, [fetchNotifications])
 
   return (
-    <div className="h-screen flex overflow-hidden bg-muted/40">
+    <div className="h-screen flex overflow-hidden bg-background">
 
       {/* Sidebar */}
       <AdminSidebar open={open} setOpen={setOpen} />
@@ -33,7 +33,7 @@ const AdminLayout = () => {
       <div className="flex-1 flex flex-col lg:ml-64 h-full overflow-hidden">
 
         {/* Topbar */}
-        <header className="h-14 flex items-center justify-between w-full px-4 border-b bg-white dark:bg-zinc-900">
+        <header className="h-14 flex items-center justify-between w-full px-4 border-b border-border bg-sidebar">
           <div className="flex items-center gap-2">
             <button
               onClick={() => setOpen(true)}

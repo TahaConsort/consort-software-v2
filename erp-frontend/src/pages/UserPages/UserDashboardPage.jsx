@@ -77,7 +77,7 @@ const UserDashboardPage = () => {
 
   return (
     <div className="min-h-screen flex flex-col bg-muted/40">
-      <header className="h-14 flex items-center justify-between px-4 border-b bg-white dark:bg-zinc-900">
+      <header className="h-14 flex items-center justify-between px-4 border-b bg-card">
         <div className="flex items-center gap-2">
           <img src="/logo.png" alt="logo" className="w-7" />
           <h2 className="text-sm font-medium">Consort <span className="text-primary">Portal</span></h2>
@@ -131,7 +131,7 @@ const UserDashboardPage = () => {
               <div className="space-y-3">
                 <h2 className="font-semibold">Your shipments</h2>
                 {shipments.length === 0 && (
-                  <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-8 text-center text-muted-foreground text-sm">No shipments yet.</div>
+                  <div className="border border-border rounded-xl bg-card shadow-sm p-8 text-center text-muted-foreground text-sm">No shipments yet.</div>
                 )}
                 {shipments.map((s) => <ShipmentCard key={s.id} shipment={s} onDocuments={() => setDocShipmentId(s.id)} />)}
               </div>
@@ -169,7 +169,7 @@ const UserDashboardPage = () => {
 };
 
 const StatCard = ({ icon: Icon, label, value }) => (
-  <div className="border rounded-xl bg-white dark:bg-zinc-900 p-4 shadow-sm">
+  <div className="border border-border rounded-xl bg-card p-4 shadow-sm">
     <div className="flex items-center gap-2 text-muted-foreground text-sm"><Icon className="w-4 h-4" /> {label}</div>
     <p className="text-2xl font-semibold mt-1">{value}</p>
   </div>
@@ -193,7 +193,7 @@ const ShipmentCard = ({ shipment: s, onDocuments }) => {
   );
 
   return (
-    <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4 space-y-3">
+    <div className="border border-border rounded-xl bg-card shadow-sm p-4 space-y-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
@@ -351,14 +351,14 @@ const RequestsTab = ({ onChanged }) => {
 
       {loading && <div className="flex justify-center py-8 text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>}
       {!loading && queries.length === 0 && (
-        <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-8 text-center text-muted-foreground text-sm">No requests yet — raise one to get a quote.</div>
+        <div className="border border-border rounded-xl bg-card shadow-sm p-8 text-center text-muted-foreground text-sm">No requests yet — raise one to get a quote.</div>
       )}
 
       <div className="space-y-3">
         {queries.map((q) => {
           const quote = latestQuote(q.id);
           return (
-            <div key={q.id} className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4">
+            <div key={q.id} className="border border-border rounded-xl bg-card shadow-sm p-4">
               <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div className="min-w-0">
                   <p className="font-medium text-primary">{q.referenceNo}</p>
@@ -467,7 +467,7 @@ const InvoicesTab = () => {
   if (loading) return <div className="flex justify-center py-8 text-muted-foreground"><Loader2 className="w-5 h-5 animate-spin" /></div>;
 
   return (
-    <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
+    <div className="border border-border rounded-xl bg-card shadow-sm p-5">
       <h2 className="font-semibold mb-3">Your invoices</h2>
       {invoices.length === 0 && <p className="text-sm text-muted-foreground">No invoices yet.</p>}
       <ul className="divide-y">

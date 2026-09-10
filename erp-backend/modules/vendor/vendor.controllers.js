@@ -124,9 +124,13 @@ export const deleteVendor = catchAsync(async (req, res, next) => {
 /**
  * Email a vendor asking for their rates — the "Quote" button on the vendor card.
  *
- * Deliberately NOT a VendorRfq: that record belongs to a query and carries the buy
- * side of a specific job. This is the directory's own lightweight nudge, so it writes
- * nothing and simply sends the mail. If it ever needs to be tracked, it becomes an RFQ.
+ * Writes nothing: this is a mail send, not a tracked record. Ops asks, the vendor
+ * replies by email, and the price is typed into the quote by hand.
+ *
+ * With a `queryId` the mail names the route and the services being asked about, so a
+ * vendor is not quoting "an upcoming shipment" in the abstract. The customer's identity
+ * never travels with it — same rule as the vendor paperwork in utils/rcPdf.js, which is
+ * why only the reference, the two doors and the service list are selected below.
  *
  * Replies go to the requester rather than the shared mailbox, because the person who
  * asked for the rate is the one who has to read it.
@@ -141,7 +145,17 @@ export const requestVendorQuote = catchAsync(async (req, res, next) => {
     return next(new AppError("Email is not configured on the server yet — set MAIL_USER and MAIL_PASSWORD", 503));
   }
 
-  const { subject, text, html } = buildQuoteRequestEmail(vendor, req.user, req.body?.message);
+  // Never selected: customerName / customerEmail / customerPhone. A vendor is told
+  // what to price, not who is buying.
+  const query = req.body?.queryId
+    ? await prisma.query.findUnique({
+        where: { id: req.body.queryId },
+        select: { referenceNo: true, pickupAddress: true, destinationAddress: true, services: true },
+      })
+    : null;
+  if (req.body?.queryId && !query) return next(new AppError("Query not found", 404));
+
+  const { subject, text, html } = buildQuoteRequestEmail(vendor, req.user, req.body?.message, query);
 
   try {
     await sendMail({ to: vendor.email, subject, text, html, replyTo: req.user?.email });

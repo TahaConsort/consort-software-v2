@@ -14,6 +14,10 @@ export const VENDOR_TYPES = [
   "destination_agent",
   "port_terminal",
   "rail_operator",
+  "rail_terminal",
+  "airline",
+  "air_cargo_agent",
+  "airport_terminal",
   "freight_forwarder",
   "ocean_carrier",
   "exporter",
@@ -55,7 +59,12 @@ export const updateVendorSchema = createVendorSchema.partial().extend({
   isActive: z.boolean().optional(),
 });
 
-/** Optional note the requester adds to the rate-request email. */
+/**
+ * The rate-request email. `message` is the requester's own words; `queryId` ties the
+ * ask to a specific shipping request, so the vendor is told the route and the services
+ * instead of being asked to quote "an upcoming shipment" in the abstract.
+ */
 export const vendorQuoteRequestSchema = z.object({
   message: z.string().max(2000).optional(),
+  queryId: z.string().uuid().optional(),
 });

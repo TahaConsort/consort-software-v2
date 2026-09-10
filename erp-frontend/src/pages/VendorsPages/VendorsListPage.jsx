@@ -1,89 +1,253 @@
-import { useEffect, useState, useMemo } from "react";
-import { Truck, Loader2, Plus, Pencil, Ban, Paperclip, Search, MessageSquare, Trash2 } from "lucide-react";
-import toast from "react-hot-toast";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { VENDOR_TYPE_LABELS, VENDOR_TYPE_OPTIONS, vendorTypeOptionsFor, DEFAULT_CURRENCY } from "@/lib/catalog";
+  Truck,
+  Plus,
+  Pencil,
+  Ban,
+  Paperclip,
+  Search,
+  MessageSquare,
+  Trash2,
+  RefreshCw,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  IconButton,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  Select,
+  Skeleton,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+  Tooltip,
+} from "@neuctra/ui";
+import toast from "react-hot-toast";
+import {
+  VENDOR_TYPE_LABELS,
+  VENDOR_TYPE_OPTIONS,
+  vendorTypeOptionsFor,
+  DEFAULT_CURRENCY,
+} from "@/lib/catalog";
 import DocumentsDialog from "@/components/DocumentsDialog";
 import { useAuthStore } from "@/store/authStore";
-import { listVendors, createVendor, updateVendor, deactivateVendor, deleteVendor, requestVendorQuote } from "@/services/vendorService";
+import {
+  listVendors,
+  createVendor,
+  updateVendor,
+  deactivateVendor,
+  deleteVendor,
+  requestVendorQuote,
+} from "@/services/vendorService";
 
 const EMPTY = {
-  name: "", type: "exporter", contactName: "", email: "", phone: "",
-  city: "", country: "", taxId: "", paymentTermsDays: "", currency: "",
-  strn: "", rexNo: "", vatNo: "", bankName: "", bankBranch: "", iban: "", swiftCode: "", accountTitle: "", website: "", notes: "",
+  name: "",
+  type: "exporter",
+  contactName: "",
+  email: "",
+  phone: "",
+  city: "",
+  country: "",
+  taxId: "",
+  paymentTermsDays: "",
+  currency: "",
+  strn: "",
+  rexNo: "",
+  vatNo: "",
+  bankName: "",
+  bankBranch: "",
+  iban: "",
+  swiftCode: "",
+  accountTitle: "",
+  website: "",
+  notes: "",
 };
 
-export default function VendorsListPage({ lockedType }) {
+/**
+ * One chip recipe for the whole directory. There are fourteen vendor types and four
+ * status tokens, so type is deliberately NOT colour-coded: it is context, not state,
+ * and fourteen competing hues turned the column into a paint chart. The only coloured
+ * chip here is the one that carries meaning — whether the vendor is still active.
+ */
+const CHIP = "whitespace-nowrap border text-xs";
+const NEUTRAL_CHIP = "border-border bg-muted text-muted-foreground";
+
+/** One 36px baseline across the toolbar and the row actions. */
+const ACTION_BTN = "h-9 px-3";
+const ACTION_ICON_BTN = "h-9 w-9 shrink-0 p-0";
+
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order — `style` is the only
+ * deterministic route.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+const TYPE_FILTER_OPTIONS = [
+  { value: "all", label: "All types" },
+  ...VENDOR_TYPE_OPTIONS,
+];
+
+/** Icon-only row action, so five controls fit one column without wrapping. */
+const RowAction = ({ title, onClick, disabled, danger, children }) => (
+  <Tooltip content={title}>
+    <span className="inline-flex shrink-0">
+      <IconButton
+        variant="ghost"
+        className={`${ACTION_ICON_BTN} text-muted-foreground ${
+          danger
+            ? "hover:bg-destructive/10 hover:text-destructive"
+            : "hover:text-foreground"
+        }`}
+        aria-label={title}
+        disabled={disabled}
+        onClick={onClick}
+        icon={children}
+      />
+    </span>
+  </Tooltip>
+);
+
+/** A labelled group inside the create/edit form. */
+const FormSection = ({ title, children }) => (
+  <section className="space-y-4">
+    <h4 className="border-b border-border pb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+      {title}
+    </h4>
+    {children}
+  </section>
+);
+
+/**
+ * VendorsListPage — the single directory of every counterparty on a shipment.
+ *
+ * One page, filtered by type. The per-type sub-screens it replaced were the same
+ * component with a locked filter, which meant three routes and a `lockedType` branch
+ * through the form for something the filter already does.
+ */
+export default function VendorsListPage() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission("vendor.manage");
   // Emailing for rates is a buy-side action, gated the same way the server gates it.
   const canRequestQuote = hasPermission("rfq.manage");
-  const typeLabel = lockedType ? VENDOR_TYPE_LABELS[lockedType] ?? lockedType : null;
 
-  const [vendors, setVendors] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [vendors, setVendors] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [typeFilter, setTypeFilter] = useState(lockedType ?? "all");
+  const [typeFilter, setTypeFilter] = useState("all");
+  // Which filter the rows in state belong to. Adjusted during render (React's documented
+  // adjust-state-on-prop-change pattern) so switching type blanks the previous result set
+  // immediately, without a setState inside an effect.
+  const [loadedFilter, setLoadedFilter] = useState(typeFilter);
+  if (loadedFilter !== typeFilter) {
+    setLoadedFilter(typeFilter);
+    setVendors(null);
+  }
+  // Derived, so a background refetch never has to flip a flag on the way in.
+  const loading = vendors === null;
   const [searchQuery, setSearchQuery] = useState("");
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null); // vendor being edited, or null for create
   const [form, setForm] = useState(EMPTY);
   const [docsFor, setDocsFor] = useState(null); // vendor whose documents are open
-  
-  // Hard delete confirmation state
   const [vendorToDelete, setVendorToDelete] = useState(null);
 
   // Rate-request email: the vendor being asked, and the optional note that rides along.
   const [quoteFor, setQuoteFor] = useState(null);
   const [quoteMessage, setQuoteMessage] = useState("");
 
+  /** Re-read after a write, or from the Refresh button. */
   const load = async () => {
-    setLoading(true);
     try {
-      const res = await listVendors(typeFilter === "all" ? {} : { type: typeFilter });
+      const res = await listVendors(
+        typeFilter === "all" ? {} : { type: typeFilter },
+      );
       setVendors(res.data || []);
     } catch (err) {
+      setVendors([]);
       toast.error(err?.message || "Could not load vendors");
-    } finally {
-      setLoading(false);
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [typeFilter]);
-
-  useEffect(() => { if (lockedType) setTypeFilter(lockedType); }, [lockedType]);
+  // The type filter is server-side, so a change refetches. Nothing is set synchronously
+  // here: `vendors` was already blanked during the render that saw the filter change.
+  useEffect(() => {
+    let alive = true;
+    listVendors(typeFilter === "all" ? {} : { type: typeFilter })
+      .then((res) => {
+        if (alive) setVendors(res.data || []);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setVendors([]);
+        toast.error(err?.message || "Could not load vendors");
+      });
+    return () => {
+      alive = false;
+    };
+  }, [typeFilter]);
 
   const filteredVendors = useMemo(() => {
-    if (!searchQuery) return vendors;
-    const q = searchQuery.toLowerCase();
-    return vendors.filter(v => v.name.toLowerCase().includes(q) || v.referenceNo.toLowerCase().includes(q));
+    if (!vendors) return [];
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return vendors;
+    return vendors.filter((v) =>
+      [v.name, v.referenceNo, v.contactName, v.email, v.city, v.country]
+        .filter(Boolean)
+        .some((f) => String(f).toLowerCase().includes(q)),
+    );
   }, [vendors, searchQuery]);
 
   const openCreate = () => {
     setEditing(null);
-    setForm({ ...EMPTY, ...(lockedType ? { type: lockedType } : {}) });
+    setForm(EMPTY);
     setOpen(true);
   };
-  
+
   const openEdit = (v) => {
     setEditing(v);
     setForm({
-      name: v.name ?? "", type: v.type, contactName: v.contactName ?? "", email: v.email ?? "",
-      phone: v.phone ?? "", city: v.city ?? "", country: v.country ?? "", taxId: v.taxId ?? "",
-      paymentTermsDays: v.paymentTermsDays ?? "", currency: v.currency ?? "", 
-      strn: v.strn ?? "", rexNo: v.rexNo ?? "", vatNo: v.vatNo ?? "", 
-      bankName: v.bankName ?? "", bankBranch: v.bankBranch ?? "", iban: v.iban ?? "", 
-      swiftCode: v.swiftCode ?? "", accountTitle: v.accountTitle ?? "", website: v.website ?? "", notes: v.notes ?? "",
+      name: v.name ?? "",
+      type: v.type,
+      contactName: v.contactName ?? "",
+      email: v.email ?? "",
+      phone: v.phone ?? "",
+      city: v.city ?? "",
+      country: v.country ?? "",
+      taxId: v.taxId ?? "",
+      paymentTermsDays: v.paymentTermsDays ?? "",
+      currency: v.currency ?? "",
+      strn: v.strn ?? "",
+      rexNo: v.rexNo ?? "",
+      vatNo: v.vatNo ?? "",
+      bankName: v.bankName ?? "",
+      bankBranch: v.bankBranch ?? "",
+      iban: v.iban ?? "",
+      swiftCode: v.swiftCode ?? "",
+      accountTitle: v.accountTitle ?? "",
+      website: v.website ?? "",
+      notes: v.notes ?? "",
     });
     setOpen(true);
   };
+
+  const set = (key) => (e) =>
+    setForm((p) => ({ ...p, [key]: e.target.value }));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -101,7 +265,10 @@ export default function VendorsListPage({ lockedType }) {
         city: form.city || undefined,
         country: form.country || undefined,
         taxId: form.taxId || undefined,
-        paymentTermsDays: form.paymentTermsDays === "" ? undefined : Number(form.paymentTermsDays),
+        paymentTermsDays:
+          form.paymentTermsDays === ""
+            ? undefined
+            : Number(form.paymentTermsDays),
         currency: form.currency ? form.currency.toUpperCase() : undefined,
         strn: form.strn || undefined,
         rexNo: form.rexNo || undefined,
@@ -114,7 +281,9 @@ export default function VendorsListPage({ lockedType }) {
         website: form.website || undefined,
         notes: form.notes || undefined,
       };
-      const res = editing ? await updateVendor(editing.id, payload) : await createVendor(payload);
+      const res = editing
+        ? await updateVendor(editing.id, payload)
+        : await createVendor(payload);
       toast.success(res?.message || "Saved");
       setOpen(false);
       await load();
@@ -137,7 +306,7 @@ export default function VendorsListPage({ lockedType }) {
       setBusy(false);
     }
   };
-  
+
   const confirmDelete = async () => {
     if (!vendorToDelete) return;
     setBusy(true);
@@ -159,7 +328,8 @@ export default function VendorsListPage({ lockedType }) {
    * unsend — so the address being mailed is shown before it goes.
    */
   const handleGetQuote = (v) => {
-    if (!v.email) return toast.error(`${v.name} has no email address on file — add one first`);
+    if (!v.email)
+      return toast.error(`${v.name} has no email address on file. Add one first.`);
     setQuoteMessage("");
     setQuoteFor(v);
   };
@@ -180,408 +350,633 @@ export default function VendorsListPage({ lockedType }) {
     }
   };
 
-// Per-type chip colour. Keyed on every VendorType, not just the offered ones, so a
-// vendor still filed under a dropped type keeps a readable chip instead of falling
-// through to the neutral one.
-const getTypeColor = (type) => {
-  const colors = {
-    buyer: "bg-rose-700/10 text-rose-700 border-rose-200/60",
-    exporter: "bg-pink-700/10 text-pink-700 border-pink-200/60",
-    bank: "bg-yellow-700/10 text-yellow-700 border-yellow-200/60",
-    ocean_carrier: "bg-teal-700/10 text-teal-700 border-teal-200/60",
-    shipping_line: "bg-cyan-700/10 text-cyan-700 border-cyan-200/60",
-    freight_forwarder: "bg-fuchsia-700/10 text-fuchsia-700 border-fuchsia-200/60",
-    port_terminal: "bg-orange-700/10 text-orange-700 border-orange-200/60",
-    customs_agent: "bg-purple-700/10 text-purple-700 border-purple-200/60",
-    destination_agent: "bg-indigo-700/10 text-indigo-700 border-indigo-200/60",
-    transporter: "bg-blue-700/10 text-blue-700 border-blue-200/60",
-    container_yard: "bg-amber-700/10 text-amber-700 border-amber-200/60",
-    rail_operator: "bg-emerald-700/10 text-emerald-700 border-emerald-200/60",
-    driver: "bg-lime-700/10 text-lime-700 border-lime-200/60",
-    other: "bg-gray-700/10 text-gray-700 border-gray-200/60",
-  };
+  const filtersActive = !!(searchQuery || typeFilter !== "all");
 
-  return colors[type] || colors.other;
-};
   return (
-    <div className="flex-1 flex flex-col min-h-0">
-      {/* Premium Header */}
-      <div className="p-2">
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 max-w-7xl mx-auto">
-          <div className="flex items-center gap-3">
-            <div className="p-3 bg-primary/10 rounded-xl">
-              <Truck className="w-6 h-6 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold tracking-tight">{typeLabel ? `${typeLabel}s` : "Vendor Directory"}</h1>
-              <p className="text-sm text-muted-foreground">
-                {typeLabel
-                  ? `Manage all ${typeLabel.toLowerCase()}s, their terms, and related documents`
-                  : "Central directory of all counterparties involved in shipments"}
-              </p>
-            </div>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <Truck className="h-5 w-5" />
           </div>
+          <div>
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Vendors
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Every counterparty involved in a shipment
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={() => {
+              setVendors(null);
+              load();
+            }}
+            disabled={loading}
+            iconBefore={
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            }
+          >
+            Refresh
+          </Button>
           {canManage && (
-            <Button size="lg" className="gap-2 shadow-sm" onClick={openCreate}>
-              <Plus className="w-5 h-5" /> Add {typeLabel ? typeLabel : "Vendor"}
+            <Button
+              size="sm"
+              className={ACTION_BTN}
+              onClick={openCreate}
+              iconBefore={<Plus className="h-4 w-4" />}
+            >
+              Add Vendor
             </Button>
           )}
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-2 max-w-7xl mx-auto w-full space-y-6">
-        {/* Filters & Search */}
-        <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
-          {!lockedType && (
-            <div className="flex flex-wrap gap-2 flex-1 w-full">
-              <Button 
-                variant={typeFilter === "all" ? "default" : "outline"} 
-                size="sm" 
-                onClick={() => setTypeFilter("all")}
-                className="rounded-full"
-              >
-                All Types
-              </Button>
-              {VENDOR_TYPE_OPTIONS.map((t) => (
+      {/* Filters. Fourteen types is far too many for a pill row, so the type lives in a
+          Select beside the search, on the same baseline as the toolbar above. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          placeholder="Search name, ref, contact or location…"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          prefixIcon={Search}
+          wrapperClassName="min-w-56 flex-1"
+        />
+        <Select
+          size="md"
+          value={typeFilter}
+          onValueChange={setTypeFilter}
+          options={TYPE_FILTER_OPTIONS}
+          placeholder="Type"
+          showCheckIcon={false}
+          searchable
+          className="w-52!"
+          containerClassName="w-52"
+          triggerClassName="h-9"
+        />
+      </div>
+
+      {/* EmptyState brings its own padding and icon sizing, so the Card only supplies
+          the surface. The empty case replaces the table rather than living inside it:
+          TD carries no `colSpan`, so a spanning "nothing here" row is not expressible. */}
+      {!loading && filteredVendors.length === 0 ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<Truck />}
+            title={filtersActive ? "No vendors match" : "No vendors yet"}
+            description={
+              filtersActive
+                ? "Try a different search, or widen the type filter."
+                : "Add the counterparties you book, clear and haul through."
+            }
+            action={
+              !filtersActive && canManage ? (
                 <Button
-                  key={t.value}
-                  variant={typeFilter === t.value ? "default" : "outline"}
                   size="sm"
-                  onClick={() => setTypeFilter(t.value)}
-                  className="rounded-full whitespace-nowrap"
+                  onClick={openCreate}
+                  iconBefore={<Plus className="h-4 w-4" />}
                 >
-                  {t.label}
+                  Add Vendor
                 </Button>
-              ))}
-            </div>
-          )}
-          
-          <div className="relative w-full md:w-72 flex-shrink-0">
-            <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-            <Input 
-              type="text" 
-              placeholder="Search vendors..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-9 bg-background shadow-sm"
-            />
+              ) : undefined
+            }
+          />
+        </Card>
+      ) : (
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "24%" }}>Vendor</TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "15%" }}
+                  >
+                    Type
+                  </TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "18%" }}
+                  >
+                    Contact
+                  </TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "13%" }}
+                  >
+                    Location
+                  </TH>
+                  <TH
+                    className="hidden xl:table-cell"
+                    style={{ ...HEAD_CELL, width: "10%" }}
+                  >
+                    Terms
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "20%", textAlign: "right" }}>
+                    Actions
+                  </TH>
+                </TRow>
+              </THead>
+
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(5)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(6)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
+
+                {/* DATA */}
+                {!loading &&
+                  filteredVendors.map((v) => (
+                    <TRow
+                      key={v.id}
+                      className={`bg-card! ${v.isActive ? "" : "opacity-60"}`}
+                    >
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="truncate font-medium">{v.name}</span>
+                          {!v.isActive && (
+                            <Badge
+                              variant="soft"
+                              size="sm"
+                              text="Inactive"
+                              className={`${CHIP} border-warning/30 bg-warning/10 text-warning`}
+                            />
+                          )}
+                        </div>
+                        <div className="truncate font-mono text-xs text-muted-foreground">
+                          {v.referenceNo}
+                        </div>
+                      </TD>
+
+                      <TD
+                        className="hidden md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <Badge
+                          variant="soft"
+                          size="sm"
+                          text={VENDOR_TYPE_LABELS[v.type] ?? v.type}
+                          className={`${CHIP} ${NEUTRAL_CHIP}`}
+                        />
+                      </TD>
+
+                      <TD
+                        className="hidden lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <div className="truncate">
+                          {v.contactName || "No contact named"}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {v.email || v.phone || "No details"}
+                        </div>
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {[v.city, v.country].filter(Boolean).join(", ") ||
+                          "Not set"}
+                      </TD>
+
+                      <TD
+                        className="hidden xl:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <div className="truncate">
+                          {v.paymentTermsDays != null
+                            ? `${v.paymentTermsDays} days`
+                            : "Not set"}
+                        </div>
+                        {v.currency && (
+                          <div className="truncate text-xs text-muted-foreground">
+                            {v.currency}
+                          </div>
+                        )}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP, textAlign: "right" }}>
+                        <div className="flex min-w-0 items-center justify-end gap-1.5">
+                          <RowAction
+                            title="Documents"
+                            onClick={() => setDocsFor(v)}
+                          >
+                            <Paperclip className="h-4 w-4" />
+                          </RowAction>
+
+                          {canRequestQuote && (
+                            <RowAction
+                              title={
+                                v.email
+                                  ? `Email ${v.email} for rates`
+                                  : "No email address on file"
+                              }
+                              disabled={busy}
+                              onClick={() => handleGetQuote(v)}
+                            >
+                              <MessageSquare className="h-4 w-4" />
+                            </RowAction>
+                          )}
+
+                          {canManage && (
+                            <>
+                              <RowAction
+                                title="Edit vendor"
+                                onClick={() => openEdit(v)}
+                              >
+                                <Pencil className="h-4 w-4" />
+                              </RowAction>
+
+                              {v.isActive && (
+                                <RowAction
+                                  title="Deactivate"
+                                  disabled={busy}
+                                  onClick={() => handleDeactivate(v)}
+                                >
+                                  <Ban className="h-4 w-4" />
+                                </RowAction>
+                              )}
+
+                              <RowAction
+                                title="Delete permanently"
+                                danger
+                                disabled={busy}
+                                onClick={() => setVendorToDelete(v)}
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </RowAction>
+                            </>
+                          )}
+                        </div>
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
           </div>
         </div>
-
-        {/* Content */}
-        {loading ? (
-          <div className="flex flex-col items-center justify-center py-24 text-muted-foreground">
-            <Loader2 className="w-10 h-10 animate-spin mb-4 text-primary/60" />
-            <p>Loading vendor directory...</p>
-          </div>
-        ) : filteredVendors.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-muted-foreground/20 p-16 flex flex-col items-center text-center">
-            <div className="w-16 h-16 bg-muted/50 rounded-full flex items-center justify-center mb-4">
-              <Truck className="w-8 h-8 text-muted-foreground" />
-            </div>
-            <h3 className="text-lg font-medium mb-1">No vendors found</h3>
-            <p className="text-sm text-muted-foreground max-w-sm">
-              {searchQuery ? "Try adjusting your search query." : "Get started by adding a new vendor to the directory."}
-            </p>
-            {!searchQuery && canManage && (
-              <Button onClick={openCreate} variant="outline" className="mt-6">Add Vendor</Button>
-            )}
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            {filteredVendors.map((v) => (
-              <div 
-                key={v.id} 
-                className={`flex flex-col p-5 bg-card border rounded-xl shadow-sm transition-all hover:shadow-md ${!v.isActive ? "opacity-60" : ""}`}
-              >
-                <div className="flex justify-between items-start mb-4">
-                  <div>
-                    <div className="flex items-center gap-2 mb-1.5">
-                      <h3 className="font-semibold text-lg leading-none">{v.name}</h3>
-                      {!v.isActive && <Badge variant="secondary" className="text-[10px] uppercase">Inactive</Badge>}
-                    </div>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <span className="font-mono">{v.referenceNo}</span>
-                      <span>•</span>
-                      {!lockedType && (
-                        <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold capitalize tracking-wider ${getTypeColor(v.type)}`}>
-                          {VENDOR_TYPE_LABELS[v.type] ?? v.type}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-x-4 gap-y-3 mb-6 text-sm flex-1">
-                  <div>
-                    <p className="text-muted-foreground text-xs uppercase tracking-wider mb-0.5">Contact</p>
-                    <p className="truncate" title={v.contactName || v.email || v.phone}>
-                      {v.contactName || v.email || v.phone || "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground text-xs uppercase tracking-wider mb-0.5">Location</p>
-                    <p className="truncate">
-                      {[v.city, v.country].filter(Boolean).join(", ") || "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground text-xs uppercase tracking-wider mb-0.5">Bank / IBAN</p>
-                    <p className="truncate font-mono text-xs mt-0.5" title={v.iban || v.bankName}>
-                      {v.iban ? v.iban : v.bankName ? v.bankName : "—"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-muted-foreground text-xs uppercase tracking-wider mb-0.5">Terms</p>
-                    <p>
-                      {v.paymentTermsDays != null ? `${v.paymentTermsDays} Days` : "—"}
-                      {v.currency && <Badge variant="outline" className="ml-2 px-1 text-[10px]">{v.currency}</Badge>}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center justify-between pt-4 border-t gap-2">
-                  <div className="flex gap-2">
-                    <Button size="sm" variant="secondary" className="h-8 gap-1.5 text-xs font-medium" onClick={() => setDocsFor(v)}>
-                      <Paperclip className="w-3.5 h-3.5" /> Docs
-                    </Button>
-                    {canRequestQuote && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-8 gap-1.5 text-xs font-medium text-white bg-primary! border-none hover:text-white hover:bg-primary/90"
-                        onClick={() => handleGetQuote(v)}
-                        title={v.email ? `Email ${v.email} for rates` : "No email address on file"}
-                      >
-                        <MessageSquare className="w-3.5 h-3.5" /> Quote
-                      </Button>
-                    )}
-                  </div>
-                  {canManage && (
-                    <div className="flex gap-1.5">
-                      <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => openEdit(v)} title="Edit">
-                        <Pencil className="w-4 h-4 text-muted-foreground" />
-                      </Button>
-                      {v.isActive ? (
-                        <Button size="sm" variant="ghost" className="h-8 w-8 p-0 hover:text-amber-600 hover:bg-amber-50" disabled={busy} onClick={() => handleDeactivate(v)} title="Deactivate">
-                          <Ban className="w-4 h-4" />
-                        </Button>
-                      ) : null}
-                      <Button size="sm" variant="ghost" className="h-8 w-8 p-0 hover:text-destructive hover:bg-destructive/10" disabled={busy} onClick={() => setVendorToDelete(v)} title="Delete">
-                        <Trash2 className="w-4 h-4 text-muted-foreground hover:text-destructive" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      )}
 
       {/* Rate-request email — confirm before it leaves, since there is no unsend. */}
-      <Dialog open={!!quoteFor} onOpenChange={(v) => !v && !busy && setQuoteFor(null)}>
-        <DialogContent size="md">
-          <DialogHeader>
-            <DialogTitle>Request rates from {quoteFor?.name}</DialogTitle>
-            <DialogDescription>
-              An email goes to <strong>{quoteFor?.email}</strong>. Replies come back to you, not to
-              the shared mailbox.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-2 py-2">
-            <Label htmlFor="v-quote-msg">Add a note (optional)</Label>
-            <Input
-              id="v-quote-msg"
-              value={quoteMessage}
-              onChange={(e) => setQuoteMessage(e.target.value)}
-              placeholder="e.g. Karachi → Antwerp, 1x40HC, ready 12 Oct"
-              disabled={busy}
-              autoFocus
+      {quoteFor && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setQuoteFor(null)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent maxWidth="max-w-md">
+            <ModalHeader
+              title={`Request rates from ${quoteFor.name}`}
+              onClose={() => !busy && setQuoteFor(null)}
             />
-            <p className="text-xs text-muted-foreground">
-              Included in the vendor's copy above the sign-off. Leave blank to send the standard request.
-            </p>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setQuoteFor(null)} disabled={busy}>Cancel</Button>
-            <Button onClick={sendQuoteRequest} disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />}
-              Send request
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Delete Confirmation Dialog */}
-      <Dialog open={!!vendorToDelete} onOpenChange={(v) => !v && setVendorToDelete(null)}>
-        <DialogContent size="sm">
-          <DialogHeader>
-            <DialogTitle>Delete Vendor</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to permanently delete <strong>{vendorToDelete?.name}</strong>? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className="mt-4">
-            <Button variant="outline" onClick={() => setVendorToDelete(null)} disabled={busy}>Cancel</Button>
-            <Button variant="destructive" onClick={confirmDelete} disabled={busy} className="gap-2">
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />} Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Create / edit dialog */}
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent size="xl" className="max-h-[90vh] flex flex-col p-0 overflow-hidden bg-background">
-          <DialogHeader className="px-6 py-4 border-b bg-muted/30">
-            <DialogTitle className="text-xl">{editing ? "Edit Vendor Profile" : "Create New Vendor"}</DialogTitle>
-            <DialogDescription>Complete the counterparty details below for the directory.</DialogDescription>
-          </DialogHeader>
-          <form onSubmit={submit} className="flex-1 min-h-0 flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-6 scrollbar-thin">
-              <div className="space-y-8 max-w-4xl mx-auto">
-                
-                {/* Section: Basic Info */}
-                <div>
-                  <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 border-b pb-2">Basic Info</h4>
-                  <div className={lockedType ? "grid grid-cols-1 gap-4" : "grid grid-cols-1 sm:grid-cols-2 gap-4"}>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-name">Vendor Name <span className="text-destructive">*</span></Label>
-                      <Input id="v-name" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="e.g. Agilent Freight Services" className="bg-background" />
-                    </div>
-                    {!lockedType && (
-                      <div className="space-y-2">
-                        <Label>Type</Label>
-                        {/* Editing a vendor filed under a dropped type keeps that type in
-                            the list, so opening the form cannot silently rewrite it. */}
-                        <Select value={form.type} onValueChange={(v) => setForm((p) => ({ ...p, type: v }))}>
-                          <SelectTrigger className="w-full bg-background"><SelectValue /></SelectTrigger>
-                          <SelectContent>{vendorTypeOptionsFor(editing?.type).map((t) => <SelectItem key={t.value} value={t.value}>{t.label}</SelectItem>)}</SelectContent>
-                        </Select>
-                      </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* Section: Contact & Location */}
-                <div>
-                  <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 border-b pb-2">Contact & Location</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-contact">Primary Contact</Label>
-                      <Input id="v-contact" value={form.contactName} onChange={(e) => setForm((p) => ({ ...p, contactName: e.target.value }))} placeholder="e.g. John Doe" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-email">Email Address <span className="text-destructive">*</span></Label>
-                      <Input id="v-email" type="email" value={form.email} onChange={(e) => setForm((p) => ({ ...p, email: e.target.value }))} placeholder="e.g. contact@example.com" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-phone">Phone Number <span className="text-destructive">*</span></Label>
-                      <Input id="v-phone" value={form.phone} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="e.g. +92 300 1234567" className="bg-background" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-address">Address</Label>
-                      <Input id="v-address" value={form.city} onChange={(e) => setForm((p) => ({ ...p, city: e.target.value }))} placeholder="City, Area..." className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-country">Country</Label>
-                      <Input id="v-country" value={form.country} onChange={(e) => setForm((p) => ({ ...p, country: e.target.value }))} placeholder="PK" className="bg-background" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section: Registration & Financial */}
-                <div>
-                  <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 border-b pb-2">Registration & Terms</h4>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-tax">Tax ID (NTN)</Label>
-                      <Input id="v-tax" value={form.taxId} onChange={(e) => setForm((p) => ({ ...p, taxId: e.target.value }))} placeholder="e.g. 1234567-8" className="bg-background font-mono text-sm" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-strn">STRN</Label>
-                      <Input id="v-strn" value={form.strn} onChange={(e) => setForm((p) => ({ ...p, strn: e.target.value }))} placeholder="e.g. 12-00-9805" className="bg-background font-mono text-sm" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-rex">REX No.</Label>
-                      <Input id="v-rex" value={form.rexNo} onChange={(e) => setForm((p) => ({ ...p, rexNo: e.target.value }))} placeholder="e.g. PKREX..." className="bg-background font-mono text-sm" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-vat">VAT / TVA No.</Label>
-                      <Input id="v-vat" value={form.vatNo} onChange={(e) => setForm((p) => ({ ...p, vatNo: e.target.value }))} placeholder="e.g. FR029..." className="bg-background font-mono text-sm" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-terms">Payment Terms (Days)</Label>
-                      <Input id="v-terms" type="number" min="0" value={form.paymentTermsDays} onChange={(e) => setForm((p) => ({ ...p, paymentTermsDays: e.target.value }))} placeholder="e.g. 30" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-ccy">Default Currency</Label>
-                      <Input id="v-ccy" maxLength={3} value={form.currency} onChange={(e) => setForm((p) => ({ ...p, currency: e.target.value }))} placeholder={DEFAULT_CURRENCY} className="bg-background uppercase" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section: Banking */}
-                <div>
-                  <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 border-b pb-2">Banking Details</h4>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-bank-name">Bank Name</Label>
-                      <Input id="v-bank-name" value={form.bankName} onChange={(e) => setForm((p) => ({ ...p, bankName: e.target.value }))} placeholder="e.g. Meezan Bank" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-bank-branch">Branch</Label>
-                      <Input id="v-bank-branch" value={form.bankBranch} onChange={(e) => setForm((p) => ({ ...p, bankBranch: e.target.value }))} placeholder="e.g. Jail Road" className="bg-background" />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-account-title">Account Title</Label>
-                      <Input id="v-account-title" value={form.accountTitle} onChange={(e) => setForm((p) => ({ ...p, accountTitle: e.target.value }))} placeholder="e.g. Agilent Freight" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-iban">IBAN / Account No.</Label>
-                      <Input id="v-iban" value={form.iban} onChange={(e) => setForm((p) => ({ ...p, iban: e.target.value }))} placeholder="e.g. PK11MEZN..." className="bg-background font-mono text-sm" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-swift">SWIFT Code</Label>
-                      <Input id="v-swift" value={form.swiftCode} onChange={(e) => setForm((p) => ({ ...p, swiftCode: e.target.value }))} placeholder="e.g. MEZNPKKA" className="bg-background font-mono text-sm uppercase" />
-                    </div>
-                  </div>
-                </div>
-
-                {/* Section: Other */}
-                <div>
-                  <h4 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground mb-4 border-b pb-2">Additional</h4>
-                  <div className="space-y-4">
-                    <div className="space-y-2">
-                      <Label htmlFor="v-website">Website</Label>
-                      <Input id="v-website" type="url" value={form.website} onChange={(e) => setForm((p) => ({ ...p, website: e.target.value }))} placeholder="https://" className="bg-background" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="v-notes">Internal Notes</Label>
-                      <Input id="v-notes" value={form.notes} onChange={(e) => setForm((p) => ({ ...p, notes: e.target.value }))} placeholder="Any additional details..." className="bg-background" />
-                    </div>
-                  </div>
-                </div>
-
-              </div>
-            </div>
-
-            <DialogFooter className="px-6 py-4 border-t bg-muted/30">
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={busy} className="gap-2 px-6">
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} {editing ? "Save Changes" : "Create Vendor"}
+            <ModalBody className="space-y-4">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                An email goes to{" "}
+                <b className="text-foreground">{quoteFor.email}</b>. Replies come
+                back to you, not to the shared mailbox.
+              </p>
+              <Input
+                id="v-quote-msg"
+                label="Add a note (optional)"
+                value={quoteMessage}
+                onChange={(e) => setQuoteMessage(e.target.value)}
+                placeholder="e.g. Karachi to Antwerp, 1x40HC, ready 12 Oct"
+                disabled={busy}
+                helperText="Included in the vendor's copy above the sign-off. Leave blank to send the standard request."
+              />
+            </ModalBody>
+            <ModalFooter>
+              <Button
+                variant="outline"
+                onClick={() => setQuoteFor(null)}
+                disabled={busy}
+              >
+                Cancel
               </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+              <Button
+                onClick={sendQuoteRequest}
+                disabled={busy}
+                loading={busy}
+                loadingText="Sending…"
+                iconBefore={<MessageSquare className="h-4 w-4" />}
+              >
+                Send request
+              </Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+      )}
+
+      {/* Delete confirmation */}
+      {vendorToDelete && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setVendorToDelete(null)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent maxWidth="max-w-md">
+            <ModalHeader
+              title="Delete Vendor"
+              onClose={() => !busy && setVendorToDelete(null)}
+            />
+            <ModalBody>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Permanently delete{" "}
+                <b className="text-foreground">{vendorToDelete.name}</b>? This
+                cannot be undone. Deactivating keeps the record and its history
+                instead.
+              </p>
+            </ModalBody>
+            <ModalFooter>
+              <Button
+                variant="outline"
+                onClick={() => setVendorToDelete(null)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                onClick={confirmDelete}
+                disabled={busy}
+                loading={busy}
+                loadingText="Deleting…"
+                iconBefore={<Trash2 className="h-4 w-4" />}
+              >
+                Delete
+              </Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+      )}
+
+      {/* Create / edit */}
+      {open && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setOpen(false)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent
+            maxWidth="max-w-3xl"
+            className="flex max-h-[90vh] flex-col"
+          >
+            <form onSubmit={submit} className="flex min-h-0 flex-col">
+              <ModalHeader
+                title={editing ? "Edit Vendor Profile" : "Create New Vendor"}
+                onClose={() => !busy && setOpen(false)}
+              />
+
+              <ModalBody className="min-h-0 flex-1 space-y-6 overflow-y-auto">
+                <FormSection title="Basic info">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Input
+                      id="v-name"
+                      label="Vendor name"
+                      required
+                      value={form.name}
+                      onChange={set("name")}
+                      placeholder="e.g. Agilent Freight Services"
+                      disabled={busy}
+                    />
+                    {/* Editing a vendor filed under a dropped type keeps that type in
+                        the list, so opening the form cannot silently rewrite it. */}
+                    <Select
+                      label="Type"
+                      value={form.type}
+                      onValueChange={(v) => setForm((p) => ({ ...p, type: v }))}
+                      options={vendorTypeOptionsFor(editing?.type)}
+                      searchable
+                      disabled={busy}
+                    />
+                  </div>
+                </FormSection>
+
+                <FormSection title="Contact and location">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <Input
+                      id="v-contact"
+                      label="Primary contact"
+                      value={form.contactName}
+                      onChange={set("contactName")}
+                      placeholder="e.g. John Doe"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-email"
+                      type="email"
+                      label="Email address"
+                      required
+                      value={form.email}
+                      onChange={set("email")}
+                      placeholder="e.g. contact@example.com"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-phone"
+                      label="Phone number"
+                      required
+                      value={form.phone}
+                      onChange={set("phone")}
+                      placeholder="e.g. +92 300 1234567"
+                      disabled={busy}
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Input
+                      id="v-city"
+                      label="City"
+                      value={form.city}
+                      onChange={set("city")}
+                      placeholder="City, area…"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-country"
+                      label="Country"
+                      value={form.country}
+                      onChange={set("country")}
+                      placeholder="PK"
+                      disabled={busy}
+                    />
+                  </div>
+                </FormSection>
+
+                <FormSection title="Registration and terms">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <Input
+                      id="v-tax"
+                      label="Tax ID (NTN)"
+                      value={form.taxId}
+                      onChange={set("taxId")}
+                      placeholder="e.g. 1234567-8"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-strn"
+                      label="STRN"
+                      value={form.strn}
+                      onChange={set("strn")}
+                      placeholder="e.g. 12-00-9805"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-rex"
+                      label="REX No."
+                      value={form.rexNo}
+                      onChange={set("rexNo")}
+                      placeholder="e.g. PKREX…"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-vat"
+                      label="VAT / TVA No."
+                      value={form.vatNo}
+                      onChange={set("vatNo")}
+                      placeholder="e.g. FR029…"
+                      disabled={busy}
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Input
+                      id="v-terms"
+                      type="number"
+                      label="Payment terms (days)"
+                      min={0}
+                      value={String(form.paymentTermsDays)}
+                      onChange={set("paymentTermsDays")}
+                      placeholder="e.g. 30"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-ccy"
+                      label="Default currency"
+                      maxLength={3}
+                      value={form.currency}
+                      onChange={(e) =>
+                        setForm((p) => ({
+                          ...p,
+                          currency: e.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder={DEFAULT_CURRENCY}
+                      disabled={busy}
+                    />
+                  </div>
+                </FormSection>
+
+                <FormSection title="Banking details">
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    <Input
+                      id="v-bank-name"
+                      label="Bank name"
+                      value={form.bankName}
+                      onChange={set("bankName")}
+                      placeholder="e.g. Meezan Bank"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-bank-branch"
+                      label="Branch"
+                      value={form.bankBranch}
+                      onChange={set("bankBranch")}
+                      placeholder="e.g. Jail Road"
+                      disabled={busy}
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                    <Input
+                      id="v-account-title"
+                      label="Account title"
+                      value={form.accountTitle}
+                      onChange={set("accountTitle")}
+                      placeholder="e.g. Agilent Freight"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-iban"
+                      label="IBAN / account no."
+                      value={form.iban}
+                      onChange={set("iban")}
+                      placeholder="e.g. PK11MEZN…"
+                      disabled={busy}
+                    />
+                    <Input
+                      id="v-swift"
+                      label="SWIFT code"
+                      value={form.swiftCode}
+                      onChange={(e) =>
+                        setForm((p) => ({
+                          ...p,
+                          swiftCode: e.target.value.toUpperCase(),
+                        }))
+                      }
+                      placeholder="e.g. MEZNPKKA"
+                      disabled={busy}
+                    />
+                  </div>
+                </FormSection>
+
+                <FormSection title="Additional">
+                  <Input
+                    id="v-website"
+                    type="url"
+                    label="Website"
+                    value={form.website}
+                    onChange={set("website")}
+                    placeholder="https://"
+                    disabled={busy}
+                  />
+                  <Input
+                    id="v-notes"
+                    label="Internal notes"
+                    value={form.notes}
+                    onChange={set("notes")}
+                    placeholder="Anything the desk should know"
+                    disabled={busy}
+                  />
+                </FormSection>
+              </ModalBody>
+
+              <ModalFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setOpen(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={busy}
+                  loading={busy}
+                  loadingText="Saving…"
+                >
+                  {editing ? "Save Changes" : "Create Vendor"}
+                </Button>
+              </ModalFooter>
+            </form>
+          </ModalContent>
+        </Modal>
+      )}
 
       <DocumentsDialog
         open={!!docsFor}

@@ -214,7 +214,7 @@ const DocumentsPanel = ({ ownerType, ownerId, showRequired = false, portal = fal
   const anyMissing = checklist.some((s) => s.missing.length > 0);
 
   return (
-    <div className={bare ? "space-y-4 min-w-0" : "border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5 space-y-4"}>
+    <div className={bare ? "space-y-4 min-w-0" : "border border-border rounded-xl bg-card shadow-sm p-5 space-y-4"}>
       {!bare && <h2 className="font-semibold flex items-center gap-2"><FileText className="w-4 h-4" /> Documents</h2>}
 
       {/* Required-doc checklist (RULE-SH-06) */}

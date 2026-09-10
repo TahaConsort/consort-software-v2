@@ -1,30 +1,74 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Handshake, Search, RefreshCw, AlertCircle, Globe, Loader2, Copy, UserPlus, FileSearch } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from "@/components/ui/dialog";
+  Handshake,
+  Search,
+  RefreshCw,
+  Globe,
+  Copy,
+  UserPlus,
+  FileSearch,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  EmptyState,
+  IconButton,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  Skeleton,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+  Tooltip,
+} from "@neuctra/ui";
 import toast from "react-hot-toast";
 import { useCustomerStore } from "@/store/customerStore";
 import { useAuthStore } from "@/store/authStore";
 import { isManagement, hasAnyRole } from "@/lib/roles";
 import { LeadSourceBadge } from "../LeadsPages/LeadComponents/leadBadges";
+import { CHIP, NEUTRAL_CHIP } from "../LeadsPages/LeadComponents/leadLabels";
 
-const SkeletonRow = () => (
-  <tr className="border-t animate-pulse">
-    {[...Array(6)].map((_, i) => (
-      <td key={i} className="p-3"><div className="h-4 bg-muted rounded w-3/4" /></td>
-    ))}
-  </tr>
+/** One 36px baseline across the toolbar and the row actions. */
+const ACTION_BTN = "h-9 px-3";
+const ACTION_ICON_BTN = "h-9 w-9 shrink-0 p-0";
+
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order — `style` is the only
+ * deterministic route.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+/** Icon-only row action, so two controls fit the column without wrapping. */
+const RowAction = ({ title, onClick, disabled, children }) => (
+  <Tooltip content={title}>
+    <span className="inline-flex shrink-0">
+      <IconButton
+        variant="ghost"
+        className={`${ACTION_ICON_BTN} text-muted-foreground hover:text-foreground`}
+        aria-label={title}
+        disabled={disabled}
+        onClick={onClick}
+        icon={children}
+      />
+    </span>
+  </Tooltip>
 );
 
 /**
@@ -43,130 +87,220 @@ const CustomersListPage = () => {
   const [portalForId, setPortalForId] = useState(null);
   const portalFor = customers.find((c) => c.id === portalForId) ?? null;
 
-  useEffect(() => { fetchCustomers(); }, [fetchCustomers]);
+  useEffect(() => {
+    fetchCustomers();
+  }, [fetchCustomers]);
 
-  const canProvision = isManagement(currentUser) || hasAnyRole(currentUser, ["asm"]);
+  const canProvision =
+    isManagement(currentUser) || hasAnyRole(currentUser, ["asm"]);
 
-  const filtered = customers.filter(
-    (c) =>
-      c.referenceNo?.toLowerCase().includes(search.toLowerCase()) ||
-      c.companyName?.toLowerCase().includes(search.toLowerCase()),
-  );
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? customers.filter((c) =>
+        [c.referenceNo, c.companyName]
+          .filter(Boolean)
+          .some((f) => String(f).toLowerCase().includes(q)),
+      )
+    : customers;
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-primary/10 text-primary"><Handshake className="w-5 h-5" /></div>
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <Handshake className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl leading-none font-semibold">Customers</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Converted from qualified leads — one per company
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Customers
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Converted from qualified leads, one per company
             </p>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={fetchCustomers} disabled={loading} className="gap-2">
-          <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className={ACTION_BTN}
+          onClick={fetchCustomers}
+          disabled={loading}
+          iconBefore={
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          }
+        >
           Refresh
         </Button>
       </div>
 
-      {/* Search */}
-      <div className="flex items-center gap-2 border rounded-xl px-3 h-10 bg-white dark:bg-zinc-900 shadow-sm focus-within:ring-2 focus-within:ring-primary/30 transition-all">
-        <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-        <Input
-          placeholder="Search by CST ref or company…"
-          className="border-0 shadow-none focus-visible:ring-0 h-full bg-transparent px-0"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-      </div>
+      <Input
+        placeholder="Search by CST ref or company…"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        prefixIcon={Search}
+        wrapperClassName="w-full"
+      />
 
-      {/* Error */}
       {error && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <p className="text-sm font-medium flex-1">{error}</p>
-          <Button variant="outline" size="sm" onClick={fetchCustomers} className="border-destructive/50 text-destructive hover:bg-destructive/10">Retry</Button>
+        <Callout type="error" title="Couldn't load the customers">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={fetchCustomers}>
+              Retry
+            </Button>
+          </div>
+        </Callout>
+      )}
+
+      {/* EmptyState brings its own padding and icon sizing, so the Card only supplies
+          the surface. The empty case replaces the table rather than living inside it:
+          TD carries no `colSpan`, so a spanning "nothing here" row is not expressible. */}
+      {!loading && filtered.length === 0 && !error ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<Handshake />}
+            title={search ? "No customers match" : "No customers yet"}
+            description={
+              search
+                ? "Try a different reference or company name."
+                : "A customer appears here the moment a qualified lead is converted."
+            }
+          />
+        </Card>
+      ) : (
+        /* Table renders its own surface, plus overflow-x-auto from `responsive`.
+           Wrapping it in a Card would nest a second border at a smaller radius. */
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "15%" }}>Ref</TH>
+                  <TH style={{ ...HEAD_CELL, width: "28%" }}>Company</TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    Source
+                  </TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "18%" }}
+                  >
+                    Assigned BDO
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "12%" }}>Portal</TH>
+                  <TH style={{ ...HEAD_CELL, width: "15%", textAlign: "right" }}>
+                    Actions
+                  </TH>
+                </TRow>
+              </THead>
+
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(4)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(6)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
+
+                {/* DATA */}
+                {!loading &&
+                  filtered.map((c) => (
+                    <TRow key={c.id} className="bg-card!">
+                      <TD
+                        className="truncate font-medium text-primary"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {c.referenceNo}
+                      </TD>
+
+                      <TD
+                        className="truncate font-medium"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {c.companyName}
+                      </TD>
+
+                      <TD
+                        className="hidden sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <LeadSourceBadge source={c.source} />
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {c.assignedBdoName ?? "Unassigned"}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        {c.portalUsers?.length ? (
+                          <Badge
+                            variant="soft"
+                            size="sm"
+                            text={String(c.portalUsers.length)}
+                            icon={<Globe className="h-3 w-3" />}
+                            className={`${CHIP} border-success/30 bg-success/10 text-success`}
+                          />
+                        ) : (
+                          <Badge
+                            variant="soft"
+                            size="sm"
+                            text="None"
+                            className={`${CHIP} ${NEUTRAL_CHIP}`}
+                          />
+                        )}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP, textAlign: "right" }}>
+                        <div className="flex min-w-0 items-center justify-end gap-1.5">
+                          {hasPermission("query.create") && c.isActive && (
+                            <RowAction
+                              title="Raise a query for this customer"
+                              onClick={() =>
+                                navigate("/admin/queries", {
+                                  state: { customerId: c.id },
+                                })
+                              }
+                            >
+                              <FileSearch className="h-4 w-4" />
+                            </RowAction>
+                          )}
+                          {canProvision && c.isActive && (
+                            <RowAction
+                              title="Provision a portal user"
+                              onClick={() => setPortalForId(c.id)}
+                            >
+                              <UserPlus className="h-4 w-4" />
+                            </RowAction>
+                          )}
+                        </div>
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
         </div>
       )}
 
-      {/* Table */}
-      <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-left border-b">
-            <tr>
-              <th className="p-3 font-semibold text-muted-foreground">Ref</th>
-              <th className="p-3 font-semibold text-muted-foreground">Company</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden sm:table-cell">Source</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden md:table-cell">Assigned BDO</th>
-              <th className="p-3 font-semibold text-muted-foreground">Portal</th>
-              <th className="p-3 font-semibold text-muted-foreground text-right">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && <><SkeletonRow /><SkeletonRow /><SkeletonRow /></>}
-
-            {!loading && filtered.map((c) => (
-              <tr key={c.id} className="border-t hover:bg-muted/30 transition-colors group">
-                <td className="p-3 font-medium text-primary">{c.referenceNo}</td>
-                <td className="p-3 font-medium">{c.companyName}</td>
-                <td className="p-3 hidden sm:table-cell"><LeadSourceBadge source={c.source} /></td>
-                <td className="p-3 text-muted-foreground hidden md:table-cell">{c.assignedBdoName ?? "—"}</td>
-                <td className="p-3">
-                  {c.portalUsers?.length ? (
-                    <Badge variant="outline" className="border-green-500 text-green-600 bg-green-50 dark:bg-green-950/30 gap-1">
-                      <Globe className="w-3 h-3" /> {c.portalUsers.length}
-                    </Badge>
-                  ) : (
-                    <Badge variant="secondary">None</Badge>
-                  )}
-                </td>
-                <td className="p-3 text-right">
-                  <div className="flex items-center justify-end gap-1 opacity-70 group-hover:opacity-100 transition-opacity">
-                    {hasPermission("query.create") && c.isActive && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-8 px-2.5 text-xs gap-1.5 hover:bg-primary/10 hover:text-primary"
-                        onClick={() => navigate("/admin/queries", { state: { customerId: c.id } })}
-                      >
-                        <FileSearch className="w-3.5 h-3.5" /> New Query
-                      </Button>
-                    )}
-                    {canProvision && c.isActive && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-8 px-2.5 text-xs gap-1.5 hover:bg-primary/10 hover:text-primary"
-                        onClick={() => setPortalForId(c.id)}
-                      >
-                        <UserPlus className="w-3.5 h-3.5" /> Portal User
-                      </Button>
-                    )}
-                  </div>
-                </td>
-              </tr>
-            ))}
-
-            {!loading && filtered.length === 0 && !error && (
-              <tr>
-                <td colSpan="6" className="p-10 text-center">
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                    <Handshake className="w-8 h-8 opacity-30" />
-                    <p className="font-medium">
-                      {search ? "No customers match" : "No customers yet — convert a qualified lead"}
-                    </p>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <PortalUserModal customer={portalFor} onClose={() => setPortalForId(null)} />
+      {portalFor && (
+        <PortalUserModal
+          customer={portalFor}
+          onClose={() => setPortalForId(null)}
+        />
+      )}
     </div>
   );
 };
@@ -180,7 +314,11 @@ const PortalUserModal = ({ customer, onClose }) => {
   const [busy, setBusy] = useState(false);
   const [link, setLink] = useState(null);
 
-  const reset = () => { setEmail(""); setLink(null); onClose(); };
+  const reset = () => {
+    setEmail("");
+    setLink(null);
+    onClose();
+  };
 
   const submit = async (e) => {
     e.preventDefault();
@@ -189,7 +327,9 @@ const PortalUserModal = ({ customer, onClose }) => {
       const res = await createPortalUser(customer.id, email);
       toast.success("Portal user created");
       if (res.devActivationToken) {
-        setLink(`${window.location.origin}/activate?token=${res.devActivationToken}`);
+        setLink(
+          `${window.location.origin}/activate?token=${res.devActivationToken}`,
+        );
       } else {
         reset();
       }
@@ -203,58 +343,88 @@ const PortalUserModal = ({ customer, onClose }) => {
   };
 
   return (
-    <Dialog open={!!customer} onOpenChange={(v) => !v && !busy && reset()}>
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
-          <DialogTitle>Provision Portal User</DialogTitle>
-          <DialogDescription>
-            Creates a portal login for <b>{customer?.companyName}</b>. They set their
-            password via the activation link and see only their own shipments.
-          </DialogDescription>
-        </DialogHeader>
+    <Modal isOpen onClose={() => !busy && reset()} disableOverlayClose={busy}>
+      <ModalContent maxWidth="max-w-md">
+        <ModalHeader
+          title="Provision Portal User"
+          onClose={() => !busy && reset()}
+        />
 
         {link ? (
-          <div className="space-y-4 py-2">
-            <p className="text-sm">Share this activation link:</p>
-            <div className="flex items-center gap-2">
-              <Input readOnly value={link} className="text-xs" />
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                onClick={() => { navigator.clipboard?.writeText(link); toast.success("Copied"); }}
-              >
-                <Copy className="w-4 h-4" />
-              </Button>
-            </div>
-            <DialogFooter>
+          <>
+            <ModalBody className="space-y-3">
+              <Callout type="success" title="The login is ready">
+                Share this activation link with {customer.companyName}. They set
+                their own password from it.
+              </Callout>
+              <div className="flex items-center gap-2">
+                <Input
+                  readOnly
+                  value={link}
+                  wrapperClassName="min-w-0 flex-1"
+                />
+                <Tooltip content="Copy the link">
+                  <span className="inline-flex shrink-0">
+                    <IconButton
+                      variant="outline"
+                      aria-label="Copy the activation link"
+                      icon={<Copy className="h-4 w-4" />}
+                      onClick={() => {
+                        navigator.clipboard?.writeText(link);
+                        toast.success("Copied");
+                      }}
+                    />
+                  </span>
+                </Tooltip>
+              </div>
+            </ModalBody>
+            <ModalFooter>
               <Button onClick={reset}>Done</Button>
-            </DialogFooter>
-          </div>
+            </ModalFooter>
+          </>
         ) : (
-          <form onSubmit={submit} className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="portal-email">Email</Label>
+          <form onSubmit={submit}>
+            <ModalBody className="space-y-4">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Creates a portal login for{" "}
+                <b className="text-foreground">{customer.companyName}</b>. They
+                set their password via the activation link and see only their own
+                shipments.
+              </p>
               <Input
                 id="portal-email"
                 type="email"
+                label="Email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="customer@company.com"
                 required
+                disabled={busy}
               />
-            </div>
-            <DialogFooter className="gap-2">
-              <Button type="button" variant="outline" onClick={reset} disabled={busy}>Cancel</Button>
-              <Button type="submit" disabled={busy} className="gap-2">
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
+            </ModalBody>
+            <ModalFooter>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={reset}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={busy}
+                loading={busy}
+                loadingText="Creating…"
+                iconBefore={<UserPlus className="h-4 w-4" />}
+              >
                 Create
               </Button>
-            </DialogFooter>
+            </ModalFooter>
           </form>
         )}
-      </DialogContent>
-    </Dialog>
+      </ModalContent>
+    </Modal>
   );
 };
 

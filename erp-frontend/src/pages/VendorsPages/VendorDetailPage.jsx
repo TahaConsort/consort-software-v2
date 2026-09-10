@@ -1,28 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Loader2, AlertCircle, Building2, FileText, Landmark, Receipt } from "lucide-react";
+import { ArrowLeft, Loader2, AlertCircle, Building2, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useAuthStore } from "@/store/authStore";
 import DocumentsPanel from "@/components/DocumentsPanel";
-import { VENDOR_TYPE_LABELS, FI_STATUS_LABELS, FI_STATUS_CLASS, labelForTradeStage } from "@/lib/catalog";
+import { VENDOR_TYPE_LABELS } from "@/lib/catalog";
 import { getVendor } from "@/services/vendorService";
-import * as tradeService from "@/services/tradeService";
 
 /**
  * One party in the directory, and everything it has touched.
  *
  * The roadmap's §2 directory is only half the answer — the useful question on a vendor
- * is "what has this company done for us", which spans its contracts, the bank
- * instruments it holds, and the shipments it appears on. `Vendor.type` is shown as what
- * it is: a default hint, not the role it plays on any given job.
+ * is "what has this company done for us", which is its profile and its documents.
+ * `Vendor.type` is shown as what it is: a default hint, not the role it plays on any
+ * given job.
  */
-
-const money = (n, ccy) =>
-  n == null
-    ? "—"
-    : `${ccy ?? ""} ${Number(n).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`.trim();
-const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—");
 
 /**
  * `required` marks the two fields every vendor must now carry (email and phone). Rows
@@ -45,12 +37,8 @@ const Fact = ({ label, value, required }) => (
 const VendorDetailPage = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const hasPermission = useAuthStore((s) => s.hasPermission);
-  const canTrade = hasPermission("trade.read");
 
   const [vendor, setVendor] = useState(null);
-  const [contracts, setContracts] = useState([]);
-  const [instruments, setInstruments] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState("profile");
@@ -61,23 +49,13 @@ const VendorDetailPage = () => {
         const v = await getVendor(id);
         if (!alive()) return;
         setVendor(v.data);
-        // Best-effort: a role without trade.read simply sees the profile and documents.
-        if (canTrade) {
-          const [c, f] = await Promise.all([
-            tradeService.listContracts({ vendorId: id }).catch(() => ({ data: [] })),
-            tradeService.listInstruments({ vendorId: id }).catch(() => ({ data: [] })),
-          ]);
-          if (!alive()) return;
-          setContracts(c.data ?? []);
-          setInstruments(f.data ?? []);
-        }
       } catch (err) {
         if (alive()) setError(err?.message || "Vendor not found");
       } finally {
         if (alive()) setLoading(false);
       }
     },
-    [id, canTrade],
+    [id],
   );
 
   useEffect(() => {
@@ -111,12 +89,8 @@ const VendorDetailPage = () => {
     );
   }
 
-  // Every shipment this party appears on, through the instruments it holds.
-  const shipments = instruments.flatMap((f) => (f.shipments ?? []).map((s) => ({ ...s, via: f.fiNumber })));
-
   const TABS = [
     { key: "profile", label: "Profile", icon: Building2 },
-    ...(canTrade ? [{ key: "trade", label: "Contracts & Instruments", icon: Landmark }] : []),
     { key: "documents", label: "Documents", icon: FileText },
   ];
 
@@ -203,82 +177,6 @@ const VendorDetailPage = () => {
               <p className="text-sm text-muted-foreground whitespace-pre-wrap">{vendor.notes}</p>
             </div>
           )}
-        </div>
-      )}
-
-      {tab === "trade" && (
-        <div className="space-y-4">
-          <div className="border rounded-xl p-4">
-            <p className="text-xs font-semibold mb-3 flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5" /> Contracts
-            </p>
-            {contracts.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No contracts against this party.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {contracts.map((c) => (
-                  <li key={c.id} className="flex items-center justify-between gap-2 text-sm border-b last:border-0 py-1.5">
-                    <span className="truncate">
-                      <span className="font-medium">{c.contractNo}</span>
-                      <span className="text-muted-foreground"> · {fmtDate(c.contractDate)}</span>
-                    </span>
-                    <span className="text-muted-foreground shrink-0">{money(c.totalValue, c.currency)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="border rounded-xl p-4">
-            <p className="text-xs font-semibold mb-3 flex items-center gap-1.5">
-              <Landmark className="w-3.5 h-3.5" /> Financial instruments
-            </p>
-            {instruments.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No instruments registered for this party.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {instruments.map((f) => (
-                  <li key={f.id} className="flex items-center justify-between gap-2 text-sm border-b last:border-0 py-1.5">
-                    <span className="truncate">
-                      <span className="font-medium">{f.fiNumber}</span>
-                      <span className="text-muted-foreground"> · expires {fmtDate(f.expiryDate)}</span>
-                    </span>
-                    <span className="flex items-center gap-2 shrink-0">
-                      <span className="text-muted-foreground">{money(f.value, f.currency)}</span>
-                      <Badge variant="outline" className={`text-[10px] ${FI_STATUS_CLASS[f.status] ?? ""}`}>
-                        {FI_STATUS_LABELS[f.status] ?? f.status}
-                      </Badge>
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="border rounded-xl p-4">
-            <p className="text-xs font-semibold mb-3 flex items-center gap-1.5">
-              <Receipt className="w-3.5 h-3.5" /> Shipments
-            </p>
-            {shipments.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No shipments yet.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {shipments.map((s) => (
-                  <li key={s.id} className="flex items-center justify-between gap-2 text-sm border-b last:border-0 py-1.5">
-                    <button
-                      type="button"
-                      className="truncate text-left hover:underline"
-                      onClick={() => navigate(`/admin/shipments/${s.id}`)}
-                    >
-                      <span className="font-medium">{s.referenceNo}</span>
-                      <span className="text-muted-foreground"> · via {s.via}</span>
-                    </button>
-                    <span className="text-muted-foreground text-xs shrink-0">{labelForTradeStage(s.tradeStage)}</span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
         </div>
       )}
 

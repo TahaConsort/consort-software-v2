@@ -82,7 +82,7 @@ const ManageUsersPage = () => {
       {loading && <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>}
 
       {!loading && !error && (
-        <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm overflow-x-auto">
+        <div className="border border-border rounded-xl bg-card shadow-sm overflow-x-auto">
           {employees.length === 0 ? (
             <div className="p-10 text-center text-muted-foreground text-sm">No employees yet.</div>
           ) : (

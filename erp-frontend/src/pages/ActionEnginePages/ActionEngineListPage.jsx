@@ -57,7 +57,7 @@ const ActionEngineListPage = () => {
         <div className="grid gap-2">
           {templates.length === 0 && <Empty text="No task templates seeded yet — run node prisma/seed.js." />}
           {templates.map((t) => (
-            <div key={t.id} className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4">
+            <div key={t.id} className="border border-border rounded-xl bg-card shadow-sm p-4">
               <div className="flex items-center justify-between gap-3 flex-wrap">
                 <div className="min-w-0">
                   <p className="font-medium text-sm">{t.title}</p>
@@ -81,7 +81,7 @@ const ActionEngineListPage = () => {
             <Stat icon={<Clock className="w-4 h-4" />} label="Pending" value={outboxMeta.pending} tone={outboxMeta.pending > 0 ? "amber" : "green"} />
             <Stat icon={<AlertTriangle className="w-4 h-4" />} label="Stuck (>3 tries)" value={outboxMeta.stuck} tone={outboxMeta.stuck > 0 ? "red" : "green"} />
           </div>
-          <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm divide-y">
+          <div className="border border-border rounded-xl bg-card shadow-sm divide-y">
             {outbox.length === 0 && <Empty text="No events yet." />}
             {outbox.map((e) => (
               <div key={e.id} className="px-4 py-3 flex items-center justify-between gap-3">
@@ -99,7 +99,7 @@ const ActionEngineListPage = () => {
       )}
 
       {!loading && tab === "unroutable" && (
-        <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm divide-y">
+        <div className="border border-border rounded-xl bg-card shadow-sm divide-y">
           {unroutable.length === 0 && <Empty text="No unroutable actions — every event found an assignee." />}
           {unroutable.map((n) => (
             <div key={n.id} className={`px-4 py-3 flex items-start gap-3 ${!n.readAt ? "bg-destructive/5" : ""}`}>

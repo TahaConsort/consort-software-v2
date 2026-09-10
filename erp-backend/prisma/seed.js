@@ -389,6 +389,11 @@ const OTD_STEP_ACTION_TEMPLATES = [
 // codes these once named are inactive.
 const CHARGE_TYPES = [
   { code: "ocean_freight",          label: "Ocean Freight",              defaultDirection: "payable",    service: "sea_freight" },
+  // Rail. The haulage is terminal to terminal; the truck at each end is inland_transport
+  // on the local_transport service, which is why a rail job normally sells both.
+  { code: "rail_freight",           label: "Rail Freight / Haulage",     defaultDirection: "payable",    service: "rail_freight" },
+  { code: "rail_terminal_handling", label: "Rail Terminal Handling",     defaultDirection: "payable",    service: "rail_freight" },
+  { code: "wagon_detention",        label: "Wagon Detention",            defaultDirection: "payable",    service: "rail_freight" },
   { code: "lolo",                   label: "LOLO (Lift-On/Lift-Off)",    defaultDirection: "payable",    service: "local_transport" },
   { code: "inland_transport",       label: "Inland Transport / Trucking", defaultDirection: "payable",   service: "local_transport" },
   { code: "fuel_surcharge",         label: "Fuel Surcharge",             defaultDirection: "payable",    service: "local_transport" },

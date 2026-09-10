@@ -173,6 +173,11 @@ export const materializeCustomerAndQuery = async (
       customerPhone: contactPhone ?? "",
       pickupAddress: pickupAddress ?? refs.originPort ?? "Not specified",
       destinationAddress: destinationAddress ?? refs.destinationPort ?? "Not specified",
+      // A referral that names ports is a port-to-port sea move, so the mode is safe to
+      // infer. `scope` is NOT: an LC is opened on imports and exports alike, and the
+      // referral does not say which side of it we are on. Left null for Ops to answer
+      // rather than guessed — a wrong scope picks the wrong quote template.
+      modes: refs.originPort || refs.destinationPort ? ["sea"] : [],
       services: finalServices,
     },
   });

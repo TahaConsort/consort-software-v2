@@ -169,8 +169,7 @@ export const completeTask = catchAsync(async (req, res, next) => {
         step,
         actorId: req.user.id,
         actorDeptCode,
-        canForce: req.user.permissions.includes("shipment.force_override"),
-        forceReason: req.body?.forceReason,
+
       });
       return status;
     });

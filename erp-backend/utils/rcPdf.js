@@ -5,13 +5,8 @@ import { UPLOAD_ROOT, ensureDir } from "../modules/document/document.service.js"
 import { DEFAULT_CURRENCY } from "./currency.js";
 
 /**
- * Rate Confirmation (RC) renderers — the document that locks a rate the way the
- * business actually locks it: one per side of the deal.
- *
- *   renderVendorRcPdf    the BUY side — "Consort confirms it will pay you X for this
- *                        job/leg". Generated on demand from an AWARDED vendor quote,
- *                        attached to the vendor's documents (master-data owner type,
- *                        internal-only by construction) and WhatsApped by ops.
+ * Rate Confirmation (RC) renderer — the document that locks the rate the customer
+ * confirmed.
  *
  *   renderCustomerRcPdf  the SELL side — "you confirmed our rate of Y". Generated at
  *                        quotation approval and attached to the shipment with docType
@@ -19,10 +14,11 @@ import { DEFAULT_CURRENCY } from "./currency.js";
  *                        RC requirement the same way the quotation PDF satisfies its
  *                        own checklist item.
  *
- * PRIVACY — same rule as lib/rfqMessage.js: the vendor RC never carries the customer
- * name or any sell price; the customer RC never carries a cost, a vendor, or a margin.
- * The customer RC prints only description/quantity/unitPrice/amount, so it stays safe
- * to publish (INV-10) by construction.
+ * The buy-side counterpart (renderVendorRcPdf) went with the RFQ module.
+ *
+ * PRIVACY — the customer RC never carries a cost, a vendor, or a margin. It prints
+ * only description/quantity/unitPrice/amount, so it stays safe to publish (INV-10)
+ * by construction.
  */
 
 const money = (n, ccy) =>
@@ -30,29 +26,6 @@ const money = (n, ccy) =>
 
 const fmtDate = (d) =>
   d ? new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }) : "—";
-
-const LEG_LABELS = {
-  first_mile: "First mile — pickup to rail terminal (by truck)",
-  middle_mile: "Middle mile — rail, terminal to terminal",
-  last_mile: "Last mile — rail terminal to delivery (by truck)",
-};
-
-// The stretch of road this RC pays for. A query carries only the two doors now, so a
-// legged RC names the door it touches and leaves the far end to the leg label.
-const routeForLeg = (leg, query = {}) => {
-  const pickup = query.pickupAddress;
-  const delivery = query.destinationAddress;
-  switch (leg) {
-    case "first_mile":
-      return pickup ?? "";
-    case "middle_mile":
-      return [pickup, delivery].filter(Boolean).join("  →  ");
-    case "last_mile":
-      return delivery ?? "";
-    default:
-      return [pickup, delivery].filter(Boolean).join("  →  ");
-  }
-};
 
 const loadPdfKit = async () => {
   try {
@@ -116,78 +89,6 @@ const drawChargeTable = (doc, left, lines, total, ccy) => {
   doc.moveDown(0.4);
   doc.font("Helvetica-Bold").fontSize(10);
   doc.text("Agreed total", cols[2], doc.y, { continued: true }).text(`   ${money(total, ccy)}`);
-};
-
-// A query no longer records container, cargo, weight or incoterm — those live on the
-// shipment once one exists, and an RC is raised before that. Nothing left to print.
-const cargoFacts = () => [];
-
-/**
- * The buy-side RC: what Consort will pay the awarded vendor for this job/leg.
- * @returns { fileName, storageKey, mimeType, sizeBytes, checksum } or null when
- *          pdfkit is unavailable.
- */
-export const renderVendorRcPdf = async ({ rfq, quote, vendor, query }) => {
-  const PDFDocument = await loadPdfKit();
-  if (!PDFDocument) return null;
-
-  const file = await renderToFile(PDFDocument, `${crypto.randomUUID()}-vendor-rc.pdf`, (doc) => {
-    const ccy = quote.currency ?? DEFAULT_CURRENCY;
-    const left = doc.x;
-
-    doc.fontSize(18).font("Helvetica-Bold").text("RATE CONFIRMATION", { align: "left" });
-    doc.moveDown(0.2);
-    doc.fontSize(10).font("Helvetica").fillColor("#555").text(rfq.referenceNo);
-    if (rfq.leg) doc.text(LEG_LABELS[rfq.leg] ?? rfq.leg);
-    doc.text(`Awarded: ${fmtDate(quote.awardedAt ?? new Date())}`);
-    doc.fillColor("#000").moveDown(1);
-
-    doc.fontSize(9).font("Helvetica-Bold").text("Carrier / Vendor");
-    doc.font("Helvetica");
-    doc.text(`${vendor.name}${vendor.referenceNo ? `  (${vendor.referenceNo})` : ""}`);
-    if (vendor.contactName) doc.text(`Attn: ${vendor.contactName}`);
-    if (vendor.phone) doc.text(`Phone: ${vendor.phone}`);
-    if (vendor.address) doc.text(vendor.address);
-    if (vendor.taxId) doc.text(`NTN/STRN: ${vendor.taxId}`);
-    doc.moveDown(0.6);
-
-    doc.font("Helvetica-Bold").text("Job");
-    doc.font("Helvetica");
-    const route = routeForLeg(rfq.leg, query);
-    if (route) doc.text(`Route: ${route}`);
-    for (const fact of cargoFacts(query)) doc.text(fact);
-    // Door contacts, where this leg touches a door. Operational people only — the
-    // paying customer's identity never appears on vendor paperwork.
-    const touchesPickup = !rfq.leg || rfq.leg === "first_mile";
-    const touchesDelivery = !rfq.leg || rfq.leg === "last_mile";
-    if ((touchesPickup || touchesDelivery) && (query?.customerName || query?.customerPhone)) {
-      doc.text(`Site contact: ${[query.customerName, query.customerPhone].filter(Boolean).join(" · ")}`);
-    }
-    doc.moveDown(1);
-
-    drawChargeTable(doc, left, quote.lines, quote.totalAmount, ccy);
-
-    doc.moveDown(1);
-    doc.font("Helvetica").fontSize(9);
-    if (quote.validityDate) doc.text(`Rate valid to: ${fmtDate(quote.validityDate)}`, left, doc.y);
-    doc.text(
-      `Payment terms: ${vendor.paymentTermsDays != null ? `${vendor.paymentTermsDays} days from invoice` : "as agreed"}`,
-      left,
-      doc.y,
-    );
-    if (quote.notes) doc.text(`Notes: ${quote.notes}`, left, doc.y, { width: 470 });
-
-    doc.moveDown(2);
-    doc.fontSize(8).fillColor("#666")
-      .text(
-        "Consort Group confirms the above agreed buy rate for this job. Generated from Consort ERP.",
-        left,
-        doc.y,
-        { width: 470 },
-      );
-  });
-
-  return { fileName: `${rfq.referenceNo}${rfq.leg ? `-${rfq.leg}` : ""}-RC.pdf`, ...file };
 };
 
 /**

@@ -27,10 +27,8 @@ import storefrontRoutes from "./modules/storefront/storefront.routes.js";
 import approvalPublicRoutes from "./modules/approval/approval.public.routes.js";
 import lcInboxRoutes, { webhookRouter } from "./modules/lc/lc.routes.js";
 import vendorRoutes from "./modules/vendor/vendor.routes.js";
-import rfqRoutes from "./modules/rfq/rfq.routes.js";
 import { driverRouter, vehicleRouter } from "./modules/fleet/fleet.routes.js";
 import workflowRoutes from "./modules/workflow/workflow.routes.js";
-import tradeRoutes from "./modules/trade/trade.routes.js";
 import { globalErrorHandler } from "./utils/AppError.js";
 import { AppError } from "./utils/AppError.js";
 
@@ -106,7 +104,6 @@ app.use("/api/otc", otcRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/finance", financeRoutes);
 app.use("/api/vendors", vendorRoutes);
-app.use("/api/rfqs", rfqRoutes); // vendor rate requests — the buy side of a query
 app.use("/api/drivers", driverRouter); // own fleet — drivers
 app.use("/api/vehicles", vehicleRouter); // own fleet — trucks & dumpers
 app.use("/api/documents", documentRoutes);
@@ -116,7 +113,6 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/action-engine", actionRoutes);
 app.use("/api/audit", auditRoutes);
 app.use("/api/workflow", workflowRoutes); // Management-only catalog admin (ADR-051)
-app.use("/api/trade", tradeRoutes); // export trade documents (Export Shipment Workflow roadmap §4)
 
 // Intake channels & public storefront (CRM_MASTER §5.20/§5.21)
 app.use("/api/public", storefrontRoutes); // anonymous: load board + rate calculator

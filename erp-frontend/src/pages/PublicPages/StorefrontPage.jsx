@@ -515,7 +515,6 @@ export default function StorefrontPage() {
                   { value: ANY, label: "All modes" },
                   { value: "sea", label: "Sea" },
                   { value: "road", label: "Road" },
-                  { value: "air", label: "Air" },
                   { value: "rail", label: "Rail" },
                 ]}
               >

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import {
   FileSearch,
+  Coins,
   RefreshCw,
   Plus,
   Loader2,
@@ -9,17 +10,23 @@ import {
   FileText,
   CheckCircle2,
   Eye,
-  Coins,
   Pencil,
   Hand,
   FileSignature,
   ShieldCheck,
+  MapPin,
+  ArrowRight,
+  Mail,
+  Phone,
+  User,
+  Clock,
 } from "lucide-react";
 import {
   Badge,
   Button,
   Callout,
   Card,
+  CardBody,
   EmptyState,
   Input,
   Modal,
@@ -50,13 +57,14 @@ import {
   QUERY_CHANNEL_LABELS,
   RAISED_VIA_TO_CHANNEL,
   APPROVAL_CHANNEL_LABELS,
+  labelForMode,
+  labelForScope,
   routeOf,
 } from "@/lib/catalog";
 import QueryFormModal from "@/components/query/QueryFormModal";
 import GiveQuoteDialog from "./GiveQuoteDialog";
 import DecideQuoteDialog from "./DecideQuoteDialog";
-import RequestRatesDialog from "@/pages/RfqsPages/RequestRatesDialog";
-import { useRfqStore } from "@/store/rfqStore";
+import RequestRatesDialog from "./RequestRatesDialog";
 
 /**
  * Row colours come from the semantic tokens (@neuctra/ui theme contract) rather than a
@@ -84,6 +92,15 @@ const STATUS_STYLES = {
 
 /** Statuses a query can still be quoted from (mirrors quotation.service). */
 const QUOTABLE = ["open", "quoted", "revision_requested"];
+
+/**
+ * Statuses that still WANT a quote from Ops, which is a narrower question than what the
+ * server will accept. `quoted` is deliberately absent: the query only reaches it when a
+ * quotation is actually sent to the customer (a draft leaves it `open`), so from that
+ * point the quote has been given and the row's next step is Review, not another quote.
+ * `revision_requested` stays, because that IS the customer asking for a new price.
+ */
+const NEEDS_QUOTE = ["open", "revision_requested"];
 
 // Per-channel row badge colours (bdo / bank_lc / website buckets). Quieter than the
 // status chips — the channel is context, not the thing Ops is scanning for.
@@ -261,7 +278,6 @@ const QueriesListPage = () => {
   } = useQueryStore();
   const { createQuotation, sendQuotation, shareQuotation, rejectQuotation } =
     useQuotationStore();
-  const createRfqs = useRfqStore((s) => s.createRfqs);
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const user = useAuthStore((s) => s.user);
   const location = useLocation();
@@ -284,8 +300,8 @@ const QueriesListPage = () => {
   const [cancelFor, setCancelFor] = useState(null);
   const [quoteFor, setQuoteFor] = useState(null);
   const [decideFor, setDecideFor] = useState(null);
-  const [detailFor, setDetailFor] = useState(null);
   const [ratesFor, setRatesFor] = useState(null);
+  const [detailFor, setDetailFor] = useState(null);
   // Query id whose Rate Confirmation is being fetched, so one row spins rather than all.
   const [rcDownloading, setRcDownloading] = useState(null);
 
@@ -331,7 +347,6 @@ const QueriesListPage = () => {
       setCancelFor(null);
       setQuoteFor(null);
       setDecideFor(null);
-      setRatesFor(null);
     } catch (err) {
       toast.error(err?.message || "Couldn't update the query");
     }
@@ -481,7 +496,7 @@ const QueriesListPage = () => {
           <div className="w-full overflow-x-auto">
             <Table className="w-full min-w-0 table-fixed" bordered dense>
               {/* HEADER */}
-              <THead style={{ background: "var(--muted)" }}>
+              <THead>
                 <TRow>
                   <TH
                     style={{
@@ -678,29 +693,6 @@ const QueriesListPage = () => {
                               />
                             );
                           })()}
-
-                          {/* RFQ */}
-                          {q.rfqSummary && (
-                            <span className="inline-flex min-w-0 max-w-full">
-                              <button
-                                type="button"
-                                className="max-w-full truncate text-muted-foreground underline-offset-2 hover:text-primary hover:underline"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-
-                                  navigate("/admin/rfqs", {
-                                    state: {
-                                      queryId: q.id,
-                                    },
-                                  });
-                                }}
-                              >
-                                {q.rfqSummary.awarded > 0
-                                  ? `${q.rfqSummary.awarded}/${q.rfqSummary.rfqs} awarded`
-                                  : `rates ${q.rfqSummary.quotesIn}/${q.rfqSummary.quotesTotal} in`}
-                              </button>
-                            </span>
-                          )}
                         </div>
                       </TD>
 
@@ -737,8 +729,8 @@ const QueriesListPage = () => {
                               </span>
                             )}
 
-                          {/* GIVE QUOTE */}
-                          {QUOTABLE.includes(q.status) &&
+                          {/* GIVE QUOTE — hidden once the quote has gone out */}
+                          {NEEDS_QUOTE.includes(q.status) &&
                             hasPermission("quotation.create") && (
                               <Button
                                 size="xs"
@@ -757,7 +749,7 @@ const QueriesListPage = () => {
                             (canReject || canShare || canVerify) && (
                               <Button
                                 size="xs"
-                                variant="outline"
+                                variant="ghost"
                                 onClick={() => setDecideFor(q)}
                                 className={ACTION_BTN}
                                 iconBefore={
@@ -797,7 +789,7 @@ const QueriesListPage = () => {
                             <Eye className="h-4 w-4" />
                           </RowAction>
 
-                          {/* REQUEST RATES */}
+                          {/* REQUEST RATES — email the vendor directory about this job */}
                           {QUOTABLE.includes(q.status) &&
                             hasPermission("rfq.manage") && (
                               <RowAction
@@ -919,12 +911,7 @@ const QueriesListPage = () => {
         />
       )}
       {ratesFor && (
-        <RequestRatesDialog
-          busy={busy}
-          query={ratesFor}
-          onClose={() => setRatesFor(null)}
-          onSubmit={(payload) => act(() => createRfqs(payload))}
-        />
+        <RequestRatesDialog query={ratesFor} onClose={() => setRatesFor(null)} />
       )}
       {detailFor && (
         <QueryDetailDialog
@@ -941,111 +928,282 @@ const QueriesListPage = () => {
       block, sales owner, addresses, buy-side progress and timestamps are readable.
       Grouped into sections rather than one flat grid, because it now carries roughly
       twice what it used to. ── */
-const DetailSection = ({ title, children }) => (
-  <section className="space-y-3">
-    <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+const DetailSection = ({ icon: Icon, title, action, children }) => (
+  <section className="space-y-2.5">
+    <div className="flex items-center justify-between gap-2">
+      <h3 className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+        {Icon && <Icon className="h-3.5 w-3.5" />}
+        {title}
+      </h3>
+      {action}
+    </div>
     {children}
   </section>
 );
 
-/** Renders the [label, value] pairs that actually have a value; nothing if none do. */
-const DetailGrid = ({ rows }) => {
-  const present = rows.filter(([, v]) => v);
-  if (!present.length) return null;
+/**
+ * One fact as its own bordered tile.
+ *
+ * Tiles rather than a hairline grid on purpose: half these fields are optional, so the
+ * row is regularly ragged, and a `gap-px` grid over a border-coloured ground paints that
+ * gap as a stripe wherever a track goes unfilled. Self-contained tiles just wrap.
+ */
+const Fact = ({ label, value }) => {
+  if (!value) return null;
   return (
-    <dl className="grid grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-3">
-      {present.map(([label, value]) => (
-        <div key={label}>
-          <dt className="text-sm text-muted-foreground">{label}</dt>
-          <dd className="wrap-break-word mt-0.5 text-sm font-medium text-foreground">
+    <div className="min-w-0 rounded-lg border border-border bg-card px-3 py-2">
+      <dt className="text-[11px] uppercase tracking-wide text-muted-foreground">
+        {label}
+      </dt>
+      <dd className="mt-0.5 wrap-break-word text-sm font-medium text-foreground">
+        {value}
+      </dd>
+    </div>
+  );
+};
+
+/** A contact line that is actually actionable: the email opens mail, the phone dials. */
+const ContactRow = ({ icon: Icon, label, value, href }) => {
+  if (!value) return null;
+  return (
+    <li className="flex items-center gap-2.5 rounded-lg border border-border bg-card px-3 py-2">
+      {/* Guarded rather than rendered bare: this config has no eslint-plugin-react, so
+          a component used only inside JSX reads as an unused variable. */}
+      {Icon && <Icon className="h-4 w-4 shrink-0 text-muted-foreground" />}
+      <span className="min-w-0 flex-1">
+        <span className="block text-[11px] uppercase tracking-wide text-muted-foreground">
+          {label}
+        </span>
+        {href ? (
+          <a
+            href={href}
+            className="block truncate text-sm font-medium text-foreground hover:underline"
+          >
             {value}
-          </dd>
-        </div>
-      ))}
-    </dl>
+          </a>
+        ) : (
+          <span className="block truncate text-sm font-medium text-foreground">
+            {value}
+          </span>
+        )}
+      </span>
+    </li>
   );
 };
 
 const QueryDetailDialog = ({ query: q, onClose }) => {
+  const hasPermission = useAuthStore((s) => s.hasPermission);
+  const [rcBusy, setRcBusy] = useState(false);
+
   // `assignedBdoId` is internal-only (the server withholds it from portal customers),
   // so its absence and a null value mean different things — check for the key itself.
   const owner =
     "assignedBdoId" in q
-      ? (q.assignedBdoName ?? "Unassigned — in the shared pool")
+      ? (q.assignedBdoName ?? "Unassigned, in the shared pool")
       : null;
+  const channel = RAISED_VIA_TO_CHANNEL[q.raisedVia];
+  const acceptance = acceptanceChip(q.acceptance);
+  const services = q.services ?? [];
 
-  const rfq = q.rfqSummary
-    ? q.rfqSummary.awarded > 0
-      ? `${q.rfqSummary.awarded} of ${q.rfqSummary.rfqs} awarded`
-      : `${q.rfqSummary.quotesIn} of ${q.rfqSummary.quotesTotal} rates in`
-    : null;
+  const downloadRc = async () => {
+    setRcBusy(true);
+    try {
+      await documentService.downloadDocument(
+        q.rateConfirmation.documentId,
+        q.rateConfirmation.fileName,
+      );
+    } catch (err) {
+      toast.error(err?.message || "Couldn't download the Rate Confirmation");
+    } finally {
+      setRcBusy(false);
+    }
+  };
 
   return (
     <Modal isOpen onClose={onClose}>
-      {/* ModalHeader takes a plain string title, so the status badge and the
-          customer line sit at the top of the body instead. */}
+      {/* ModalHeader takes a plain string title, so the badges and the customer line
+          lead the body instead. */}
       <ModalContent maxWidth="max-w-3xl" className="flex max-h-[90vh] flex-col">
-        <ModalHeader title={q.referenceNo} onClose={onClose} />
+        <ModalHeader
+          title={q.referenceNo}
+          icon={<FileSearch className="h-4 w-4 text-primary" />}
+          onClose={onClose}
+        />
 
         <ModalBody className="min-h-0 flex-1 space-y-5 overflow-y-auto">
-          <div className="flex flex-wrap items-center gap-2">
-            <Badge
-              variant="soft"
-              size="sm"
-              text={QUERY_STATUS_LABELS[q.status]}
-              className={`${CHIP} ${STATUS_STYLES[q.status] ?? ""}`}
-            />
-            <p className="text-sm text-muted-foreground">
-              {q.customerCompany} ({q.customerRef}) · raised by {q.raisedByName}
-            </p>
-          </div>
-
-          <DetailSection title="Services requested">
-            <div className="flex flex-wrap gap-1.5">
-              {q.services.map((s) => (
+          {/* Who and where it stands, before any of the detail. */}
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge
+                variant="soft"
+                size="sm"
+                text={QUERY_STATUS_LABELS[q.status]}
+                className={`${CHIP} shrink-0 ${STATUS_STYLES[q.status] ?? ""}`}
+              />
+              {channel && (
                 <Badge
-                  key={s}
                   variant="soft"
                   size="sm"
-                  text={labelForService(s)}
-                  className={`${CHIP} ${NEUTRAL_CHIP}`}
+                  text={QUERY_CHANNEL_LABELS[channel] ?? channel}
+                  className={`${CHIP} shrink-0 ${CHANNEL_STYLES[channel] ?? NEUTRAL_CHIP}`}
+                />
+              )}
+              {acceptance && (
+                <Badge
+                  variant="soft"
+                  size="sm"
+                  text={acceptance.text}
+                  className={`${CHIP} shrink-0 ${acceptance.tone}`}
+                />
+              )}
+              {/* How far it goes and how it travels. Absent on queries raised before
+                  these were asked, so both render only when actually answered. */}
+              {q.scope && (
+                <Badge
+                  variant="soft"
+                  size="sm"
+                  text={labelForScope(q.scope)}
+                  className={`${CHIP} shrink-0 ${NEUTRAL_CHIP}`}
+                />
+              )}
+              {(q.modes ?? []).map((m) => (
+                <Badge
+                  key={m}
+                  variant="soft"
+                  size="sm"
+                  text={labelForMode(m)}
+                  className={`${CHIP} shrink-0 ${NEUTRAL_CHIP}`}
                 />
               ))}
             </div>
+            <div className="min-w-0">
+              <p className="wrap-break-word text-base font-semibold text-foreground">
+                {q.customerCompany}
+              </p>
+              <p className="mt-0.5 text-sm text-muted-foreground">
+                {q.customerRef} · raised by {q.raisedByName}
+              </p>
+            </div>
+          </div>
+
+          {/* The lane, read as a lane. Two address cells side by side said the same
+              thing but made the reader assemble the direction themselves. */}
+          <DetailSection icon={MapPin} title="Route">
+            <Card variant="outline" padding="sm">
+              <CardBody>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Pickup
+                    </p>
+                    <p className="mt-0.5 wrap-break-word text-sm font-medium text-foreground">
+                      {q.pickupAddress}
+                    </p>
+                  </div>
+                  <ArrowRight
+                    aria-hidden="true"
+                    className="hidden h-4 w-4 shrink-0 self-center text-muted-foreground sm:block"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                      Destination
+                    </p>
+                    <p className="mt-0.5 wrap-break-word text-sm font-medium text-foreground">
+                      {q.destinationAddress}
+                    </p>
+                  </div>
+                </div>
+                {routeOf(q) && (
+                  <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
+                    {routeOf(q)}
+                  </p>
+                )}
+              </CardBody>
+            </Card>
           </DetailSection>
 
-          <DetailSection title="Route">
-            <DetailGrid
-              rows={[
-                ["Pickup", q.pickupAddress],
-                ["Destination", q.destinationAddress],
-                ["Lane", routeOf(q)],
-              ]}
-            />
+          <DetailSection icon={FileText} title="Services requested">
+            {services.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No services were listed on this query.
+              </p>
+            ) : (
+              <div className="flex flex-wrap gap-1.5">
+                {services.map((s) => (
+                  <Badge
+                    key={s}
+                    variant="soft"
+                    size="sm"
+                    text={labelForService(s)}
+                    className={`${CHIP} shrink-0 ${NEUTRAL_CHIP}`}
+                  />
+                ))}
+              </div>
+            )}
           </DetailSection>
 
-          <DetailSection title="Contact">
-            <DetailGrid
-              rows={[
-                ["Name", q.customerName],
-                ["Email", q.customerEmail],
-                ["Phone", q.customerPhone],
-              ]}
-            />
+          <DetailSection icon={User} title="Contact">
+            <ul className="grid gap-1.5 sm:grid-cols-2">
+              <ContactRow icon={User} label="Name" value={q.customerName} />
+              <ContactRow
+                icon={Mail}
+                label="Email"
+                value={q.customerEmail}
+                href={q.customerEmail ? `mailto:${q.customerEmail}` : null}
+              />
+              <ContactRow
+                icon={Phone}
+                label="Phone"
+                value={q.customerPhone}
+                href={q.customerPhone ? `tel:${q.customerPhone}` : null}
+              />
+            </ul>
           </DetailSection>
 
-          <DetailSection title="Ownership & progress">
-            <DetailGrid
-              rows={[
-                ["Sales owner", owner],
-                ["Raised via", RAISED_VIA_LABELS[q.raisedVia] ?? q.raisedVia],
-                ["Rate requests", rfq],
-                ["Created", fmtDate(q.createdAt)],
-                ["Last updated", fmtDate(q.updatedAt)],
-                ["Cancelled because", q.cancelReason],
-              ]}
-            />
+          <DetailSection
+            icon={Clock}
+            title="Ownership and progress"
+            action={
+              q.rateConfirmation &&
+              hasPermission("document.read") && (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  loading={rcBusy}
+                  loadingText="Preparing…"
+                  iconBefore={<FileSignature className="h-3 w-3" />}
+                  onClick={downloadRc}
+                >
+                  Rate Confirmation
+                </Button>
+              )
+            }
+          >
+            <dl className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+              <Fact label="Sales owner" value={owner} />
+              <Fact
+                label="Raised via"
+                value={RAISED_VIA_LABELS[q.raisedVia] ?? q.raisedVia}
+              />
+              <Fact label="Created" value={fmtDate(q.createdAt)} />
+              <Fact label="Last updated" value={fmtDate(q.updatedAt)} />
+            </dl>
+
+            {/* The acceptance sentence was only ever a `title` tooltip on the row.
+                It says who recorded the customer's yes, through which channel and
+                when, which is the whole audit story and worth reading here. */}
+            {acceptance?.title && (
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                {acceptance.title}
+              </p>
+            )}
           </DetailSection>
+
+          {q.cancelReason && (
+            <Callout type="error" title="This query was cancelled">
+              {q.cancelReason}
+            </Callout>
+          )}
         </ModalBody>
 
         <ModalFooter>

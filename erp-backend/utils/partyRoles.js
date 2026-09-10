@@ -66,7 +66,7 @@ export const PARTY_ROLE_VENDOR_TYPES = {
   ocean_carrier: ["ocean_carrier", "shipping_line"],
   carrier_agent: ["shipping_line", "destination_agent"],
   freight_forwarder: ["freight_forwarder"],
-  port_terminal: ["port_terminal", "container_yard"],
+  port_terminal: ["port_terminal", "container_yard", "rail_terminal"],
   clearing_agent: ["customs_agent"],
   destination_agent: ["destination_agent"],
   transporter: ["transporter", "rail_operator"],

@@ -44,13 +44,6 @@ export const assignShipmentSchema = z.object({
 // Link the roadmap's Step 1 registers to a shipment (ADR-057): a Trade Contract and/or a
 // Financial Instrument. A quotation-born shipment has neither at birth, and the step
 // cannot complete until both are on it.
-export const tradeLinksSchema = z
-  .object({
-    contractId: z.string().uuid().optional(),
-    financialInstrumentId: z.string().uuid().optional(),
-  })
-  .refine((d) => d.contractId || d.financialInstrumentId, { message: "Provide a contract and/or a financial instrument to link" });
-
 // ── Per-shipment party roles (Export Shipment Workflow roadmap §2/§7) ─────────
 // A party row points at exactly one party record — a `vendors` row (the party
 // directory, which already carries NTN/STRN/REX/VAT/IBAN/SWIFT) or a CRM `customers`

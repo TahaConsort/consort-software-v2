@@ -14,7 +14,13 @@ import {
   ToggleGroup,
 } from "@neuctra/ui";
 import toast from "react-hot-toast";
-import { SERVICE_OPTIONS } from "@/lib/catalog";
+import {
+  SERVICE_OPTIONS,
+  MOVEMENT_SCOPE_OPTIONS,
+  TRANSPORT_MODE_OPTIONS,
+  TRANSPORT_MODE_LABELS,
+  servicesForModes,
+} from "@/lib/catalog";
 
 /**
  * @neuctra/ui puts a label on its own fields but has no standalone Label export,
@@ -62,6 +68,10 @@ const QueryFormModal = ({
     customerPhone: initial?.customerPhone ?? "",
     pickupAddress: initial?.pickupAddress ?? "",
     destinationAddress: initial?.destinationAddress ?? "",
+    // Both start empty rather than pre-picked. A default here would be answered on the
+    // customer's behalf, and these steer the quote template and the vendor shortlist.
+    scope: initial?.scope ?? "",
+    modes: initial?.modes ?? [],
     services: initial?.services ?? [],
     // Only sent when customerMode === "new".
     companyName: "",
@@ -106,6 +116,34 @@ const QueryFormModal = ({
   const catalogServices = form.services.filter((s) => catalogCodes.includes(s));
   const customServices = form.services.filter((s) => !catalogCodes.includes(s));
 
+  /**
+   * The services on offer follow the chosen modes: an air job should not be asked about
+   * port handling. Anything already ticked stays on the list even when it is off the
+   * mode's shortlist, so switching mode can never silently drop a service that is
+   * already on the query — the tick survives and the operator decides.
+   */
+  const suggested = servicesForModes(form.modes);
+  const serviceOptions = form.modes.length
+    ? SERVICE_OPTIONS.filter(
+        (o) => suggested.includes(o.value) || form.services.includes(o.value),
+      )
+    : SERVICE_OPTIONS;
+
+  /**
+   * Changing modes re-suggests services. It only ADDS the new modes' headline service
+   * (the carriage itself) and never removes anything: an operator who has already priced
+   * a line should not lose it because the customer added a leg.
+   */
+  const chooseModes = (modes) => {
+    const headline = { sea: "sea_freight", rail: "rail_freight", road: "local_transport" };
+    const added = modes.filter((m) => !form.modes.includes(m));
+    const gained = added.map((m) => headline[m]).filter(Boolean);
+    set({
+      modes,
+      services: [...new Set([...form.services, ...gained])],
+    });
+  };
+
   const closeIfIdle = () => {
     if (!busy) onClose();
   };
@@ -124,6 +162,8 @@ const QueryFormModal = ({
     if (!form.customerPhone.trim()) return toast.error("Enter a phone number");
     if (!form.pickupAddress.trim()) return toast.error("Enter a pickup address");
     if (!form.destinationAddress.trim()) return toast.error("Enter a destination address");
+    if (!form.scope) return toast.error("Choose domestic, export or import");
+    if (!form.modes.length) return toast.error("Select at least one transport mode");
     if (!form.services.length) return toast.error("Select at least one service");
 
     const payload = {
@@ -132,6 +172,8 @@ const QueryFormModal = ({
       customerPhone: form.customerPhone.trim(),
       pickupAddress: form.pickupAddress.trim(),
       destinationAddress: form.destinationAddress.trim(),
+      scope: form.scope,
+      modes: form.modes,
       services: form.services,
     };
     // The customer a query belongs to is fixed at creation — the API rejects it on update.
@@ -276,11 +318,52 @@ const QueryFormModal = ({
               disabled={busy}
             />
 
+            {/* Scope and mode: how far the goods go, and how they travel. Asked before
+                services because both steer which services are worth offering, and later
+                the quote template and the vendor shortlist. */}
             <div>
-              <FieldLabel>Services</FieldLabel>
+              <FieldLabel>Movement</FieldLabel>
+              <ToggleGroup
+                type="single"
+                size="sm"
+                fullWidth
+                value={form.scope}
+                disabled={busy}
+                options={MOVEMENT_SCOPE_OPTIONS}
+                onChange={(next) => next && set({ scope: next })}
+              />
+            </div>
+
+            <div>
+              <FieldLabel>Transport mode</FieldLabel>
               <Checkbox
                 mode="group"
-                options={SERVICE_OPTIONS}
+                options={TRANSPORT_MODE_OPTIONS}
+                selectedValues={form.modes}
+                onChange={chooseModes}
+                disabled={busy}
+                className="grid grid-cols-2 gap-2 rounded-lg border border-border p-3 sm:grid-cols-4"
+                itemClassName="relative flex-row-reverse justify-end gap-2.5"
+              />
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                {form.modes.length > 1
+                  ? `Multimodal: ${form.modes.map((m) => TRANSPORT_MODE_LABELS[m] ?? m).join(" + ")}. Price each leg on the quote.`
+                  : "Tick every leg. A rail move with trucking at each end is rail and road."}
+              </p>
+            </div>
+
+            <div>
+              <FieldLabel>Services</FieldLabel>
+              {form.modes.length > 0 && (
+                <p className="mb-1.5 text-xs text-muted-foreground">
+                  Showing what{" "}
+                  {form.modes.map((m) => TRANSPORT_MODE_LABELS[m] ?? m).join(" and ")}{" "}
+                  normally sells. Anything else can still be typed below.
+                </p>
+              )}
+              <Checkbox
+                mode="group"
+                options={serviceOptions}
                 selectedValues={form.services}
                 // The group toggles against the whole array it is given, so the
                 // hand-typed services below ride through it untouched.

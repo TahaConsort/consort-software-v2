@@ -7,6 +7,7 @@ export const SERVICE_LABELS = {
   local_transport: "Local Transport / Inland",
   customs_clearance: "Customs Clearance",
   sea_freight: "Sea Freight (Ocean)",
+  rail_freight: "Rail Freight",
   port_handling: "Port Handling / Terminal",
   lc_finance: "LC / Trade Finance",
   destination_services: "Destination Services / Agent",
@@ -15,6 +16,67 @@ export const SERVICE_LABELS = {
 export const SERVICE_OPTIONS = Object.entries(SERVICE_LABELS).map(([value, label]) => ({ value, label }));
 
 export const labelForService = (code) => SERVICE_LABELS[code] ?? code;
+
+/**
+ * The two movement axes on a query. Deliberately separate questions: mode is how the
+ * goods travel, scope is how far they go. A rail move can be domestic or an export, and
+ * trucking to Kabul is road but not domestic, so neither derives from the other.
+ *
+ * Mirrors TransportMode / MovementScope in the Prisma schema and the vocabularies in
+ * erp-backend/utils/movement.js; keep the two in step.
+ */
+export const TRANSPORT_MODE_LABELS = {
+  sea: "Sea",
+  road: "Road",
+  rail: "Rail",
+};
+
+export const MOVEMENT_SCOPE_LABELS = {
+  domestic: "Domestic",
+  export: "Export",
+  import: "Import",
+};
+
+export const TRANSPORT_MODE_OPTIONS = Object.entries(TRANSPORT_MODE_LABELS).map(
+  ([value, label]) => ({ value, label }),
+);
+export const MOVEMENT_SCOPE_OPTIONS = Object.entries(MOVEMENT_SCOPE_LABELS).map(
+  ([value, label]) => ({ value, label }),
+);
+
+export const labelForMode = (code) => TRANSPORT_MODE_LABELS[code] ?? code;
+export const labelForScope = (code) => MOVEMENT_SCOPE_LABELS[code] ?? code;
+
+/**
+ * The services each mode normally sells. A SUGGESTION that reorders and pre-ticks the
+ * query form's checkboxes, never a restriction: services stay free text on the wire, and
+ * a real job regularly needs something off its mode's list.
+ *
+ * Mirrors SERVICES_BY_MODE in erp-backend/utils/movement.js.
+ */
+export const SERVICES_BY_MODE = {
+  sea: ["sea_freight", "port_handling", "customs_clearance", "local_transport", "lc_finance", "destination_services"],
+  rail: ["rail_freight", "local_transport", "customs_clearance"],
+  road: ["local_transport", "customs_clearance"],
+};
+
+/** The vendor types worth shortlisting per mode when sourcing a rate. Also a suggestion. */
+export const VENDOR_TYPES_BY_MODE = {
+  sea: ["shipping_line", "ocean_carrier", "freight_forwarder", "port_terminal", "container_yard", "customs_agent", "destination_agent"],
+  rail: ["rail_operator", "rail_terminal", "transporter", "customs_agent"],
+  road: ["transporter", "customs_agent"],
+};
+
+/** The union of what every selected mode sells, in SERVICE_LABELS order so it reads stably. */
+export const servicesForModes = (modes = []) => {
+  const wanted = new Set(modes.flatMap((m) => SERVICES_BY_MODE[m] ?? []));
+  return Object.keys(SERVICE_LABELS).filter((code) => wanted.has(code));
+};
+
+/** The union of the vendor types every selected mode buys from. */
+export const vendorTypesForModes = (modes = []) => [
+  ...new Set(modes.flatMap((m) => VENDOR_TYPES_BY_MODE[m] ?? [])),
+];
 
 /**
  * The route line for a query or shipment: pickup → destination. A query records two
@@ -213,7 +275,7 @@ export const PAYMENT_STATE_CLASS = {
 
 /**
  * Every value VendorType can hold. This map stays COMPLETE even though only a subset
- * is selectable (below): shipments, RFQs and the parties panel all render
+ * is selectable (below): shipments and the parties panel both render
  * `VENDOR_TYPE_LABELS[v.type]`, so dropping a key here would print a raw enum string
  * on every vendor already filed under it.
  */
@@ -229,11 +291,18 @@ export const VENDOR_TYPE_LABELS = {
   customs_agent: "Customs Clearing Agent",
   destination_agent: "Destination Agent",
   other: "Other Party",
-  // ── Not named anywhere in the roadmap: rendered on existing rows, never offered ──
+  // ── Road and rail counterparties, offered since those became selectable modes ──
   transporter: "Transporter",
-  container_yard: "Container Yard",
   rail_operator: "Rail Operator",
+  rail_terminal: "Rail / Inland Terminal",
+  // ── Rendered on existing rows, never offered ──
+  container_yard: "Container Yard",
   driver: "Driver",
+  // Air is parked (see TRANSPORT_MODE_LABELS). The enum values stay in the database and
+  // the labels stay here, so re-offering air later is a list edit and not a migration.
+  airline: "Airline",
+  air_cargo_agent: "Air Cargo Agent (IATA)",
+  airport_terminal: "Air Cargo Terminal",
 };
 
 /**
@@ -250,9 +319,14 @@ export const VENDOR_TYPE_LABELS = {
  *  · `other` covers the two §2 parties with no role of their own: Javed Latif
  *    (additional notify party) and SAS METM/Consort itself.
  *
- * Dropped, because the roadmap never mentions them: transporter, container_yard,
- * rail_operator, and driver — drivers are own-fleet master data with their own screen
- * (/admin/drivers), never a counterparty on a payable invoice.
+ * Since road and rail became offered modes, the counterparties those modes buy from are
+ * offered too — a rail job cannot be sourced from a list with no rail operator on it.
+ * They sit after the roadmap block rather than inside it, because the roadmap's §3 table
+ * genuinely does not name them.
+ *
+ * Still dropped: container_yard (reachable as port_terminal), driver (own-fleet master
+ * data with its own screen at /admin/drivers, never a counterparty on a payable invoice),
+ * and the three air types — air is parked, see TRANSPORT_MODE_LABELS.
  */
 export const ROADMAP_VENDOR_TYPES = [
   "buyer",
@@ -264,6 +338,10 @@ export const ROADMAP_VENDOR_TYPES = [
   "port_terminal",
   "customs_agent",
   "destination_agent",
+  // Road and rail counterparties.
+  "transporter",
+  "rail_operator",
+  "rail_terminal",
   "other",
 ];
 
@@ -283,72 +361,12 @@ export const vendorTypeOptionsFor = (currentType) =>
     ? [...VENDOR_TYPE_OPTIONS, { value: currentType, label: `${VENDOR_TYPE_LABELS[currentType] ?? currentType} (legacy)` }]
     : VENDOR_TYPE_OPTIONS;
 
-// ── Vendor rate requests (RFQ) — the buy side of a query ──
-
-export const RFQ_STATUS_LABELS = {
-  open: "Awaiting rates",
-  awarded: "Awarded",
-  cancelled: "Cancelled",
-};
-
-export const RFQ_STATUS_OPTIONS = Object.entries(RFQ_STATUS_LABELS).map(([value, label]) => ({ value, label }));
-
-export const VENDOR_QUOTE_STATUS_LABELS = {
-  pending: "Awaiting reply",
-  quoted: "Quoted",
-  declined: "Declined",
-};
-
-/**
- * Which kind of vendor can price which sold service — the default filter when ops
- * picks who to ask for rates. A suggestion, not a rule: the request dialog can show
- * all vendors, since a generalist filed under `other` may still quote a lane.
- *
- * Mirrors SERVICE_VENDOR_TYPES in erp-backend/utils/serviceVendorTypes.js; keep the
- * two in step. lc_finance is absent on purpose — a bank instrument is not a vendor buy.
- */
-export const SERVICE_VENDOR_TYPES = {
-  local_transport: ["transporter"],
-  sea_freight: ["shipping_line"],
-  customs_clearance: ["customs_agent"],
-  port_handling: ["port_terminal", "container_yard"],
-  destination_services: ["destination_agent"],
-  lc_finance: [],
-};
-
-/** Services that can actually be sent to a vendor for a price. */
-export const RFQ_SERVICES = Object.keys(SERVICE_VENDOR_TYPES).filter(
-  (s) => SERVICE_VENDOR_TYPES[s].length > 0,
-);
-
-// ── Inland transport mode + rail legs ──
+// ── Inland transport mode ──
 
 export const INLAND_MODE_LABELS = {
   truck: "By truck",
   rail: "By rail",
 };
-
-/**
- * A rail-mode inland journey is priced per leg — three rate requests, three winners.
- * Mirrors RFQ_LEGS / LEG_VENDOR_TYPES in erp-backend/utils/serviceVendorTypes.js;
- * keep the two in step.
- */
-export const RFQ_LEG_LABELS = {
-  first_mile: "First mile (truck)",
-  middle_mile: "Rail — terminal to terminal",
-  last_mile: "Last mile (truck)",
-};
-
-export const RFQ_LEGS = Object.keys(RFQ_LEG_LABELS);
-
-export const LEG_VENDOR_TYPES = {
-  first_mile: ["transporter"],
-  middle_mile: ["rail_operator"],
-  last_mile: ["transporter"],
-};
-
-export const vendorTypesFor = (service, leg) =>
-  (leg ? LEG_VENDOR_TYPES[leg] : SERVICE_VENDOR_TYPES[service]) ?? [];
 
 // ── Own fleet — drivers and vehicles (not vendors: never billed) ──
 
@@ -426,74 +444,3 @@ export const SHIPMENT_DIRECTION_LABELS = {
 
 export const labelForShipmentKind = (code) => SHIPMENT_KIND_LABELS[code] ?? code ?? "—";
 export const labelForDirection = (code) => SHIPMENT_DIRECTION_LABELS[code] ?? code ?? "—";
-
-// ── Export trade documents (roadmap §4/§7.1) ──────────────────────────────────
-// The roadmap workflow states. DERIVED server-side from which documents exist, so the
-// UI only ever renders them — there is no control anywhere that sets a stage.
-
-export const TRADE_STAGE_LABELS = {
-  none: "Not a trade shipment",
-  contract_registered: "Contract Registered",
-  fi_active: "Financial Instrument Active",
-  packing_list_confirmed: "Packing List Confirmed",
-  commercial_invoice_raised: "Commercial Invoice Raised",
-  booking_confirmed: "Booking Confirmed / GD Filed",
-  shipped_on_board: "Shipped on Board (B/L Issued)",
-  logistics_settled: "Logistics Invoices Settled",
-  payment_realised: "Payment Realised (CAD/DA)",
-  fi_closed: "Financial Instrument Closed",
-};
-
-/** Rendering order for the progress bar — `none` is deliberately not a rung. */
-export const TRADE_STAGE_ORDER = [
-  "contract_registered",
-  "fi_active",
-  "packing_list_confirmed",
-  "commercial_invoice_raised",
-  "booking_confirmed",
-  "shipped_on_board",
-  "logistics_settled",
-  "payment_realised",
-  "fi_closed",
-];
-
-export const labelForTradeStage = (code) => TRADE_STAGE_LABELS[code] ?? code ?? "—";
-
-export const FI_TYPE_LABELS = {
-  exp_form: "Bank EXP Registration",
-  lc: "Letter of Credit",
-  dp: "Documents against Payment (DP)",
-  da: "Documents against Acceptance (DA)",
-  advance: "Advance Payment",
-  open_account: "Open Account",
-};
-
-export const FI_STATUS_LABELS = {
-  draft: "Draft",
-  active: "Active",
-  expired: "Expired",
-  closed: "Closed",
-  cancelled: "Cancelled",
-};
-
-export const FI_STATUS_CLASS = {
-  active: "bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300",
-  expired: "bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300",
-  closed: "bg-muted text-muted-foreground border-muted-foreground/30",
-  draft: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300",
-  cancelled: "bg-muted text-muted-foreground border-muted-foreground/30 line-through",
-};
-
-export const TRADE_INVOICE_SIDE_LABELS = {
-  purchase: "Purchase — vendor bills Consort",
-  sale: "Sale — Consort bills the customer",
-};
-
-export const TRADE_CONTRACT_STATUS_LABELS = {
-  draft: "Draft",
-  active: "Active",
-  completed: "Completed",
-  cancelled: "Cancelled",
-};
-
-export const FREIGHT_TERMS_LABELS = { prepaid: "Freight Prepaid", collect: "Freight Collect" };

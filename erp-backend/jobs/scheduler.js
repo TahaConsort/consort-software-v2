@@ -387,26 +387,6 @@ const sweepDaMaturity = async () => {
   }
 };
 
-/**
- * Packing List vs Commercial Invoice vs B/L. Reported, never enforced — the desk needs
- * to see that two documents disagree, not to be stopped from recording the second one.
- */
-const sweepTradeMismatch = async () => {
-  const { tradeAlertsFor } = await import("../modules/trade/trade.service.js");
-  const shipments = await prisma.shipment.findMany({
-    where: { kind: "trade", status: { notIn: ["closed"] }, exceptionState: { not: "cancelled" } },
-    select: { id: true, referenceNo: true },
-  });
-  for (const s of shipments) {
-    if (await recentlyEmitted("trade.mismatch_detected", "shipmentId", s.id)) continue;
-    const alerts = (await tradeAlertsFor(s.id)).filter((a) =>
-      ["weight_mismatch", "quantity_mismatch", "invoice_exceeds_fi"].includes(a.code),
-    );
-    if (!alerts.length) continue;
-    await emit("trade.mismatch_detected", { shipmentId: s.id, referenceNo: s.referenceNo, alerts });
-  }
-};
-
 export const runSweepsOnce = async () => {
   await sweepLeadStaleness();
   await sweepQueries();
@@ -420,7 +400,6 @@ export const runSweepsOnce = async () => {
   await sweepDocumentOrphans();
   await sweepFinancialInstruments();
   await sweepDaMaturity();
-  await sweepTradeMismatch();
   await pruneRetention();
 };
 

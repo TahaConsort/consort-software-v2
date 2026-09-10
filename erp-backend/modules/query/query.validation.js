@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { SERVICE_CODES } from "../../utils/serviceCodes.js";
+import { OFFERED_MODES, MOVEMENT_SCOPES } from "../../utils/movement.js";
 
 /**
  * Query Management — request schemas (CRM_MASTER §5.6/§5.6a, RULE-QRY).
@@ -14,7 +15,7 @@ import { SERVICE_CODES } from "../../utils/serviceCodes.js";
  */
 
 // Re-exported for callers that used to import it from here (storefront.validation.js).
-export { SERVICE_CODES };
+export { SERVICE_CODES, OFFERED_MODES, MOVEMENT_SCOPES };
 
 const baseQueryFields = {
   // Optional on the wire: portal users are scoped to their own customer, which the
@@ -38,6 +39,17 @@ const baseQueryFields = {
   customerPhone: z.string().min(1).max(50).optional(),
   pickupAddress: z.string().min(1, "A pickup address is required").max(500),
   destinationAddress: z.string().min(1, "A destination address is required").max(500),
+  /**
+   * How far the goods go and how they travel. Required on a new query even though the
+   * columns are nullable: the column is nullable so pre-existing rows stay honest about
+   * never having been asked, but there is no reason for a query raised today to omit it,
+   * and every downstream default (quote template, vendor shortlist) reads these.
+   */
+  scope: z.enum(MOVEMENT_SCOPES, { error: "Choose domestic, export or import" }),
+  modes: z
+    .array(z.enum(OFFERED_MODES))
+    .min(1, "Select at least one transport mode")
+    .max(OFFERED_MODES.length),
   services: z.array(z.string().min(1).max(100)).min(1, "Select at least one service").max(20),
 };
 

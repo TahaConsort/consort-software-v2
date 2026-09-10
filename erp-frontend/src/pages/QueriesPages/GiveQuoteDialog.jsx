@@ -1,9 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileText, Percent, Plus, Send, Trash2 } from "lucide-react";
+import { FileText, Plus, Send, Trash2 } from "lucide-react";
 import {
   Badge,
   Button,
-  Callout,
   DatePicker,
   Input,
   Modal,
@@ -58,51 +57,20 @@ const scrollBehavior = () =>
 
 /**
  * Give Quote — draft (and optionally send) a quotation without leaving the queries
- * list or the rate-request board. Totals are recomputed server-side regardless of
- * what we send (RULE-QT-02).
+ * list. Totals are recomputed server-side regardless of what we send (RULE-QT-02).
  *
- * Two ways in:
- *
- *  · No `initialLines` — charge lines are pre-seeded from the service templates
- *    (lib/quoteTemplates.js), and Ops fills in the prices from their own knowledge.
- *    This is the queries-list path.
- *
- *  · With `initialLines` — the lines come from vendors who actually quoted, each
- *    carrying its buy price and the vendor who owns it. Ops sets a margin % and the
- *    sell prices are derived, then hand-editable. This is the RFQ path, and it is
- *    the reason the buy side exists: the quote is a resale with a known cost rather
- *    than a number someone remembered.
- *
- * `costAmount`/`costVendorId` ride along to the server, which stores them on the
- * charge line as the job's P&L estimate. They are scrubbed from anything a portal
- * customer can read.
+ * Charge lines are pre-seeded from the service templates (lib/quoteTemplates.js) and
+ * Ops fills in the prices from their own knowledge.
  */
-const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mixedCurrency, onClose, onSubmit }) => {
-  const fromRfq = Array.isArray(initialLines) && initialLines.length > 0;
-
-  const [currency, setCurrency] = useState(costCurrency || DEFAULT_CURRENCY);
+const GiveQuoteDialog = ({ busy, query, canSend, onClose, onSubmit }) => {
+  const [currency, setCurrency] = useState(DEFAULT_CURRENCY);
   const [validityDate, setValidityDate] = useState(null);
-  const [margin, setMargin] = useState("15");
-  const [lines, setLines] = useState(() => {
-    if (fromRfq) {
-      return initialLines.map((l) => ({
-        service: l.service,
-        chargeCode: l.chargeCode ?? undefined,
-        description: l.description ?? "",
-        quantity: String(l.quantity ?? 1),
-        // Sell starts empty on purpose — "Apply margin" is a deliberate act, so a
-        // quote never goes out at a price nobody chose.
-        unitPrice: "",
-        cost: l.cost,
-        vendorId: l.vendorId,
-        vendorName: l.vendorName,
-      }));
-    }
-    return quoteTemplateFor({
+  const [lines, setLines] = useState(() =>
+    quoteTemplateFor({
       services: query.services ?? [],
       extraServices: query.services ?? [],
-    }).map((l) => ({ ...l, description: l.description ?? "", quantity: String(l.quantity ?? 1) }));
-  });
+    }).map((l) => ({ ...l, description: l.description ?? "", quantity: String(l.quantity ?? 1) })),
+  );
 
   /**
    * The parent's `busy` comes from the QUERY store, while the quote is created through
@@ -192,31 +160,6 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
 
   // Totals reflect what will actually be quoted, not every box on screen.
   const total = readyRows.reduce((s, r) => s + r.quantity * r.unitPrice, 0);
-  const costTotal = readyRows.reduce((s, r) => s + (Number(lines[r.index].cost) || 0) * r.quantity, 0);
-  const marginValue = total - costTotal;
-  const marginPct = costTotal > 0 ? (marginValue / costTotal) * 100 : null;
-
-  /** Sell = cost + margin%, per unit, rounded to paisa. Only touches costed lines. */
-  const applyMargin = () => {
-    const raw = String(margin).trim();
-    // `Number("")` is 0, which is finite — so an empty box used to apply a silent 0%
-    // margin and price the whole job at cost.
-    if (raw === "" || !Number.isFinite(Number(raw))) return toast.error("Enter a margin percentage");
-    const m = Number(raw);
-    if (m < 0) return toast.error("Margin cannot be negative");
-
-    const costed = lines.filter((l) => l.cost != null && l.cost !== "").length;
-    if (!costed) return toast.error("No line has a cost to mark up");
-
-    setLines((p) =>
-      p.map((l) =>
-        l.cost == null || l.cost === ""
-          ? l
-          : { ...l, unitPrice: (Math.round(Number(l.cost) * (1 + m / 100) * 100) / 100).toString() },
-      ),
-    );
-    toast.success(`${m}% margin applied — adjust any line by hand before sending`);
-  };
 
   const build = () => {
     if (!currencyValid) {
@@ -228,7 +171,7 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
       return null;
     }
     if (!readyRows.length) {
-      toast.error(fromRfq ? "Set a sell price — try Apply margin" : "Add at least one charge line with a price");
+      toast.error("Add at least one charge line with a price");
       return null;
     }
     return {
@@ -244,9 +187,6 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
           description: r.description,
           quantity: r.quantity,
           unitPrice: r.unitPrice,
-          // The cost sheet — internal only, and the basis of the job's P&L estimate.
-          costAmount: src.cost != null && src.cost !== "" ? Number(src.cost) : undefined,
-          costVendorId: src.vendorId ?? undefined,
           sortOrder: i,
         };
       }),
@@ -285,12 +225,10 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
           <ModalHeader title={`Quote ${query.referenceNo}`} onClose={closeIfIdle} />
 
           <ModalBody className="min-h-0 flex-1 overflow-y-auto">
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm leading-relaxed text-muted-foreground">
               {query.customerCompany}
-              {route ? ` · ${route}` : ""} —{" "}
-              {fromRfq
-                ? "priced from the vendors you awarded. Set your margin, then send."
-                : "price each service below. Approval by the customer starts the shipment."}
+              {route ? ` · ${route}` : ""}. Price each service below. Approval by
+              the customer starts the shipment.
             </p>
 
             {/* What the customer asked for */}
@@ -311,15 +249,6 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
                 </div>
               )}
             </div>
-
-            {/* Vendor quotes in more than one currency can't be summed into one sell
-                price without a human deciding the rate. Say so rather than quietly adding. */}
-            {mixedCurrency && (
-              <Callout type="warning" title="The awarded vendors quoted in different currencies">
-                Convert the costs to <b>{currency}</b> yourself before relying on the margin below —
-                it is summing raw numbers, not converting them.
-              </Callout>
-            )}
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <Input
@@ -345,31 +274,6 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
                 helperText="Leave empty for a quote with no expiry date."
               />
             </div>
-
-            {/* Margin control — only meaningful when there are costs to mark up. */}
-            {fromRfq && (
-              <div className="flex flex-wrap items-end gap-3 rounded-lg border border-border bg-muted/30 p-3">
-                <Input
-                  id="gq-margin"
-                  label="Consort margin"
-                  type="number"
-                  min={0}
-                  step={0.5}
-                  size="sm"
-                  value={margin}
-                  disabled={pending}
-                  onChange={(e) => setMargin(e.target.value)}
-                  suffixIcon={<Percent className="h-3.5 w-3.5 text-muted-foreground" />}
-                  wrapperClassName="w-32"
-                />
-                <Button type="button" variant="outline" size="sm" disabled={pending} onClick={applyMargin}>
-                  Apply to all lines
-                </Button>
-                <p className="min-w-48 flex-1 text-xs text-muted-foreground">
-                  Sets each sell price to cost + margin. Every line stays editable afterwards.
-                </p>
-              </div>
-            )}
 
             {/* Charge lines */}
             <div className="space-y-2">
@@ -452,46 +356,17 @@ const GiveQuoteDialog = ({ busy, query, canSend, initialLines, costCurrency, mix
                         />
                       </div>
                     </div>
-
-                    {/* The buy side of this line, read-only: it is what a vendor committed
-                        to, not something to edit while pricing the sale. */}
-                    {l.cost != null && l.cost !== "" && (
-                      <p className="pl-1 text-[11px] text-muted-foreground">
-                        Cost {money(l.cost, costCurrency || currency)}
-                        {l.vendorName ? ` · ${l.vendorName}` : ""}
-                        {Number(l.unitPrice) > 0 && Number(l.cost) > 0 && (
-                          <>
-                            {" · margin "}
-                            <b className={Number(l.unitPrice) >= Number(l.cost) ? "text-success" : "text-destructive"}>
-                              {(((Number(l.unitPrice) - Number(l.cost)) / Number(l.cost)) * 100).toFixed(1)}%
-                            </b>
-                          </>
-                        )}
-                      </p>
-                    )}
                   </div>
                 ))}
               </div>
 
-              {fromRfq ? (
-                <div className="flex flex-wrap justify-end gap-x-5 gap-y-1 pt-1 text-sm">
-                  <span className="text-muted-foreground">Cost: {money(costTotal, costCurrency || currency)}</span>
-                  <span className="font-semibold">Sell: {money(total, currency)}</span>
-                  <span className={marginValue >= 0 ? "font-semibold text-success" : "font-semibold text-destructive"}>
-                    Margin: {money(marginValue, currency)}
-                    {marginPct != null ? ` (${marginPct.toFixed(1)}%)` : ""}
-                  </span>
-                </div>
-              ) : (
-                <div className="pt-1 text-right text-sm font-semibold">Total: {money(total, currency)}</div>
-              )}
+              <div className="pt-1 text-right text-sm font-semibold">Total: {money(total, currency)}</div>
 
               {/* The quote only carries priced lines. Saying so beats a customer asking
                   why the line they discussed on the phone is missing. */}
               <p className="text-right text-[11px] text-muted-foreground">
                 {readyRows.length} line{readyRows.length === 1 ? "" : "s"} will be quoted
                 {skippedCount > 0 ? ` · ${skippedCount} without a price will be skipped` : ""}
-                {fromRfq ? " · cost and vendor are internal, the customer never sees them" : ""}
               </p>
             </div>
           </ModalBody>

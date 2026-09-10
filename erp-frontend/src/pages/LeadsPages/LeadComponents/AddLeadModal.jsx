@@ -1,26 +1,19 @@
 import { useState } from "react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
+  Button,
+  Callout,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
   Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+} from "@neuctra/ui";
 import { createLead } from "@/services/leadService";
 import { listCompanies } from "@/services/customerService";
 import toast from "react-hot-toast";
-import { UserPlus, Loader2, Search, Building2 } from "lucide-react";
+import { UserPlus, Search, Building2 } from "lucide-react";
 
 const INITIAL = {
   companyName: "",
@@ -45,7 +38,8 @@ const AddLeadModal = ({ onSuccess }) => {
   const [linkedCompany, setLinkedCompany] = useState(null); // existing company chosen
   const [linkedContactId, setLinkedContactId] = useState("");
 
-  const handleChange = (e) => setForm((p) => ({ ...p, [e.target.name]: e.target.value }));
+  const handleChange = (e) =>
+    setForm((p) => ({ ...p, [e.target.name]: e.target.value }));
 
   const searchCompanies = async (name) => {
     setForm((p) => ({ ...p, companyName: name }));
@@ -68,8 +62,10 @@ const AddLeadModal = ({ onSuccess }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!form.companyName.trim() && !linkedCompany) return toast.error("Company is required");
-    if (!linkedContactId && !form.contactName.trim()) return toast.error("Contact is required");
+    if (!form.companyName.trim() && !linkedCompany)
+      return toast.error("Company is required");
+    if (!linkedContactId && !form.contactName.trim())
+      return toast.error("Contact is required");
 
     setLoading(true);
     try {
@@ -97,7 +93,9 @@ const AddLeadModal = ({ onSuccess }) => {
 
       const res = await createLead(payload);
       if (res.duplicateWarning?.length) {
-        toast(`Similar company already exists (${res.duplicateWarning.length}) — lead still created`, { icon: "⚠️" });
+        toast(
+          `Similar company already exists (${res.duplicateWarning.length}). The lead was still created.`,
+        );
       }
       toast.success(`Lead ${res.data.referenceNo} created`);
       closeAndReset();
@@ -117,141 +115,194 @@ const AddLeadModal = ({ onSuccess }) => {
     setLinkedContactId("");
   };
 
+  const contactOptions = linkedCompany?.contacts?.length
+    ? [
+        { value: "new", label: "Create a new contact" },
+        ...linkedCompany.contacts.map((c) => ({
+          value: c.id,
+          label: `${c.name}${c.isPrimary ? " (primary)" : ""}`,
+        })),
+      ]
+    : [];
+
   return (
     <>
-      <Button onClick={() => setOpen(true)} className="gap-2 text-sm" size="sm">
-        <UserPlus className="w-4 h-4" />
+      <Button
+        size="sm"
+        className="px-3"
+        onClick={() => setOpen(true)}
+        iconBefore={<UserPlus className="h-4 w-4" />}
+      >
         Add Lead
       </Button>
 
-      <Dialog open={open} onOpenChange={(v) => (!loading && !v ? closeAndReset() : setOpen(v))}>
-        <DialogContent size="lg" className="max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <UserPlus className="w-5 h-5 text-primary" />
-              Add Lead
-            </DialogTitle>
-            <DialogDescription>
-              Company and contact are created with the lead — conversion later only links them.
-            </DialogDescription>
-          </DialogHeader>
+      {open && (
+        <Modal
+          isOpen
+          onClose={() => !loading && closeAndReset()}
+          disableOverlayClose={loading}
+        >
+          <ModalContent
+            maxWidth="max-w-2xl"
+            className="flex max-h-[90vh] flex-col"
+          >
+            <form onSubmit={handleSubmit} className="flex min-h-0 flex-col">
+              <ModalHeader
+                title="Add Lead"
+                icon={<UserPlus className="h-5 w-5" />}
+                onClose={() => !loading && closeAndReset()}
+              />
 
-          <form onSubmit={handleSubmit} className="space-y-4 py-2">
-            {/* Company with duplicate search */}
-            <div className="space-y-1.5">
-              <Label htmlFor="lead-company">Company</Label>
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-                <Input
-                  id="lead-company"
-                  placeholder="Type to search or create…"
-                  value={form.companyName}
-                  onChange={(e) => searchCompanies(e.target.value)}
-                  disabled={loading}
-                  className="pl-9"
-                  autoComplete="off"
-                />
-              </div>
-
-              {matches.length > 0 && !linkedCompany && (
-                <div className="border rounded-lg divide-y max-h-40 overflow-y-auto">
-                  {matches.map((c) => (
-                    <button
-                      key={c.id}
-                      type="button"
-                      onClick={() => pickCompany(c)}
-                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-muted transition"
-                    >
-                      <Building2 className="w-3.5 h-3.5 text-muted-foreground" />
-                      <span className="font-medium">{c.name}</span>
-                      <span className="text-xs text-muted-foreground ml-auto">{c.city || c.country || ""}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {linkedCompany && (
-                <p className="text-xs text-green-600">
-                  Linking existing company — its contacts are selectable below.
+              <ModalBody className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  Company and contact are created with the lead. Converting it
+                  later only links them.
                 </p>
-              )}
-            </div>
 
-            {/* New-company extras */}
-            {!linkedCompany && (
-              <div className="grid grid-cols-2 gap-3">
+                {/* Company, with duplicate search */}
                 <div className="space-y-1.5">
-                  <Label htmlFor="lead-country">Country</Label>
-                  <Input id="lead-country" name="country" value={form.country} onChange={handleChange} disabled={loading} placeholder="Optional" />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="lead-city">City</Label>
-                  <Input id="lead-city" name="city" value={form.city} onChange={handleChange} disabled={loading} placeholder="Optional" />
-                </div>
-              </div>
-            )}
+                  <Input
+                    id="lead-company"
+                    label="Company"
+                    placeholder="Type to search or create…"
+                    value={form.companyName}
+                    onChange={(e) => searchCompanies(e.target.value)}
+                    disabled={loading}
+                    prefixIcon={Search}
+                  />
 
-            {/* Contact — pick existing (linked company) or create */}
-            {linkedCompany && linkedCompany.contacts?.length > 0 && (
-              <div className="space-y-1.5">
-                <Label htmlFor="lead-existing-contact">Existing Contact</Label>
-                <Select
-                  value={linkedContactId || "new"}
-                  onValueChange={(v) => setLinkedContactId(v === "new" ? "" : v)}
+                  {matches.length > 0 && !linkedCompany && (
+                    <div className="max-h-40 divide-y divide-border overflow-y-auto rounded-md border border-border">
+                      {matches.map((c) => (
+                        <button
+                          key={c.id}
+                          type="button"
+                          onClick={() => pickCompany(c)}
+                          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <Building2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                          <span className="truncate font-medium">{c.name}</span>
+                          <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                            {c.city || c.country || ""}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
+                  {linkedCompany && (
+                    <Callout type="success">
+                      Linking the existing company. Its contacts are selectable
+                      below.
+                    </Callout>
+                  )}
+                </div>
+
+                {/* New-company extras */}
+                {!linkedCompany && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <Input
+                      id="lead-country"
+                      name="country"
+                      label="Country"
+                      value={form.country}
+                      onChange={handleChange}
+                      disabled={loading}
+                      placeholder="Optional"
+                    />
+                    <Input
+                      id="lead-city"
+                      name="city"
+                      label="City"
+                      value={form.city}
+                      onChange={handleChange}
+                      disabled={loading}
+                      placeholder="Optional"
+                    />
+                  </div>
+                )}
+
+                {/* Contact — pick an existing one on a linked company, or create */}
+                {contactOptions.length > 0 && (
+                  <Select
+                    label="Existing contact"
+                    value={linkedContactId || "new"}
+                    onValueChange={(v) =>
+                      setLinkedContactId(v === "new" ? "" : v)
+                    }
+                    options={contactOptions}
+                    disabled={loading}
+                  />
+                )}
+
+                {!linkedContactId && (
+                  <>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Input
+                        id="lead-contactName"
+                        name="contactName"
+                        label="Contact name"
+                        value={form.contactName}
+                        onChange={handleChange}
+                        disabled={loading}
+                      />
+                      <Input
+                        id="lead-contactPosition"
+                        name="contactPosition"
+                        label="Position"
+                        value={form.contactPosition}
+                        onChange={handleChange}
+                        disabled={loading}
+                        placeholder="Optional"
+                      />
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <Input
+                        id="lead-contactEmail"
+                        name="contactEmail"
+                        type="email"
+                        label="Contact email"
+                        value={form.contactEmail}
+                        onChange={handleChange}
+                        disabled={loading}
+                        placeholder="Optional"
+                      />
+                      <Input
+                        id="lead-contactPhone"
+                        name="contactPhone"
+                        label="Contact phone"
+                        value={form.contactPhone}
+                        onChange={handleChange}
+                        disabled={loading}
+                        placeholder="Optional"
+                      />
+                    </div>
+                  </>
+                )}
+              </ModalBody>
+
+              <ModalFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={closeAndReset}
                   disabled={loading}
-                  items={[{ value: "new", label: "＋ Create new contact" }, ...linkedCompany.contacts.map((c) => ({ value: c.id, label: `${c.name}${c.isPrimary ? " (primary)" : ""}` }))]}
                 >
-                  <SelectTrigger id="lead-existing-contact">
-                    <SelectValue placeholder="Create new contact" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="new">＋ Create new contact</SelectItem>
-                    {linkedCompany.contacts.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        {c.name}{c.isPrimary ? " (primary)" : ""}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
-
-            {!linkedContactId && (
-              <>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="lead-contactName">Contact Name</Label>
-                    <Input id="lead-contactName" name="contactName" value={form.contactName} onChange={handleChange} disabled={loading} />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="lead-contactPosition">Position</Label>
-                    <Input id="lead-contactPosition" name="contactPosition" value={form.contactPosition} onChange={handleChange} disabled={loading} placeholder="Optional" />
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="lead-contactEmail">Contact Email</Label>
-                    <Input id="lead-contactEmail" name="contactEmail" type="email" value={form.contactEmail} onChange={handleChange} disabled={loading} placeholder="Optional" />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="lead-contactPhone">Contact Phone</Label>
-                    <Input id="lead-contactPhone" name="contactPhone" value={form.contactPhone} onChange={handleChange} disabled={loading} placeholder="Optional" />
-                  </div>
-                </div>
-              </>
-            )}
-
-            <DialogFooter className="gap-2 pt-2">
-              <Button type="button" variant="outline" onClick={closeAndReset} disabled={loading}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={loading} className="gap-2">
-                {loading ? <><Loader2 className="w-4 h-4 animate-spin" />Creating…</> : "Create Lead"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={loading}
+                  loading={loading}
+                  loadingText="Creating…"
+                >
+                  Create Lead
+                </Button>
+              </ModalFooter>
+            </form>
+          </ModalContent>
+        </Modal>
+      )}
     </>
   );
 };

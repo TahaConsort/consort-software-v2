@@ -1,39 +1,119 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Ship, RefreshCw, AlertCircle, Pause, Ban, UserPlus } from "lucide-react";
+import { Ship, RefreshCw, Pause, Ban, UserPlus, Eye } from "lucide-react";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  EmptyState,
+  IconButton,
+  Select,
+  Skeleton,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+  Tooltip,
+} from "@neuctra/ui";
 import toast from "react-hot-toast";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useShipmentStore } from "@/store/shipmentStore";
 import { useAuthStore } from "@/store/authStore";
-import { SHIPMENT_STATUS_LABELS, EXCEPTION_STATE_LABELS, labelForService } from "@/lib/catalog";
+import {
+  SHIPMENT_STATUS_LABELS,
+  EXCEPTION_STATE_LABELS,
+} from "@/lib/catalog";
 
-const STATUS_STYLE = (s) =>
-  s === "closed" || s === "settled"
-    ? "bg-green-50 text-green-700 border-green-400 dark:bg-green-950/30 dark:text-green-300"
+/**
+ * Row colours come from the semantic tokens, so the table follows the consumer's
+ * light/dark theme with no `dark:` variants. Every chip shares one recipe — `/10`
+ * fill, `/30` hairline, nowrap — so the columns read as one family.
+ */
+const CHIP = "whitespace-nowrap border text-xs";
+const NEUTRAL_CHIP = "border-border bg-muted text-muted-foreground";
+
+/**
+ * There are ~25 shipment statuses and four status tokens, so they are grouped by what
+ * the row means rather than given a colour each: finished, not started, everything in
+ * between. Same grouping the page has always used.
+ */
+const statusTone = (s) =>
+  ["settled", "closed"].includes(s)
+    ? "border-success/30 bg-success/10 text-success"
     : s === "booking"
-    ? "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-300"
-    : "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300";
+      ? NEUTRAL_CHIP
+      : "border-info/30 bg-info/10 text-info";
 
-const OWNER_FILTERS = [
+/** One 36px baseline across the toolbar and the row actions, as on queries. */
+const ACTION_BTN = "h-9 px-3";
+const ACTION_ICON_BTN = "h-9 w-9 shrink-0 p-0";
+
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order — `style` is the only
+ * deterministic route.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well. Drop the
+ * overflow and wide content wins the width negotiation, starving the narrow columns.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+const OWNER_OPTIONS = [
   { value: "all", label: "All shipments" },
   { value: "me", label: "Mine" },
   { value: "none", label: "Unclaimed" },
 ];
 
+const STATE_OPTIONS = [
+  { value: "all", label: "All states" },
+  { value: "none", label: "Active" },
+  { value: "on_hold", label: "On Hold" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+/** Icon-only row action, so the column stays narrow enough for the data to breathe. */
+const RowAction = ({ title, onClick, disabled, children }) => (
+  <Tooltip content={title}>
+    <span className="inline-flex shrink-0">
+      <IconButton
+        variant="ghost"
+        className={`${ACTION_ICON_BTN} text-muted-foreground hover:text-foreground`}
+        aria-label={title}
+        disabled={disabled}
+        onClick={onClick}
+        icon={children}
+      />
+    </span>
+  </Tooltip>
+);
+
 const ShipmentsListPage = () => {
-  const { shipments, loading, error, busy, filters, setFilter, fetchShipments, claim } = useShipmentStore();
+  const {
+    shipments,
+    loading,
+    error,
+    busy,
+    filters,
+    setFilter,
+    fetchShipments,
+    claim,
+  } = useShipmentStore();
   const { hasPermission } = useAuthStore();
   const navigate = useNavigate();
   const [claiming, setClaiming] = useState(null);
   const canClaim = hasPermission("shipment.claim");
 
-  useEffect(() => { fetchShipments(); }, [fetchShipments]);
+  useEffect(() => {
+    fetchShipments();
+  }, [fetchShipments]);
 
-  // Claiming from the row: the whole row navigates, so stop the click here.
-  const onClaim = async (e, s) => {
-    e.stopPropagation();
+  const onClaim = async (s) => {
     setClaiming(s.id);
     try {
       const res = await claim(s.id);
@@ -47,104 +127,241 @@ const ShipmentsListPage = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-primary/10 text-primary"><Ship className="w-5 h-5" /></div>
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <Ship className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl leading-none font-semibold">Shipments</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Status is derived from the composed OTD path — a shorter service set runs fewer steps
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Shipments
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Status follows the composed OTD path, so a shorter service set runs
+              fewer steps
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {canClaim && (
-            <Select value={filters.owner || "all"} onValueChange={(v) => setFilter("owner", v === "all" ? "" : v)} items={OWNER_FILTERS}>
-              <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Owner" /></SelectTrigger>
-              <SelectContent>
-                {OWNER_FILTERS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          )}
-          <Select value={filters.exceptionState || "all"} onValueChange={(v) => setFilter("exceptionState", v === "all" ? "" : v)} items={[{ value: "all", label: "All states" }, { value: "none", label: "Active" }, { value: "on_hold", label: "On Hold" }, { value: "cancelled", label: "Cancelled" }]}>
-            <SelectTrigger className="w-32 h-9"><SelectValue placeholder="State" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All states</SelectItem>
-              <SelectItem value="none">Active</SelectItem>
-              <SelectItem value="on_hold">On Hold</SelectItem>
-              <SelectItem value="cancelled">Cancelled</SelectItem>
-            </SelectContent>
-          </Select>
-          <Button variant="outline" size="sm" onClick={fetchShipments} disabled={loading} className="gap-2">
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} /> Refresh
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={fetchShipments}
+            disabled={loading}
+            iconBefore={
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            }
+          >
+            Refresh
           </Button>
+
+          {canClaim && (
+            <Select
+              size="md"
+              value={filters.owner || "all"}
+              onValueChange={(v) => setFilter("owner", v === "all" ? "" : v)}
+              options={OWNER_OPTIONS}
+              placeholder="Owner"
+              showCheckIcon={false}
+              className="w-40!"
+              containerClassName="w-40"
+              triggerClassName="h-9"
+            />
+          )}
+
+          <Select
+            size="md"
+            value={filters.exceptionState || "all"}
+            onValueChange={(v) => setFilter("exceptionState", v === "all" ? "" : v)}
+            options={STATE_OPTIONS}
+            placeholder="State"
+            showCheckIcon={false}
+            className="w-36!"
+            containerClassName="w-36"
+            triggerClassName="h-9"
+          />
         </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
-          <AlertCircle className="w-5 h-5 shrink-0" /><p className="text-sm font-medium flex-1">{error}</p>
-          <Button variant="outline" size="sm" onClick={fetchShipments}>Retry</Button>
-        </div>
+        <Callout type="error" title="Couldn't load the shipments">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={fetchShipments}>
+              Retry
+            </Button>
+          </div>
+        </Callout>
       )}
 
-      <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-left border-b">
-            <tr>
-              <th className="p-3 font-semibold text-muted-foreground">Ref</th>
-              <th className="p-3 font-semibold text-muted-foreground">Customer</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden md:table-cell">Services</th>
-              <th className="p-3 font-semibold text-muted-foreground">Status</th>
-              <th className="p-3 font-semibold text-muted-foreground">State</th>
-              <th className="p-3 font-semibold text-muted-foreground">Owner</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && [...Array(3)].map((_, i) => (
-              <tr key={i} className="border-t animate-pulse">{[...Array(6)].map((_, j) => <td key={j} className="p-3"><div className="h-4 bg-muted rounded w-3/4" /></td>)}</tr>
-            ))}
-            {!loading && shipments.map((s) => (
-              <tr key={s.id} className="border-t hover:bg-muted/30 transition-colors cursor-pointer" onClick={() => navigate(`/admin/shipments/${s.id}`)}>
-                <td className="p-3"><span className="font-medium text-primary">{s.referenceNo}</span></td>
-                <td className="p-3">{s.customerCompany} <span className="text-xs text-muted-foreground">({s.customerRef})</span></td>
-                <td className="p-3 hidden md:table-cell">
-                  <div className="flex flex-wrap gap-1 max-w-xs">
-                    {s.services.map((sv) => <Badge key={sv} variant="secondary" className="text-[10px]">{labelForService(sv)}</Badge>)}
-                  </div>
-                </td>
-                <td className="p-3"><Badge variant="outline" className={`text-xs ${STATUS_STYLE(s.status)}`}>{SHIPMENT_STATUS_LABELS[s.status]}</Badge></td>
-                <td className="p-3">
-                  {s.exceptionState === "on_hold" && <Badge variant="outline" className="text-xs gap-1 bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300"><Pause className="w-3 h-3" /> On Hold</Badge>}
-                  {s.exceptionState === "cancelled" && <Badge variant="outline" className="text-xs gap-1 bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300"><Ban className="w-3 h-3" /> Cancelled</Badge>}
-                  {s.exceptionState === "none" && <span className="text-xs text-muted-foreground">{EXCEPTION_STATE_LABELS.none}</span>}
-                </td>
-                {/* Ops ownership — one person runs a shipment; claiming starts the work. */}
-                <td className="p-3">
-                  {s.opsOwnerName ? (
-                    <span className="text-xs">{s.opsOwnerName}</span>
-                  ) : canClaim ? (
-                    <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]"
-                      disabled={busy || claiming === s.id} onClick={(e) => onClaim(e, s)}>
-                      <UserPlus className="w-3 h-3" /> {claiming === s.id ? "Claiming…" : "Claim"}
-                    </Button>
-                  ) : (
-                    <span className="text-xs text-muted-foreground">Unclaimed</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-            {!loading && shipments.length === 0 && !error && (
-              <tr><td colSpan="6" className="p-10 text-center">
-                <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                  <Ship className="w-8 h-8 opacity-30" /><p className="font-medium">No shipments yet</p>
-                  <p className="text-xs">Shipments appear once a quotation is approved.</p>
-                </div>
-              </td></tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+      {/* EmptyState brings its own padding and icon sizing, so the Card only supplies
+          the surface. The empty case replaces the table rather than living inside it:
+          TD carries no `colSpan`, so a spanning "nothing here" row is not expressible. */}
+      {!loading && shipments.length === 0 && !error ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<Ship />}
+            title="No shipments yet"
+            description="A shipment is born the moment a quotation is approved, and appears here with its OTD path already composed."
+          />
+        </Card>
+      ) : (
+        /* Table renders its own surface, plus overflow-x-auto from `responsive`.
+           Wrapping it in a Card would nest a second border at a smaller radius. */
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "13%" }}>Ref</TH>
+                  <TH style={{ ...HEAD_CELL, width: "20%" }}>Customer</TH>
+              
+                  <TH style={{ ...HEAD_CELL, width: "16%" }}>Status</TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    State
+                  </TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "11%" }}
+                  >
+                    Owner
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "12%", textAlign: "right" }}>
+                    Actions
+                  </TH>
+                </TRow>
+              </THead>
+
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(4)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(7)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
+
+                {/* DATA */}
+                {!loading &&
+                  shipments.map((s) => (
+                    <TRow
+                      key={s.id}
+                      className="bg-card! cursor-pointer"
+                      onClick={() => navigate(`/admin/shipments/${s.id}`)}
+                    >
+                      <TD
+                        style={{ ...CELL, ...CLIP }}
+                        className="truncate font-medium text-primary"
+                      >
+                        {s.referenceNo}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <div className="truncate font-medium">
+                          {s.customerCompany}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {s.customerRef}
+                        </div>
+                      </TD>
+
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <Badge
+                          variant="soft"
+                          size="sm"
+                          text={SHIPMENT_STATUS_LABELS[s.status] ?? s.status}
+                          className={`${CHIP} ${statusTone(s.status)}`}
+                        />
+                      </TD>
+
+                      <TD
+                        className="hidden sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {s.exceptionState === "on_hold" && (
+                          <Badge
+                            variant="soft"
+                            size="sm"
+                            text="On Hold"
+                            icon={<Pause className="h-3 w-3" />}
+                            className={`${CHIP} border-warning/30 bg-warning/10 text-warning`}
+                          />
+                        )}
+                        {s.exceptionState === "cancelled" && (
+                          <Badge
+                            variant="soft"
+                            size="sm"
+                            text="Cancelled"
+                            icon={<Ban className="h-3 w-3" />}
+                            className={`${CHIP} border-destructive/30 bg-destructive/10 text-destructive`}
+                          />
+                        )}
+                        {s.exceptionState === "none" && (
+                          <span className="text-xs text-muted-foreground">
+                            {EXCEPTION_STATE_LABELS.none}
+                          </span>
+                        )}
+                      </TD>
+
+                      {/* Ops ownership — one person runs a shipment. Who that is is a
+                          fact, so it stays a fact here; claiming is an action and lives
+                          in the actions column with the others. */}
+                      <TD
+                        className="hidden truncate text-xs lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {s.opsOwnerName || (
+                          <span className="text-muted-foreground">Unclaimed</span>
+                        )}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP, textAlign: "right" }}>
+                        {/* The row itself navigates, so these must not bubble. */}
+                        <div
+                          className="flex min-w-0 items-center justify-end gap-1.5"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <RowAction
+                            title="Open shipment"
+                            onClick={() => navigate(`/admin/shipments/${s.id}`)}
+                          >
+                            <Eye className="h-4 w-4" />
+                          </RowAction>
+
+                          {!s.opsOwnerName && canClaim && (
+                            <RowAction
+                              title={
+                                claiming === s.id
+                                  ? "Claiming…"
+                                  : "Claim this shipment"
+                              }
+                              disabled={busy || claiming === s.id}
+                              onClick={() => onClaim(s)}
+                            >
+                              <UserPlus className="h-4 w-4" />
+                            </RowAction>
+                          )}
+                        </div>
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

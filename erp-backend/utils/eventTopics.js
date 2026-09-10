@@ -151,28 +151,8 @@ export const EVENT_TOPICS = {
   /* ── Export trade documents (roadmap §4) ─────────────────────────────────── */
   // A trade document changes the derived stage, the alert list and often the invoice
   // ledger, so each invalidates the shipment room plus the trade topic.
-  "trade.contract.created": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
-  "fi.registered": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
-  "fi.drawdown.recorded": {
-    topics: (p) => [TOPICS.TRADE, TOPICS.INVOICES, ...(p.shipmentId ? shipmentTopics(p) : [])],
-    roles: ALL_INTERNAL,
-  },
-  "fi.closed": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: ALL_INTERNAL },
   "fi.expiring": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: [...FINANCE, ...MGMT] },
   "fi.da_due": { topics: () => [TOPICS.TRADE, TOPICS.DASHBOARD], roles: [...FINANCE, ...MGMT] },
-  "trade.container.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "packing_list.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "packing_list.confirmed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "trade_invoice.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "trade_invoice.issued": {
-    topics: (p) => [...shipmentTopics(p), TOPICS.TRADE, TOPICS.INVOICES],
-    roles: ALL_INTERNAL,
-    scoped: shipmentScoped,
-  },
-  "bol.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "gd.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "shipment.trade_stage.changed": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
-  "trade.mismatch_detected": { topics: (p) => [...shipmentTopics(p), TOPICS.TRADE], roles: ALL_INTERNAL, scoped: shipmentScoped },
 
   /* ── OTD steps ─────────────────────────────────────────────────────────── */
   // A step's sub-action tick or notes edit changes only that shipment's gating.
@@ -241,14 +221,6 @@ export const EVENT_TOPICS = {
   "user.updated": { topics: () => [TOPICS.EMPLOYEES, TOPICS.TASKS], roles: [...MGMT, "hr"] },
   "user.deactivated": { topics: () => [TOPICS.EMPLOYEES, TOPICS.TASKS], roles: [...MGMT, "hr"] },
   "vendor.changed": { topics: () => [TOPICS.VENDORS], roles: [...FINANCE, ...OPS, ...MGMT] },
-
-  /* ── Vendor RFQs (buy side) ────────────────────────────────────────────────
-     Each also carries QUERIES, because the queries list shows a per-query
-     "vendor quotes in" chip that goes stale the moment an RFQ moves. */
-  "rfq.created": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
-  "rfq.updated": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
-  "rfq.quote_received": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES], roles: [...OPS, ...MGMT] },
-  "rfq.awarded": { topics: () => [TOPICS.RFQS, TOPICS.QUERIES, TOPICS.DASHBOARD], roles: [...OPS, ...MGMT] },
 
   /* ── Observability ─────────────────────────────────────────────────────── */
   "action.unroutable": { topics: () => [TOPICS.ACTION_ENGINE, TOPICS.NOTIFICATIONS], roles: MGMT },

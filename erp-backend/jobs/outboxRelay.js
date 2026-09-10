@@ -633,32 +633,6 @@ const HANDLERS = {
     });
   },
 
-  // ── Vendor RFQs (buy side) ──
-  // Creation and edits ride the topic fan-out alone: the ops person who sent the
-  // request is the one watching the board, and notifying them of their own click
-  // is noise. Only an actual vendor reply and an award are worth a nudge.
-  "rfq.created": async () => {},
-  "rfq.updated": async () => {},
-
-  "rfq.quote_received": async (payload) => {
-    await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
-      type: "rfq.quote_received",
-      title: `Vendor rate in — ${payload.referenceNo}`,
-      body: `${payload.vendorName} quoted ${payload.currency} ${payload.totalAmount} for ${payload.service}.`,
-      actionUrl: "/admin/rfqs",
-    });
-  },
-
-  "rfq.awarded": async (payload) => {
-    await notifyUsers(await usersWithRole("ops_manager", "ops_exec"), {
-      type: "rfq.awarded",
-      title: `${payload.referenceNo} awarded to ${payload.vendorName}`,
-      body: "The cost is locked in — build the customer quote.",
-      actionUrl: "/admin/rfqs",
-      priority: 1,
-    });
-  },
-
   "shipment.created": async (payload) => {
     emitToRooms([`shipment:${payload.shipmentId}`, `customer:${payload.customerId}`], "shipment:updated", {
       shipmentId: payload.shipmentId,
@@ -786,25 +760,6 @@ const HANDLERS = {
       body: `B/L ${payload.blNumber ?? "—"} — due ${due}. Computed from the shipped-on-board date, not typed in.`,
       actionUrl: shipment ? `/admin/shipments/${shipment.id}` : "/admin/trade",
       priority: overdue ? 2 : 1,
-    });
-  },
-
-  // Reported, never enforced: the desk needs to SEE that two documents disagree.
-  "trade.mismatch_detected": async (payload) => {
-    const shipment = await prisma.shipment.findUnique({
-      where: { id: payload.shipmentId },
-      select: { id: true, opsOwnerId: true },
-    });
-    const targets = [
-      ...(shipment?.opsOwnerId ? [shipment.opsOwnerId] : await usersWithRole("ops_manager", "ops_exec")),
-      ...(await usersWithRole("accounts")),
-    ];
-    await notifyUsers(targets, {
-      type: "trade.mismatch_detected",
-      title: `Documents disagree on ${payload.referenceNo}`,
-      body: (payload.alerts ?? []).map((a) => a.message).join(" "),
-      actionUrl: `/admin/shipments/${payload.shipmentId}`,
-      priority: 1,
     });
   },
 

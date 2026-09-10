@@ -1,33 +1,103 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ListChecks, RefreshCw, AlertCircle, CheckCircle2, Hand, Clock } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  ListChecks,
+  RefreshCw,
+  CheckCircle2,
+  Hand,
+  Clock,
+  ArrowRight,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  CardBody,
+  EmptyState,
+  Select,
+  Skeleton,
+} from "@neuctra/ui";
 import toast from "react-hot-toast";
 import { useTaskStore } from "@/store/taskStore";
 import { useAuthStore } from "@/store/authStore";
 import { TASK_STATUS_LABELS } from "@/lib/catalog";
 
-const STATUS_STYLE = {
-  queued: "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-300",
-  open: "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/30 dark:text-blue-300",
-  in_progress: "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/30 dark:text-amber-300",
-  done: "bg-green-50 text-green-700 border-green-400 dark:bg-green-950/30 dark:text-green-300",
-  on_hold: "bg-orange-50 text-orange-700 border-orange-300 dark:bg-orange-950/30 dark:text-orange-300",
-  cancelled: "bg-zinc-100 text-zinc-500 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-400",
+/** One 36px baseline across the toolbar, as on the leads and queries screens. */
+const ACTION_BTN = "h-9 px-3";
+
+/**
+ * One chip recipe for every badge on this screen — a /10 fill, a /30 hairline, nowrap —
+ * so the row reads as a single family. All of it comes off the semantic tokens, which is
+ * why there are no `dark:` variants: the ramp follows the theme on its own.
+ */
+const CHIP = "shrink-0 whitespace-nowrap border text-xs";
+const TONE = {
+  neutral: "border-border bg-muted text-muted-foreground",
+  info: "border-info/30 bg-info/10 text-info",
+  warning: "border-warning/30 bg-warning/10 text-warning",
+  success: "border-success/30 bg-success/10 text-success",
+  danger: "border-destructive/30 bg-destructive/10 text-destructive",
 };
 
-const overdue = (t) => t.dueDate && new Date(t.dueDate) < new Date() && ["open", "in_progress"].includes(t.status);
+const STATUS_TONE = {
+  queued: TONE.neutral,
+  open: TONE.info,
+  in_progress: TONE.warning,
+  done: TONE.success,
+  on_hold: TONE.warning,
+  cancelled: `${TONE.neutral} line-through`,
+};
 
-const compact = (n) => Number(n ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+const STATUS_OPTIONS = [
+  { value: "all", label: "All statuses" },
+  ...Object.entries(TASK_STATUS_LABELS).map(([value, label]) => ({
+    value,
+    label,
+  })),
+];
+
+const compact = (n) =>
+  Number(n ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+const fmtDate = (d) =>
+  d ? new Date(d).toLocaleDateString(undefined, { day: "numeric", month: "short" }) : null;
 
 const TasksListPage = () => {
-  const { tasks, loading, error, busy, filters, setFilter, fetchTasks, claimTask, completeTask } = useTaskStore();
+  const {
+    tasks,
+    loading,
+    error,
+    busy,
+    filters,
+    setFilter,
+    fetchTasks,
+    claimTask,
+    completeTask,
+  } = useTaskStore();
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const navigate = useNavigate();
 
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  /**
+   * A due date passes on its own, with nobody typing. Reading the clock from ticking
+   * state rather than calling `new Date()` mid-render means the Overdue chip actually
+   * appears when the deadline goes by, instead of at whatever re-render happens next —
+   * and it keeps an impure call out of the render path.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    fetchTasks();
+  }, [fetchTasks]);
+
+  const isOverdue = (t) =>
+    t.dueDate &&
+    new Date(t.dueDate).getTime() < now &&
+    ["open", "in_progress"].includes(t.status);
 
   // The store refetches and publishes: completing a step-linked task advances the
   // shipment (RULE-TK-02), so the shipment screens and the dashboard hear about it too.
@@ -42,94 +112,207 @@ const TasksListPage = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-primary/10 text-primary"><ListChecks className="w-5 h-5" /></div>
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <ListChecks className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl leading-none font-semibold">My Task Queue</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              My Task Queue
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
               Completing a step's task advances the shipment (RULE-TK-02)
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(TASK_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
-            <SelectTrigger className="w-36 h-9"><SelectValue placeholder="Status" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All statuses</SelectItem>
-              {Object.entries(TASK_STATUS_LABELS).map(([v, l]) => <SelectItem key={v} value={v}>{l}</SelectItem>)}
-            </SelectContent>
-          </Select>
-          <Button variant="outline" size="sm" onClick={fetchTasks} disabled={loading} className="gap-2">
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} /> Refresh
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            size="md"
+            value={filters.status || "all"}
+            onValueChange={(v) => setFilter("status", v === "all" ? "" : v)}
+            options={STATUS_OPTIONS}
+            placeholder="Status"
+            showCheckIcon={false}
+            className="w-40!"
+            containerClassName="w-40"
+            triggerClassName="h-9"
+          />
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={fetchTasks}
+            disabled={loading}
+            iconBefore={
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            }
+          >
+            Refresh
           </Button>
         </div>
       </div>
 
       {error && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
-          <AlertCircle className="w-5 h-5 shrink-0" /><p className="text-sm font-medium flex-1">{error}</p>
-          <Button variant="outline" size="sm" onClick={fetchTasks}>Retry</Button>
-        </div>
+        <Callout type="error" title="Couldn't load your tasks">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={fetchTasks}>
+              Retry
+            </Button>
+          </div>
+        </Callout>
       )}
 
-      <div className="grid gap-3">
-        {loading && [...Array(3)].map((_, i) => <div key={i} className="h-20 rounded-xl border bg-muted/30 animate-pulse" />)}
+      <Card padding="none" className="overflow-hidden">
+        <CardBody className="p-0">
+          {loading && (
+            <div className="space-y-3 p-5">
+              {Array.from({ length: 3 }, (_, i) => (
+                <Skeleton key={i} variant="rectangular" height={88} />
+              ))}
+              <span className="sr-only">Loading tasks…</span>
+            </div>
+          )}
 
-        {!loading && tasks.map((t) => (
-          <div key={t.id} className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4 flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <p className="font-medium">{t.title}</p>
-                <Badge variant="outline" className={`text-[10px] ${STATUS_STYLE[t.status] ?? ""}`}>{TASK_STATUS_LABELS[t.status]}</Badge>
-                {overdue(t) && <Badge variant="outline" className="text-[10px] gap-1 bg-red-50 text-red-700 border-red-300 dark:bg-red-950/30 dark:text-red-300"><Clock className="w-3 h-3" /> Overdue</Badge>}
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">
-                {t.departmentName}{t.shipmentRef ? ` · ${t.shipmentRef}` : ""}{t.assigneeName ? ` · ${t.assigneeName}` : " · unassigned (queue)"}
-                {t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString()}` : ""}
-              </p>
-              {t.stepMoney && ((t.stepMoney.receivable?.count ?? 0) > 0 || (t.stepMoney.payable?.count ?? 0) > 0) && (
-                <div className="flex items-center gap-1.5 mt-1.5">
-                  {(t.stepMoney.receivable?.count ?? 0) > 0 && (
-                    <Badge variant="outline" className="text-[10px] bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/30 dark:text-emerald-300">
-                      IN {compact(t.stepMoney.receivable.total)}
-                    </Badge>
-                  )}
-                  {(t.stepMoney.payable?.count ?? 0) > 0 && (
-                    <Badge variant="outline" className="text-[10px] bg-orange-50 text-orange-700 border-orange-300 dark:bg-orange-950/30 dark:text-orange-300">
-                      OUT {compact(t.stepMoney.payable.total)}
-                    </Badge>
-                  )}
-                </div>
-              )}
-              {t.description && <p className="text-sm text-muted-foreground mt-1">{t.description}</p>}
-            </div>
-            <div className="flex items-center gap-2 shrink-0">
-              {t.shipmentId && (
-                <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => navigate(`/admin/shipments/${t.shipmentId}`)}>Open</Button>
-              )}
-              {!t.assigneeId && ["queued", "open"].includes(t.status) && hasPermission("task.update") && (
-                <Button size="sm" variant="outline" className="h-8 text-xs gap-1" disabled={busy} onClick={() => act(() => claimTask(t.id), "Task claimed")}>
-                  <Hand className="w-3.5 h-3.5" /> Claim
-                </Button>
-              )}
-              {["open", "in_progress"].includes(t.status) && hasPermission("task.complete") && (
-                <Button size="sm" className="h-8 text-xs gap-1" disabled={busy} onClick={() => act(() => completeTask(t.id), "Task completed")}>
-                  <CheckCircle2 className="w-3.5 h-3.5" /> Complete
-                </Button>
-              )}
-            </div>
-          </div>
-        ))}
+          {!loading && tasks.length > 0 && (
+            <ul className="divide-y divide-border">
+              {tasks.map((t) => {
+                const overdue = isOverdue(t);
+                const money = t.stepMoney;
+                const hasIn = (money?.receivable?.count ?? 0) > 0;
+                const hasOut = (money?.payable?.count ?? 0) > 0;
+                return (
+                  <li
+                    key={t.id}
+                    className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4 sm:p-5"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm font-medium text-foreground">
+                          {t.title}
+                        </p>
+                        <Badge
+                          variant="soft"
+                          size="sm"
+                          text={TASK_STATUS_LABELS[t.status] ?? t.status}
+                          className={`${CHIP} ${STATUS_TONE[t.status] ?? TONE.neutral}`}
+                        />
+                        {overdue && (
+                          <Badge
+                            variant="soft"
+                            size="sm"
+                            text="Overdue"
+                            icon={<Clock className="h-3 w-3" />}
+                            className={`${CHIP} ${TONE.danger}`}
+                          />
+                        )}
+                      </div>
 
-        {!loading && tasks.length === 0 && !error && (
-          <div className="p-10 text-center border rounded-xl">
-            <div className="flex flex-col items-center gap-2 text-muted-foreground">
-              <ListChecks className="w-8 h-8 opacity-30" /><p className="font-medium">Your queue is clear</p>
-            </div>
-          </div>
-        )}
-      </div>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t.departmentName}
+                        {t.shipmentRef ? ` · ${t.shipmentRef}` : ""}
+                        {t.assigneeName
+                          ? ` · ${t.assigneeName}`
+                          : " · unassigned (queue)"}
+                        {t.dueDate ? ` · due ${fmtDate(t.dueDate)}` : ""}
+                      </p>
+
+                      {/* What this step is worth, both ways round. Receivable reads as
+                          success and payable as warning, the same pairing the shipment
+                          screen uses for an invoice's kind. */}
+                      {(hasIn || hasOut) && (
+                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                          {hasIn && (
+                            <Badge
+                              variant="soft"
+                              size="sm"
+                              text={`IN ${compact(money.receivable.total)}`}
+                              className={`${CHIP} ${TONE.success}`}
+                            />
+                          )}
+                          {hasOut && (
+                            <Badge
+                              variant="soft"
+                              size="sm"
+                              text={`OUT ${compact(money.payable.total)}`}
+                              className={`${CHIP} ${TONE.warning}`}
+                            />
+                          )}
+                        </div>
+                      )}
+
+                      {t.description && (
+                        <p className="mt-1.5 text-sm text-muted-foreground">
+                          {t.description}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Full-width buttons on a phone, natural width from `sm`. */}
+                    <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                      {t.shipmentId && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 px-3"
+                          iconAfter={<ArrowRight className="h-3.5 w-3.5" />}
+                          onClick={() =>
+                            navigate(`/admin/shipments/${t.shipmentId}`)
+                          }
+                        >
+                          Open
+                        </Button>
+                      )}
+                      {!t.assigneeId &&
+                        ["queued", "open"].includes(t.status) &&
+                        hasPermission("task.update") && (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-8 px-3"
+                            disabled={busy}
+                            iconBefore={<Hand className="h-3.5 w-3.5" />}
+                            onClick={() =>
+                              act(() => claimTask(t.id), "Task claimed")
+                            }
+                          >
+                            Claim
+                          </Button>
+                        )}
+                      {["open", "in_progress"].includes(t.status) &&
+                        hasPermission("task.complete") && (
+                          <Button
+                            size="sm"
+                            className="h-8 px-3"
+                            disabled={busy}
+                            iconBefore={<CheckCircle2 className="h-3.5 w-3.5" />}
+                            onClick={() =>
+                              act(() => completeTask(t.id), "Task completed")
+                            }
+                          >
+                            Complete
+                          </Button>
+                        )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {!loading && tasks.length === 0 && !error && (
+            <EmptyState
+              icon={<ListChecks />}
+              title="Your queue is clear"
+              description="Work lands here as shipments reach a step your department owns."
+              className="py-14"
+            />
+          )}
+        </CardBody>
+      </Card>
     </div>
   );
 };

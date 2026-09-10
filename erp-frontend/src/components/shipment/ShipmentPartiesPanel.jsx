@@ -156,7 +156,7 @@ const ShipmentPartiesPanel = ({ shipmentId, locked, lockReason }) => {
   };
 
   return (
-    <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-5">
+    <div className="border border-border rounded-xl bg-card shadow-sm p-5">
       <div className="flex items-center justify-between mb-3 gap-2">
         <h2 className="font-semibold flex items-center gap-2">
           <Building2 className="w-4 h-4" /> Parties

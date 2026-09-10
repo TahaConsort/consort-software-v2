@@ -97,13 +97,12 @@ const createCustomerInline = async (tx, { companyName, country, contact, ownerId
   return customer;
 };
 
-// `includeRfq` carries the buy-side progress chip (how many vendors have come
-// back with rates). Counts only — no amounts — but it is still internal, so it
-// is withheld from portal customers. Every call site passes `!req.user.customerId`,
-// so it doubles as "is the viewer internal" — which is what `includeOwner` (who on
-// the sales floor owns this) defaults to. A customer is not told which BDO holds
-// their account, or that nobody does yet.
-const hydrateQueries = async (queries, { includeRfq = true, includeOwner = includeRfq } = {}) => {
+// `includeInternal` is the "is the viewer internal" signal — every call site passes
+// `!req.user.customerId`. It gates the ops-desk extras (the Rate Confirmation
+// shortcut, the acceptance chip) and is what `includeOwner` (who on the sales floor
+// owns this) defaults to. A customer is not told which BDO holds their account, or
+// that nobody does yet.
+const hydrateQueries = async (queries, { includeInternal = true, includeOwner = includeInternal } = {}) => {
   const customerIds = [...new Set(queries.map((q) => q.customerId))];
   const userIds = [...new Set(queries.map((q) => q.raisedById))];
 
@@ -143,36 +142,16 @@ const hydrateQueries = async (queries, { includeRfq = true, includeOwner = inclu
   const nameOf = (u) =>
     u?.employee ? `${u.employee.firstName} ${u.employee.lastName}` : u?.email ?? "—";
 
-  // One extra round-trip for the whole page rather than a per-row count.
-  const rfqByQuery = new Map();
-  if (includeRfq) {
-    const rfqs = await prisma.vendorRfq.findMany({
-      where: { queryId: { in: queries.map((q) => q.id) }, status: { not: "cancelled" } },
-      select: { queryId: true, status: true, quotes: { select: { status: true } } },
-    });
-    for (const rfq of rfqs) {
-      const acc = rfqByQuery.get(rfq.queryId) ?? { rfqs: 0, awarded: 0, quotesIn: 0, quotesTotal: 0 };
-      acc.rfqs += 1;
-      if (rfq.status === "awarded") acc.awarded += 1;
-      for (const q of rfq.quotes) {
-        if (q.status === "declined") continue; // a decline is an answer, not a pending ask
-        acc.quotesTotal += 1;
-        if (q.status === "quoted") acc.quotesIn += 1;
-      }
-      rfqByQuery.set(rfq.queryId, acc);
-    }
-  }
-
   /**
    * The Rate Confirmation generated when the quote was approved (ADR-055 / RULE-QT-07),
    * so Ops can pull it straight off the queries row instead of walking to the shipment.
    *
    * Two round-trips for the page, not per row. Internal-only: a portal customer gets
    * their copy from the portal, where the publish flag is the gate — this shortcut is
-   * for the ops desk and rides on the same `includeRfq` internal-viewer signal.
+   * for the ops desk and rides on the same `includeInternal` viewer signal.
    */
   const rcByQuery = new Map();
-  if (includeRfq) {
+  if (includeInternal) {
     const approved = queries.filter((q) => q.status === "shipment_created").map((q) => q.id);
     if (approved.length) {
       const shipments = await prisma.shipment.findMany({
@@ -215,7 +194,7 @@ const hydrateQueries = async (queries, { includeRfq = true, includeOwner = inclu
    * live quotations, one for their signed copies. Internal-only, like the RC above.
    */
   const acceptanceByQuery = new Map();
-  if (includeRfq) {
+  if (includeInternal) {
     const liveQueries = queries.filter((q) => ["quoted", "shipment_created"].includes(q.status)).map((q) => q.id);
     if (liveQueries.length) {
       const quotations = await prisma.quotation.findMany({
@@ -306,7 +285,6 @@ const hydrateQueries = async (queries, { includeRfq = true, includeOwner = inclu
               : null,
           }
         : {}),
-      rfqSummary: rfqByQuery.get(q.id) ?? null,
       rateConfirmation: rcByQuery.get(q.id) ?? null,
       acceptance: acceptanceByQuery.get(q.id) ?? null,
     };
@@ -325,7 +303,7 @@ export const listQueries = catchAsync(async (req, res) => {
   if (channel && CHANNEL_TO_RAISED_VIA[channel]) extra.raisedVia = CHANNEL_TO_RAISED_VIA[channel];
   const where = await scopedQueryWhere(req, extra);
   const queries = await prisma.query.findMany({ where, orderBy: { createdAt: "desc" } });
-  res.json({ success: true, data: await hydrateQueries(queries, { includeRfq: !req.user?.customerId }) });
+  res.json({ success: true, data: await hydrateQueries(queries, { includeInternal: !req.user?.customerId }) });
 });
 
 /* ── POST /api/queries ── */
@@ -400,6 +378,8 @@ export const createQuery = catchAsync(async (req, res, next) => {
         ...contact,
         pickupAddress: req.body.pickupAddress,
         destinationAddress: req.body.destinationAddress,
+        scope: req.body.scope,
+        modes: req.body.modes,
         services,
       },
     });
@@ -407,6 +387,8 @@ export const createQuery = catchAsync(async (req, res, next) => {
     await emitEvent(tx, "query.created", {
       queryId: created.id,
       referenceNo,
+      scope: created.scope,
+      modes: created.modes,
       services,
       customerId,
       raisedVia: created.raisedVia,
@@ -414,7 +396,7 @@ export const createQuery = catchAsync(async (req, res, next) => {
     return { query: created, createdCustomer: minted };
   });
 
-  const [hydrated] = await hydrateQueries([query], { includeRfq: !req.user?.customerId });
+  const [hydrated] = await hydrateQueries([query], { includeInternal: !req.user?.customerId });
   res.status(201).json({
     success: true,
     message: createdCustomer
@@ -430,7 +412,7 @@ export const getQuery = catchAsync(async (req, res, next) => {
   // Out-of-scope reads 404, never 403 (BUSINESS_RULES §2.3).
   if (!query || !(await queryInScope(req, query))) return next(new AppError("Query not found", 404));
 
-  const [hydrated] = await hydrateQueries([query], { includeRfq: !req.user?.customerId });
+  const [hydrated] = await hydrateQueries([query], { includeInternal: !req.user?.customerId });
   res.json({ success: true, data: hydrated });
 });
 
@@ -452,7 +434,7 @@ export const updateQuery = catchAsync(async (req, res, next) => {
     return u;
   });
 
-  const [hydrated] = await hydrateQueries([updated], { includeRfq: !req.user?.customerId });
+  const [hydrated] = await hydrateQueries([updated], { includeInternal: !req.user?.customerId });
   res.json({ success: true, message: "Query updated", data: hydrated });
 });
 
@@ -491,7 +473,7 @@ export const cancelQuery = catchAsync(async (req, res, next) => {
     return u;
   });
 
-  const [hydrated] = await hydrateQueries([updated], { includeRfq: !req.user?.customerId });
+  const [hydrated] = await hydrateQueries([updated], { includeInternal: !req.user?.customerId });
   res.json({ success: true, message: "Query cancelled", data: hydrated });
 });
 
@@ -546,6 +528,6 @@ export const claimQuery = catchAsync(async (req, res, next) => {
     });
   });
 
-  const [hydrated] = await hydrateQueries([query], { includeRfq: !req.user?.customerId });
+  const [hydrated] = await hydrateQueries([query], { includeInternal: !req.user?.customerId });
   res.json({ success: true, message: `Query ${query.referenceNo} is yours`, data: hydrated });
 });

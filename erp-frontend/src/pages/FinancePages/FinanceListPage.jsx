@@ -119,7 +119,7 @@ const FinanceListPage = () => {
           { value: "payable", label: "Payables (we owe)" },
         ].map((tab) => (
           <button key={tab.value} type="button"
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${filters.kind === tab.value ? "bg-white dark:bg-zinc-900 shadow-sm font-medium" : "text-muted-foreground"}`}
+            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${filters.kind === tab.value ? "bg-card shadow-sm font-medium" : "text-muted-foreground"}`}
             onClick={() => setKindFilter(tab.value)}>
             {tab.label}
           </button>
@@ -143,7 +143,7 @@ const FinanceListPage = () => {
 
       {/* Two different empty states — "none exist" and "none match" need different exits. */}
       {!loading && invoices.length === 0 && (
-        <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-10 text-center space-y-3">
+        <div className="border border-border rounded-xl bg-card shadow-sm p-10 text-center space-y-3">
           <p className="text-muted-foreground text-sm">
             {allOfKind.length === 0
               ? `No ${receivable ? "receivable" : "payable"} invoices yet.`
@@ -195,7 +195,7 @@ const TONE = {
 };
 
 const SummaryTile = ({ label, value, hint, tone }) => (
-  <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-3">
+  <div className="border border-border rounded-xl bg-card shadow-sm p-3">
     <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
     <p className={`text-lg font-semibold mt-0.5 ${TONE[tone] ?? ""}`}>{value}</p>
     {hint && <p className="text-[11px] text-muted-foreground mt-0.5">{hint}</p>}
@@ -212,7 +212,7 @@ const InvoiceCard = ({ inv, busy, hasPermission, onOpenShipment, onIssue, onPay,
   const lines = inv.lines ?? [];
 
   return (
-    <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm">
+    <div className="border border-border rounded-xl bg-card shadow-sm">
       <div className="p-4 flex items-start justify-between gap-4 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 flex-wrap">

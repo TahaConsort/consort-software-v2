@@ -30,7 +30,6 @@ export const TOPICS = {
   NOTIFICATIONS: "notifications",
   EMPLOYEES: "employees",
   VENDORS: "vendors",
-  RFQS: "rfqs",
   AUDIT: "audit",
   ACTION_ENGINE: "actionEngine",
   DASHBOARD: "dashboard",

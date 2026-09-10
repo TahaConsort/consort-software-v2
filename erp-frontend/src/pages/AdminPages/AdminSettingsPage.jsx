@@ -216,7 +216,7 @@ const AdminSettingsPage = () => {
                 </Button>
               </div>
 
-              <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
+              <div className="border border-border rounded-xl overflow-x-auto bg-card shadow-sm">
                 <table className="w-full text-sm">
                   <thead className="bg-muted/40 text-left border-b">
                     <tr>

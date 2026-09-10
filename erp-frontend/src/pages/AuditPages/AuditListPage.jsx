@@ -35,7 +35,7 @@ const AuditListPage = () => {
       </div>
 
       {/* Filters */}
-      <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm p-4 flex flex-wrap items-end gap-3">
+      <div className="border border-border rounded-xl bg-card shadow-sm p-4 flex flex-wrap items-end gap-3">
         <div className="space-y-1">
           <label className="text-xs text-muted-foreground">Resource</label>
           <Select value={filters.resourceType || ANY} onValueChange={(v) => setFilter("resourceType", v === ANY ? "" : v)} items={[{ value: ANY, label: "Any resource" }, ...facets.resourceTypes.map((t) => ({ value: t, label: t }))]}>
@@ -72,7 +72,7 @@ const AuditListPage = () => {
       {loading && <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>}
 
       {!loading && (
-        <div className="border rounded-xl bg-white dark:bg-zinc-900 shadow-sm divide-y">
+        <div className="border border-border rounded-xl bg-card shadow-sm divide-y">
           {logs.length === 0 && <div className="p-10 text-center text-muted-foreground text-sm">No audit entries.</div>}
           {logs.map((l) => (
             <div key={l.id}>

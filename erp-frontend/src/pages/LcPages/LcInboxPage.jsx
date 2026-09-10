@@ -1,33 +1,112 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Landmark, Loader2, ArrowRight, Ban, Eye, Check, FileText, ScanLine, Download } from "lucide-react";
+import {
+  Landmark,
+  RefreshCw,
+  ArrowRight,
+  Ban,
+  Eye,
+  Check,
+  FileText,
+  ScanLine,
+  Download,
+} from "lucide-react";
+import {
+  Badge,
+  Button,
+  Callout,
+  Card,
+  CardBody,
+  EmptyState,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  IconButton,
+  Skeleton,
+  Spinner,
+  Tooltip,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+  ToggleGroup,
+} from "@neuctra/ui";
 import toast from "react-hot-toast";
 import { useTopicRefresh } from "@/lib/useTopicRefresh";
 import { invalidate } from "@/lib/invalidationBus";
 import { TOPICS } from "@/lib/topics";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
 import { useAuthStore } from "@/store/authStore";
-import { listReferrals, setReferralStatus, rejectReferral, convertReferral, extractReferral, applyExtraction } from "@/services/lcService";
+import {
+  listReferrals,
+  setReferralStatus,
+  rejectReferral,
+  convertReferral,
+  extractReferral,
+  applyExtraction,
+} from "@/services/lcService";
 import { downloadDocument } from "@/services/documentService";
 import { DEFAULT_CURRENCY } from "@/lib/catalog";
 
-const STATUS_STYLE = {
-  received: "border-blue-400 text-blue-700 dark:text-blue-300",
-  reviewing: "border-amber-400 text-amber-700 dark:text-amber-300",
-  converted: "border-green-400 text-green-700 dark:text-green-300",
-  rejected: "border-red-400 text-red-600",
+/**
+ * Status chips, on the same recipe as the queries table: a `/10` fill and a `/30`
+ * hairline over the semantic tokens, merged in last so they beat Badge's own
+ * primary ramp. No `dark:` variants — the tokens carry both themes.
+ */
+const CHIP = "whitespace-nowrap border text-xs capitalize";
+const STATUS_STYLES = {
+  received: "border-info/30 bg-info/10 text-info",
+  reviewing: "border-warning/30 bg-warning/10 text-warning",
+  converted: "border-success/30 bg-success/10 text-success",
+  rejected: "border-destructive/30 bg-destructive/10 text-destructive",
 };
 
-const money = (n, ccy = DEFAULT_CURRENCY) =>
-  n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: ccy || DEFAULT_CURRENCY, maximumFractionDigits: 0 }).format(Number(n));
+/** Matches the queries toolbar so both screens sit on one 36px baseline. */
+const ACTION_BTN = "h-9 px-3";
+const ACTION_ICON_BTN = "h-9 w-9 shrink-0 p-0";
 
-const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : "—");
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order. `style` is the only
+ * deterministic route — same reasoning as the queries table.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * Truncation contract for a table-fixed cell: `maxWidth: 0` hands the column its width
+ * from the <col> percentage instead of from its content, and only clips once overflow
+ * is hidden as well. Omit the overflow and wide content silently wins the negotiation,
+ * stealing the space the narrow columns were budgeted.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+const NOT_SET = "Not set";
+
+const money = (n, ccy = DEFAULT_CURRENCY) =>
+  n == null
+    ? NOT_SET
+    : new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: ccy || DEFAULT_CURRENCY,
+        maximumFractionDigits: 0,
+      }).format(Number(n));
+
+const fmtDate = (d) => (d ? new Date(d).toLocaleDateString() : NOT_SET);
+
+/** One line for a lane, without printing a placeholder for each missing end. */
+const lane = (from, to) =>
+  [from, to].filter(Boolean).join("  →  ") || "Lane not stated";
+
+const FILTER_OPTIONS = [
+  { value: "received", label: "Received" },
+  { value: "reviewing", label: "Reviewing" },
+  { value: "converted", label: "Converted" },
+  { value: "all", label: "All" },
+];
 
 /**
  * The LC advice attached to a referral, and the fields read out of it.
@@ -50,7 +129,11 @@ const LcSourcePanel = ({ referral, canApply, onApplied }) => {
       setState({ status: "ready", data: res.data });
     } catch (err) {
       // 404 = no PDF attached, which is normal for webhook referrals, not an error.
-      setState(err?.status === 404 ? { status: "none" } : { status: "error", message: err?.message });
+      setState(
+        err?.status === 404
+          ? { status: "none" }
+          : { status: "error", message: err?.message },
+      );
     }
   };
 
@@ -70,109 +153,159 @@ const LcSourcePanel = ({ referral, canApply, onApplied }) => {
   const f = state.data?.fields;
   const doc = state.data?.document;
 
-  const ROWS = f ? [
-    ["LC number", f.lcNumber],
-    ["Applicant", f.applicantName],
-    ["Beneficiary", f.beneficiaryName],
-    ["Issuing bank", [f.issuingBankName, f.issuingBankBic].filter(Boolean).join(" · ")],
-    ["Amount", f.amount != null ? `${f.currency ?? ""} ${Number(f.amount).toLocaleString()}`.trim() : null],
-    ["Commodity", [f.commodity, f.quantity].filter(Boolean).join(" · ")],
-    ["Lane", (f.originPort || f.destinationPort) ? `${f.originPort ?? "?"} → ${f.destinationPort ?? "?"}` : null],
-    ["Price term", f.priceTerm || f.incoterm],
-    ["Latest shipment", fmtDate(f.latestShipmentDate)],
-    ["Expiry", fmtDate(f.expiryDate)],
-    ["Partial / transhipment", [f.partialShipments, f.transhipment].filter(Boolean).join(" / ")],
-  ].filter(([, v]) => v && v !== "—") : [];
+  const ROWS = f
+    ? [
+        ["LC number", f.lcNumber],
+        ["Applicant", f.applicantName],
+        ["Beneficiary", f.beneficiaryName],
+        [
+          "Issuing bank",
+          [f.issuingBankName, f.issuingBankBic].filter(Boolean).join(" · "),
+        ],
+        [
+          "Amount",
+          f.amount != null
+            ? `${f.currency ?? ""} ${Number(f.amount).toLocaleString()}`.trim()
+            : null,
+        ],
+        ["Commodity", [f.commodity, f.quantity].filter(Boolean).join(" · ")],
+        [
+          "Lane",
+          f.originPort || f.destinationPort
+            ? lane(f.originPort, f.destinationPort)
+            : null,
+        ],
+        ["Price term", f.priceTerm || f.incoterm],
+        ["Latest shipment", fmtDate(f.latestShipmentDate)],
+        ["Expiry", fmtDate(f.expiryDate)],
+        [
+          "Partial / transhipment",
+          [f.partialShipments, f.transhipment].filter(Boolean).join(" / "),
+        ],
+      ].filter(([, v]) => v && v !== NOT_SET)
+    : [];
 
   return (
-    <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-medium flex items-center gap-1.5">
-          <FileText className="w-3.5 h-3.5" /> LC document
-        </p>
-        {state.status === "idle" && (
-          <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={read}>
-            <ScanLine className="w-3.5 h-3.5" /> Read LC
-          </Button>
-        )}
-      </div>
-
-      {state.status === "loading" && (
-        <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Reading the advice…
-        </p>
-      )}
-      {state.status === "none" && (
-        <p className="text-xs text-muted-foreground">No LC document attached — this referral came in through the bank webhook.</p>
-      )}
-      {state.status === "error" && <p className="text-xs text-destructive">{state.message}</p>}
-
-      {state.status === "ready" && (
-        <div className="space-y-2">
-          <div className="flex items-center gap-2 text-xs">
-            <span className="truncate text-muted-foreground" title={doc?.fileName}>{doc?.fileName}</span>
-            <Button size="sm" variant="ghost" className="h-6 px-1.5 text-[11px] gap-1"
-              onClick={() => downloadDocument(doc.id, doc.fileName)}>
-              <Download className="w-3 h-3" /> Get
+    <Card padding="sm" variant="outline">
+      <CardBody className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <p className="flex items-center gap-1.5 text-xs font-medium">
+            <FileText className="h-3.5 w-3.5" /> LC document
+          </p>
+          {state.status === "idle" && (
+            <Button
+              size="xs"
+              variant="outline"
+              iconBefore={<ScanLine className="h-3.5 w-3.5" />}
+              onClick={read}
+            >
+              Read LC
             </Button>
-          </div>
-
-          {ROWS.length === 0 ? (
-            <p className="text-xs text-amber-600">
-              The PDF has no readable SWIFT tags — it may be a scan. Enter the fields by hand.
-            </p>
-          ) : (
-            <>
-              {/* This panel and the block above it BOTH show an "Amount", and until the
-                  operator applies, they disagree — the referral's is blank, this one is
-                  the PDF's. That reads as a bug ("the amount is right there, why is the
-                  column empty?") unless the screen says which is which. */}
-              <p className="text-[11px] text-muted-foreground">
-                Read from the PDF — <span className="font-medium">not saved yet</span>. “Apply to referral”
-                writes these onto the referral and fills the inbox columns.
-              </p>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-                {ROWS.map(([k, v]) => (
-                  <div key={k} className="contents">
-                    <dt className="text-muted-foreground whitespace-nowrap">{k}</dt>
-                    <dd className="font-medium break-words">{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </>
-          )}
-
-          {/* A lane the LC states but we hold no port code for. Saying so beats
-              silently converting a query with an empty destination. */}
-          {f?.destinationPort && !state.data.resolved.destinationPortCode && (
-            <p className="text-[11px] text-amber-600">
-              “{f.destinationPort}” is not in the ports list — the query's destination will be blank until it is added.
-            </p>
-          )}
-          {f?.originPort && !state.data.resolved.originPortCode && (
-            <p className="text-[11px] text-amber-600">“{f.originPort}” is not in the ports list.</p>
-          )}
-
-          <div className="flex items-center gap-2 pt-0.5">
-            {canApply && ROWS.length > 0 && (
-              <Button size="sm" className="h-7 text-xs gap-1" disabled={applying} onClick={apply}>
-                {applying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
-                Apply to referral
-              </Button>
-            )}
-            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowText((s) => !s)}>
-              {showText ? "Hide" : "Show"} raw text
-            </Button>
-          </div>
-
-          {showText && (
-            <pre className="max-h-52 overflow-auto rounded border bg-background p-2 text-[10px] leading-relaxed whitespace-pre-wrap scrollbar-thin">
-              {state.data.text}
-            </pre>
           )}
         </div>
-      )}
-    </div>
+
+        {state.status === "loading" && (
+          <p className="flex items-center gap-2 text-xs text-muted-foreground">
+            <Spinner size="xs" label="Reading" /> Reading the advice…
+          </p>
+        )}
+        {state.status === "none" && (
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            No LC document attached. This referral came in through the bank webhook.
+          </p>
+        )}
+        {state.status === "error" && (
+          <Callout type="error">{state.message}</Callout>
+        )}
+
+        {state.status === "ready" && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="truncate text-muted-foreground" title={doc?.fileName}>
+                {doc?.fileName}
+              </span>
+              <Button
+                size="xs"
+                variant="link"
+                iconBefore={<Download className="h-3 w-3" />}
+                onClick={() => downloadDocument(doc.id, doc.fileName)}
+              >
+                Get
+              </Button>
+            </div>
+
+            {ROWS.length === 0 ? (
+              <Callout type="warning">
+                The PDF has no readable SWIFT tags. It may be a scan, so the fields
+                need entering by hand.
+              </Callout>
+            ) : (
+              <>
+                {/* This panel and the block above it BOTH show an "Amount", and until
+                    the operator applies, they disagree — the referral's is blank, this
+                    one is the PDF's. That reads as a bug ("the amount is right there,
+                    why is the column empty?") unless the screen says which is which. */}
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Read from the PDF, <span className="font-medium">not saved yet</span>.
+                  “Apply to referral” writes these onto the referral and fills the inbox
+                  columns.
+                </p>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                  {ROWS.map(([k, v]) => (
+                    <div key={k} className="contents">
+                      <dt className="whitespace-nowrap text-muted-foreground">{k}</dt>
+                      <dd className="break-words font-medium">{v}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </>
+            )}
+
+            {/* A lane the LC states but we hold no port code for. Saying so beats
+                silently converting a query with an empty destination. */}
+            {f?.destinationPort && !state.data.resolved.destinationPortCode && (
+              <p className="text-[11px] leading-relaxed text-warning">
+                “{f.destinationPort}” is not in the ports list, so the query's
+                destination stays blank until it is added.
+              </p>
+            )}
+            {f?.originPort && !state.data.resolved.originPortCode && (
+              <p className="text-[11px] leading-relaxed text-warning">
+                “{f.originPort}” is not in the ports list.
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 pt-0.5">
+              {canApply && ROWS.length > 0 && (
+                <Button
+                  size="xs"
+                  disabled={applying}
+                  loading={applying}
+                  loadingText="Applying…"
+                  iconBefore={<Check className="h-3 w-3" />}
+                  onClick={apply}
+                >
+                  Apply to referral
+                </Button>
+              )}
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={() => setShowText((s) => !s)}
+              >
+                {showText ? "Hide" : "Show"} raw text
+              </Button>
+            </div>
+
+            {showText && (
+              <pre className="scrollbar-thin max-h-52 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-muted p-2 text-[10px] leading-relaxed">
+                {state.data.text}
+              </pre>
+            )}
+          </div>
+        )}
+      </CardBody>
+    </Card>
   );
 };
 
@@ -205,21 +338,29 @@ export default function LcInboxPage() {
 
   // `isCurrent` is the stale guard: switching the filter quickly could otherwise leave
   // the losing response on screen, which reads as a stuck list.
-  const load = useCallback(async ({ isCurrent } = {}) => {
-    const ok = isCurrent ?? (() => true);
-    try {
-      const res = await listReferrals(filter === "all" ? undefined : filter);
-      if (ok()) setReferrals(res.data || []);
-    } catch (err) {
-      if (ok()) toast.error(err?.message || "Could not load LC referrals");
-    }
-  }, [filter]);
+  const load = useCallback(
+    async ({ isCurrent } = {}) => {
+      const ok = isCurrent ?? (() => true);
+      try {
+        const res = await listReferrals(filter === "all" ? undefined : filter);
+        if (ok()) setReferrals(res.data || []);
+      } catch (err) {
+        if (ok()) toast.error(err?.message || "Could not load LC referrals");
+      }
+    },
+    [filter],
+  );
 
   // This inbox exists to show work that arrives from OUTSIDE the app, so it is the last
   // screen that should need a manual reload — yet it had no live path at all.
-  const { run: reload } = useTopicRefresh([TOPICS.LC_REFERRALS, TOPICS.QUERIES, TOPICS.CUSTOMERS], load);
+  const { run: reload } = useTopicRefresh(
+    [TOPICS.LC_REFERRALS, TOPICS.QUERIES, TOPICS.CUSTOMERS],
+    load,
+  );
 
-  useEffect(() => { reload(); }, [filter, reload]);
+  useEffect(() => {
+    reload();
+  }, [filter, reload]);
 
   const act = async (fn, msg) => {
     setBusy(true);
@@ -240,7 +381,10 @@ export default function LcInboxPage() {
   };
 
   const doConvert = async () => {
-    const res = await act(() => convertReferral(convertTarget.id), "Referral converted to query");
+    const res = await act(
+      () => convertReferral(convertTarget.id),
+      "Referral converted to query",
+    );
     setConvertTarget(null);
     setDetail(null);
     if (res?.data?.queryId) navigate("/admin/queries");
@@ -254,168 +398,431 @@ export default function LcInboxPage() {
     setDetail(null);
   };
 
-  const FILTERS = ["received", "reviewing", "converted", "all"];
+  /** Nothing further can be recorded against a referral that is already resolved. */
+  const isOpen = (r) => !["converted", "rejected"].includes(r?.status);
 
   return (
-    <div className="p-4 sm:p-6 space-y-5">
-      <div className="flex items-center gap-2">
-        <Landmark className="w-6 h-6 text-primary" />
-        <div>
-          <h1 className="text-xl font-semibold">Bank LC Inbox</h1>
-          <p className="text-sm text-muted-foreground">Letters of Credit posted by partner banks (§5.21)</p>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <Landmark className="h-5 w-5" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Bank LC Inbox
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Letters of Credit posted by partner banks
+            </p>
+          </div>
         </div>
+
+        <Button
+          variant="ghost"
+          size="sm"
+          className={ACTION_BTN}
+          onClick={() => reload()}
+          disabled={loading}
+          iconBefore={
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          }
+        >
+          Refresh
+        </Button>
       </div>
 
-      <div className="flex gap-1.5">
-        {FILTERS.map((f) => (
-          <Button key={f} size="sm" variant={filter === f ? "default" : "outline"} className="capitalize" onClick={() => setFilter(f)}>
-            {f}
-          </Button>
-        ))}
-      </div>
+      {/* Status filter */}
+      <ToggleGroup
+        size="md"
+        options={FILTER_OPTIONS}
+        value={filter}
+        onChange={(v) => v && setFilter(v)}
+      />
 
-      {loading ? (
-        <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>
-      ) : referrals.length === 0 ? (
-        <div className="rounded-xl border border-dashed p-12 text-center text-muted-foreground">No LC referrals here.</div>
+      {/* EmptyState brings its own padding and icon sizing, so the Card only supplies
+          the surface. The empty case replaces the table rather than living inside it:
+          TD carries no `colSpan`, so a spanning "nothing here" row is not expressible. */}
+      {!loading && referrals.length === 0 ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<Landmark />}
+            title="Nothing in this tab"
+            description={
+              filter === "all"
+                ? "Letters of Credit forwarded by partner banks land here for review."
+                : "No referrals are sitting at this stage right now."
+            }
+          />
+        </Card>
       ) : (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="px-4 py-2.5">Ref</th>
-                <th className="px-4 py-2.5">LC No.</th>
-                <th className="px-4 py-2.5">Applicant</th>
-                <th className="px-4 py-2.5">Bank</th>
-                <th className="px-4 py-2.5">Amount</th>
-                <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {referrals.map((r) => (
-                <tr key={r.id} className="hover:bg-muted/30">
-                  <td className="px-4 py-2.5 font-mono text-xs">{r.referenceNo}</td>
-                  <td className="px-4 py-2.5 font-mono text-xs">{r.lcNumber}</td>
-                  <td className="px-4 py-2.5">
-                    <div className="font-medium">{r.applicantName || r.companyName || "—"}</div>
-                    <div className="text-xs text-muted-foreground">{r.originPort || "—"} → {r.destinationPort || "—"}</div>
-                  </td>
-                  <td className="px-4 py-2.5 text-xs">{r.bankName || "—"}</td>
-                  <td className="px-4 py-2.5 text-xs">{money(r.amount, r.currency)}</td>
-                  <td className="px-4 py-2.5"><Badge variant="outline" className={`capitalize text-[10px] ${STATUS_STYLE[r.status] ?? ""}`}>{r.status}</Badge></td>
-                  <td className="px-4 py-2.5">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button size="sm" variant="ghost" className="h-8 gap-1" onClick={() => setDetail(r)}>
-                        <Eye className="w-3.5 h-3.5" /> View
-                      </Button>
-                      {canConvert && !["converted", "rejected"].includes(r.status) && (
-                        <Button size="sm" className="h-8 gap-1" disabled={busy} onClick={() => setConvertTarget(r)}>
-                          <ArrowRight className="w-3.5 h-3.5" /> Convert
-                        </Button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        /* Table renders its own surface, plus overflow-x-auto from `responsive`.
+           Wrapping it in a Card would put a second border inside it at a smaller
+           radius, so the table is left to be its own card. */
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "14%" }}>Ref</TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "13%" }}
+                  >
+                    LC No.
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "23%" }}>Applicant</TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    Bank
+                  </TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    Amount
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "14%" }}>Status</TH>
+                  <TH style={{ ...HEAD_CELL, width: "12%", textAlign: "right" }}>
+                    Actions
+                  </TH>
+                </TRow>
+              </THead>
+
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(4)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(7)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
+
+                {/* DATA */}
+                {!loading &&
+                  referrals.map((r) => (
+                    <TRow key={r.id} className="bg-card!">
+                      <TD
+                        style={{ ...CELL, ...CLIP }}
+                        className="truncate font-mono text-xs"
+                      >
+                        {r.referenceNo}
+                      </TD>
+
+                      <TD
+                        className="hidden truncate font-mono text-xs lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {r.lcNumber || NOT_SET}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <div className="truncate font-medium">
+                          {r.applicantName || r.companyName || NOT_SET}
+                        </div>
+                        <div className="truncate text-xs text-muted-foreground">
+                          {lane(r.originPort, r.destinationPort)}
+                        </div>
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-xs md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {r.bankName || NOT_SET}
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-xs sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {money(r.amount, r.currency)}
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <Badge
+                          variant="soft"
+                          size="sm"
+                          text={r.status}
+                          className={`${CHIP} ${STATUS_STYLES[r.status] ?? "border-border bg-muted text-muted-foreground"}`}
+                        />
+                      </TD>
+
+                      {/* Icon-only, like the queries table's row actions: two labelled
+                          buttons cannot share a 12% column without wrapping, and a
+                          wrapped action row is what pushed the last two columns out of
+                          shape. Tooltip carries the name a label would have. */}
+                      <TD style={{ ...CELL, ...CLIP, textAlign: "right" }}>
+                        <div className="flex min-w-0 items-center justify-end gap-1.5">
+                          <Tooltip content="View referral">
+                            <span className="inline-flex shrink-0">
+                              <IconButton
+                                variant="ghost"
+                                className={ACTION_ICON_BTN}
+                                aria-label={`View ${r.referenceNo}`}
+                                icon={<Eye className="h-4 w-4" />}
+                                onClick={() => setDetail(r)}
+                              />
+                            </span>
+                          </Tooltip>
+                          {canConvert && isOpen(r) && (
+                            <Tooltip content="Convert to query">
+                              <span className="inline-flex shrink-0">
+                                <IconButton
+                                  className={ACTION_ICON_BTN}
+                                  aria-label={`Convert ${r.referenceNo}`}
+                                  disabled={busy}
+                                  icon={<ArrowRight className="h-4 w-4" />}
+                                  onClick={() => setConvertTarget(r)}
+                                />
+                              </span>
+                            </Tooltip>
+                          )}
+                        </div>
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
         </div>
       )}
 
-      {/* Detail dialog */}
-      <Dialog open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
-        <DialogContent size="lg" className="overflow-hidden">
-          {detail && (
-            <>
-              <DialogHeader>
-                <DialogTitle>{detail.referenceNo} · LC {detail.lcNumber}</DialogTitle>
-                <DialogDescription>{detail.bankName || "Bank"}{detail.bankRef ? ` · ${detail.bankRef}` : ""}</DialogDescription>
-              </DialogHeader>
-              <div className="flex-1 min-h-0 overflow-y-auto space-y-3 px-1 -mx-1 scrollbar-thin">
-                <div className="space-y-1.5 text-sm">
-                  <p><span className="text-muted-foreground">Applicant:</span> {detail.applicantName || "—"}{detail.applicantEmail ? ` · ${detail.applicantEmail}` : ""}</p>
-                  {detail.beneficiaryName && <p><span className="text-muted-foreground">Beneficiary:</span> {detail.beneficiaryName}</p>}
-                  <p><span className="text-muted-foreground">Lane:</span> {detail.originPort || "—"} → {detail.destinationPort || "—"}</p>
-                  {detail.commodity && <p><span className="text-muted-foreground">Commodity:</span> {detail.commodity}</p>}
-                  <p><span className="text-muted-foreground">Amount:</span> {money(detail.amount, detail.currency)}{detail.incoterm ? ` · ${detail.incoterm}` : ""}</p>
-                  <p><span className="text-muted-foreground">Issue / Expiry:</span> {fmtDate(detail.issueDate)} → {fmtDate(detail.expiryDate)}</p>
-                  {detail.rejectReason && <p className="text-destructive">Rejected: {detail.rejectReason}</p>}
-                </div>
+      {/* Detail */}
+      {detail && (
+        <Modal isOpen onClose={() => !busy && setDetail(null)} disableOverlayClose={busy}>
+          <ModalContent maxWidth="max-w-2xl" className="flex max-h-[90vh] flex-col">
+            <ModalHeader
+              title={`${detail.referenceNo} · LC ${detail.lcNumber || NOT_SET}`}
+              onClose={() => !busy && setDetail(null)}
+            />
 
-                {/* The advice itself, and what we can read out of it. An LC that arrives
-                    as a PDF has no structured fields until someone reads them — this is
-                    where that happens, under review, before anything is written. */}
-                <LcSourcePanel
-                  referral={detail}
-                  canApply={canConvert && !["converted", "rejected"].includes(detail.status)}
-                  onApplied={async () => { await reload(); setDetail(null); }}
+            <ModalBody className="min-h-0 flex-1 space-y-3 overflow-y-auto">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge
+                  variant="soft"
+                  size="sm"
+                  text={detail.status}
+                  className={`${CHIP} ${STATUS_STYLES[detail.status] ?? "border-border bg-muted text-muted-foreground"}`}
                 />
+                <span className="text-sm text-muted-foreground">
+                  {detail.bankName || "Bank"}
+                  {detail.bankRef ? ` · ${detail.bankRef}` : ""}
+                </span>
               </div>
-              <DialogFooter className="flex-wrap gap-2">
-                {!["converted", "rejected"].includes(detail.status) && (
+
+              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
+                <dt className="whitespace-nowrap text-muted-foreground">Applicant</dt>
+                <dd className="break-words font-medium">
+                  {detail.applicantName || NOT_SET}
+                  {detail.applicantEmail ? ` · ${detail.applicantEmail}` : ""}
+                </dd>
+
+                {detail.beneficiaryName && (
                   <>
-                    <Button variant="outline" size="sm" className="gap-1" disabled={busy}
-                      onClick={() => act(() => setReferralStatus(detail.id, "reviewing"), "Marked reviewing").then(() => setDetail(null))}>
-                      <Check className="w-3.5 h-3.5" /> Reviewing
-                    </Button>
-                    {canConvert && (
-                      <Button variant="outline" size="sm" className="gap-1 text-destructive" disabled={busy}
-                        onClick={() => { setRejectTarget(detail); setDetail(null); }}>
-                        <Ban className="w-3.5 h-3.5" /> Reject
-                      </Button>
-                    )}
-                    {canConvert && (
-                      <Button size="sm" className="gap-1" disabled={busy} onClick={() => setConvertTarget(detail)}>
-                        <ArrowRight className="w-3.5 h-3.5" /> Convert
-                      </Button>
-                    )}
+                    <dt className="whitespace-nowrap text-muted-foreground">
+                      Beneficiary
+                    </dt>
+                    <dd className="break-words font-medium">
+                      {detail.beneficiaryName}
+                    </dd>
                   </>
                 )}
-              </DialogFooter>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+
+                <dt className="whitespace-nowrap text-muted-foreground">Lane</dt>
+                <dd className="break-words font-medium">
+                  {lane(detail.originPort, detail.destinationPort)}
+                </dd>
+
+                {detail.commodity && (
+                  <>
+                    <dt className="whitespace-nowrap text-muted-foreground">
+                      Commodity
+                    </dt>
+                    <dd className="break-words font-medium">{detail.commodity}</dd>
+                  </>
+                )}
+
+                <dt className="whitespace-nowrap text-muted-foreground">Amount</dt>
+                <dd className="break-words font-medium">
+                  {money(detail.amount, detail.currency)}
+                  {detail.incoterm ? ` · ${detail.incoterm}` : ""}
+                </dd>
+
+                <dt className="whitespace-nowrap text-muted-foreground">
+                  Issue / Expiry
+                </dt>
+                <dd className="break-words font-medium">
+                  {fmtDate(detail.issueDate)} → {fmtDate(detail.expiryDate)}
+                </dd>
+              </dl>
+
+              {detail.rejectReason && (
+                <Callout type="error" title="This referral was rejected">
+                  {detail.rejectReason}
+                </Callout>
+              )}
+
+              {/* The advice itself, and what we can read out of it. An LC that arrives
+                  as a PDF has no structured fields until someone reads them — this is
+                  where that happens, under review, before anything is written. */}
+              <LcSourcePanel
+                referral={detail}
+                canApply={canConvert && isOpen(detail)}
+                onApplied={async () => {
+                  await reload();
+                  setDetail(null);
+                }}
+              />
+            </ModalBody>
+
+            {isOpen(detail) && (
+              <ModalFooter>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={busy}
+                  iconBefore={<Check className="h-3.5 w-3.5" />}
+                  onClick={() =>
+                    act(
+                      () => setReferralStatus(detail.id, "reviewing"),
+                      "Marked reviewing",
+                    ).then(() => setDetail(null))
+                  }
+                >
+                  Reviewing
+                </Button>
+                {canConvert && (
+                  <>
+                    {/* Neuctra has no destructive-outline variant, and a solid red
+                        button here would outweigh Convert, which is the intended
+                        action. The token text colour carries the danger instead. */}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-destructive"
+                      disabled={busy}
+                      iconBefore={<Ban className="h-3.5 w-3.5" />}
+                      onClick={() => {
+                        setRejectTarget(detail);
+                        setDetail(null);
+                      }}
+                    >
+                      Reject
+                    </Button>
+                    <Button
+                      size="sm"
+                      disabled={busy}
+                      iconBefore={<ArrowRight className="h-3.5 w-3.5" />}
+                      onClick={() => setConvertTarget(detail)}
+                    >
+                      Convert
+                    </Button>
+                  </>
+                )}
+              </ModalFooter>
+            )}
+          </ModalContent>
+        </Modal>
+      )}
 
       {/* Convert confirm */}
-      <Dialog open={!!convertTarget} onOpenChange={(o) => !o && setConvertTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Convert {convertTarget?.referenceNo}?</DialogTitle>
-            <DialogDescription>
-              This creates a customer (source: bank LC), a lead and a query (LC / Trade Finance is added automatically), which Operations can then quote.
-              Any field still empty on the referral is read from the attached LC first, so the query carries the lane, commodity and value the bank stated.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConvertTarget(null)}>Cancel</Button>
-            <Button className="gap-2" disabled={busy} onClick={doConvert}>
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowRight className="w-4 h-4" />} Convert
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {convertTarget && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setConvertTarget(null)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent maxWidth="max-w-md">
+            <ModalHeader
+              title={`Convert ${convertTarget.referenceNo}?`}
+              onClose={() => !busy && setConvertTarget(null)}
+            />
+            <ModalBody className="space-y-3">
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                This creates a customer (source: bank LC), a lead and a query, with LC /
+                Trade Finance added automatically, which Operations can then quote.
+              </p>
+              <p className="text-sm leading-relaxed text-muted-foreground">
+                Any field still empty on the referral is read from the attached LC first,
+                so the query carries the lane, commodity and value the bank stated.
+              </p>
+            </ModalBody>
+            <ModalFooter>
+              <Button
+                variant="outline"
+                onClick={() => setConvertTarget(null)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={busy}
+                loading={busy}
+                loadingText="Converting…"
+                iconBefore={<ArrowRight className="h-4 w-4" />}
+                onClick={doConvert}
+              >
+                Convert
+              </Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+      )}
 
-      {/* Reject dialog */}
-      <Dialog open={!!rejectTarget} onOpenChange={(o) => !o && setRejectTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reject {rejectTarget?.referenceNo}?</DialogTitle>
-            <DialogDescription>Give a reason — it is retained on the referral for audit.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-1.5">
-            <Label htmlFor="lc-reject">Reason</Label>
-            <Input id="lc-reject" value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} placeholder="e.g. LC terms outside our scope" />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setRejectTarget(null)}>Cancel</Button>
-            <Button variant="destructive" className="gap-2" disabled={busy} onClick={doReject}>
-              {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Ban className="w-4 h-4" />} Reject
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Reject */}
+      {rejectTarget && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setRejectTarget(null)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent maxWidth="max-w-md">
+            <ModalHeader
+              title={`Reject ${rejectTarget.referenceNo}?`}
+              onClose={() => !busy && setRejectTarget(null)}
+            />
+            <ModalBody>
+              <Input
+                id="lc-reject"
+                label="Reason"
+                value={rejectReason}
+                onChange={(e) => setRejectReason(e.target.value)}
+                placeholder="e.g. LC terms outside our scope"
+                helperText="Retained on the referral for audit."
+                disabled={busy}
+              />
+            </ModalBody>
+            <ModalFooter>
+              <Button
+                variant="outline"
+                onClick={() => setRejectTarget(null)}
+                disabled={busy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={busy}
+                loading={busy}
+                loadingText="Rejecting…"
+                iconBefore={<Ban className="h-4 w-4" />}
+                onClick={doReject}
+              >
+                Reject
+              </Button>
+            </ModalFooter>
+          </ModalContent>
+        </Modal>
+      )}
     </div>
   );
 }

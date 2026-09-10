@@ -6,7 +6,6 @@ import { allocateRef } from "../../utils/referenceNumber.js";
 import { DEFAULT_CURRENCY } from "../../utils/currency.js";
 import { invoiceInScope } from "./finance.middleware.js";
 import { completeMilestoneTx, maybeSettleTx, invoiceStateTx } from "../otc/otc.service.js";
-import { recomputeTradeStage, recalcFiDrawn } from "../trade/trade.service.js";
 import { assertShipmentUnlocked, assertPayableWritable } from "../shipment/shipment.service.js";
 
 // Receivable writes lock on settled; payable writes stay open until closed/cancelled.
@@ -238,31 +237,7 @@ export const recordPayment = catchAsync(async (req, res, next) => {
       shipmentStatus = await maybeSettleTx(tx, invoice.shipmentId, req.user.id);
       await emitEvent(tx, "payment.received", { invoiceId: invoice.id, shipmentId: invoice.shipmentId });
 
-      // Roadmap Step 7 — money realised against a receivable that names a Financial
-      // Instrument draws that instrument down, which is what eventually lets Step 8
-      // close it. The drawdown ledger is the source; `drawnAmount` only mirrors it.
-      if (invoice.financialInstrumentId) {
-        await tx.financialInstrumentDrawdown.create({
-          data: {
-            financialInstrumentId: invoice.financialInstrumentId,
-            shipmentId: invoice.shipmentId,
-            amount: invoice.totalAmount,
-            realisedAt: req.body.receivedAt ?? new Date(),
-            notes: `Realised against invoice ${invoice.referenceNo}`,
-            recordedById: req.user.id,
-          },
-        });
-        await recalcFiDrawn(tx, invoice.financialInstrumentId);
-        await emitEvent(tx, "fi.drawdown.recorded", {
-          financialInstrumentId: invoice.financialInstrumentId,
-          shipmentId: invoice.shipmentId,
-          amount: invoice.totalAmount,
-        });
-      }
     }
-    // Whatever the kind, the payment may have moved the trade stage: a paid payable
-    // can complete `logistics_settled`, a paid receivable `payment_realised`.
-    await recomputeTradeStage(tx, invoice.shipmentId, req.user.id);
     return { invoice: u, ledgerClear, shipmentStatus };
   });
 

@@ -34,7 +34,9 @@ import { isManagement, labelForRoles, hasAnyRole, INTERNAL_ROLES } from "@/lib/r
 const NON_MGMT_INTERNAL = INTERNAL_ROLES.filter((r) => !isManagement(r));
 
 const SHIPMENT_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
-const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"];
+// Same set minus BDO: a BDO sees a shipment's progress but does not work its task board.
+const TASK_ROLES = SHIPMENT_ROLES.filter((r) => r !== "bdo");
+const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm"];
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // own drivers & vehicles
 
 // Each item lists the roles that see it; Management sees everything (ADR-044).
@@ -55,39 +57,16 @@ const NAV_ITEMS = [
     roles: ["asm", "bdo", "web_manager", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"],
   },
   { name: "LC Inbox", icon: Landmark, path: "/admin/lc-inbox", roles: ["ops_manager", "ops_exec"] }, // bank-LC (§5.21)
-  // The buy side sits between the query and the quote, because that is the order
-  // the work happens in: get vendor rates, then price the sale.
-  { name: "Rate Requests", icon: Coins, path: "/admin/rfqs", roles: ["ops_manager", "ops_exec"] },
   { name: "Quotations", icon: FileText, path: "/admin/quotations", roles: ["asm", "ops_manager", "ops_exec"] },
   { name: "Shipments", icon: Ship, path: "/admin/shipments", roles: SHIPMENT_ROLES },
-  { name: "Tasks", icon: ListChecks, path: "/admin/tasks", roles: SHIPMENT_ROLES },
+  { name: "Tasks", icon: ListChecks, path: "/admin/tasks", roles: TASK_ROLES },
   { name: "Finance", icon: Receipt, path: "/admin/finance", roles: ["accounts"] },
-  // Export trade documents (roadmap §4). Sits beside Finance because the cycle it
-  // starts — contract, bank registration, collection — is a money workflow.
-  {
-    name: "Trade",
-    icon: Landmark,
-    path: "/admin/trade",
-    roles: ["ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "accounts", "asm"],
-  },
-  // The five vendor sub-screens have always been routed but had no menu entry, so
-  // they were reachable only by URL. The sidebar has supported `children` all along.
-  {
-    name: "Vendors",
-    icon: Truck,
-    path: "/admin/vendors",
-    roles: VENDOR_ROLES,
-    children: [
-      { name: "All Vendors", icon: Truck, path: "/admin/vendors", roles: VENDOR_ROLES },
-      { name: "Shipping Lines", icon: Ship, path: "/admin/vendors/shipping-lines", roles: VENDOR_ROLES },
-      { name: "Transporters", icon: Truck, path: "/admin/vendors/transporters", roles: VENDOR_ROLES },
-      { name: "Trucks", icon: Truck, path: "/admin/vendors/trucks", roles: FLEET_NAV_ROLES },
-      { name: "Dumpers", icon: Truck, path: "/admin/vendors/dumpers", roles: FLEET_NAV_ROLES },
-    ],
-  },
-  // Drivers are own-fleet master data, not counterparties — a driver is never billed,
-  // so the screen sits at the top level rather than inside Vendors, next to the
-  // directory it is repeatedly mistaken for.
+  // One directory for every counterparty; the page filters by type itself, so the
+  // per-type sub-screens are gone.
+  { name: "Vendors", icon: Truck, path: "/admin/vendors", roles: VENDOR_ROLES },
+  // Own-fleet master data, NOT a counterparty — a driver is never billed, so this sits
+  // at the top level rather than inside the Vendors directory it is mistaken for.
+  // Trucks and Dumpers are off the menu for now; their routes stay mounted in App.jsx.
   { name: "Drivers", icon: IdCard, path: "/admin/drivers", roles: FLEET_NAV_ROLES },
   { name: "Chat", icon: MessagesSquare, path: "/admin/chat", roles: NON_MGMT_INTERNAL },
   { name: "Notifications", icon: Bell, path: "/admin/notifications", roles: NON_MGMT_INTERNAL, badge: "unread" },
@@ -131,7 +110,7 @@ const AdminSidebar = ({ open, setOpen }) => {
       )}
 
       <aside
-        className={`fixed z-40 inset-y-0 left-0 w-64 bg-white dark:bg-zinc-900 border-r transform transition-transform duration-300
+        className={`fixed z-40 inset-y-0 left-0 w-64 bg-sidebar border-r border-border transform transition-transform duration-300
         ${open ? "translate-x-0" : "-translate-x-full"} lg:translate-x-0`}
       >
         <div className="flex flex-col h-full">
@@ -140,7 +119,7 @@ const AdminSidebar = ({ open, setOpen }) => {
             <div className="flex gap-2 items-center">
               <img src="/logo.png" alt="logo" className="w-9" />
               <p className="text-sm uppercase font-black">
-                Consort <span className="text-primary">ERP</span>
+                Consort <span className="text-primary">Software</span>
               </p>
             </div>
 

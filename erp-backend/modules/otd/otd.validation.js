@@ -4,7 +4,6 @@ import { z } from "zod";
 
 export const completeStepSchema = z.object({
   rowVersion: z.coerce.number().int().optional(), // If-Match (RULE-SH-07)
-  forceReason: z.string().min(3).optional(), // required only for an out-of-order override (RULE-SH-03)
 });
 
 export const reopenStepSchema = z.object({

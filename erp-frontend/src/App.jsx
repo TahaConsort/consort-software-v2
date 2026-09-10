@@ -32,10 +32,9 @@ import CustomersListPage from "./pages/CustomersPages/CustomersListPage";
 import VisitsListPage from "./pages/VisitsPages/VisitsListPage";
 import OutreachListPage from "./pages/OutreachPages/OutreachListPage";
 import QueriesListPage from "./pages/QueriesPages/QueriesListPage";
-import RfqsListPage from "./pages/RfqsPages/RfqsListPage";
 import QuotationsListPage from "./pages/QuotationsPages/QuotationsListPage";
 import ShipmentsListPage from "./pages/ShipmentsPages/ShipmentsListPage";
-import ShipmentDetailPage from "./pages/ShipmentsPages/ShipmentDetailPage";
+import ShipmentRoute from "./pages/ShipmentsPages/ShipmentRoute";
 import TasksListPage from "./pages/TasksPages/TasksListPage";
 import FinanceListPage from "./pages/FinancePages/FinanceListPage";
 import VendorsListPage from "./pages/VendorsPages/VendorsListPage";
@@ -51,7 +50,6 @@ import StorefrontPage from "./pages/PublicPages/StorefrontPage";
 import ApproveQuotePage from "./pages/PublicPages/ApproveQuotePage";
 import LcInboxPage from "./pages/LcPages/LcInboxPage";
 import WorkflowManagePage from "./pages/WorkflowPages/WorkflowManagePage";
-import TradeRegistersPage from "./pages/TradePages/TradeRegistersPage";
 import VendorDetailPage from "./pages/VendorsPages/VendorDetailPage";
 
 // Role groups (Management passes every gate via RoleGuard, ADR-044).
@@ -61,14 +59,12 @@ const SALES = ["asm", "bdo"];
 const QUERY_ROLES = ["asm", "bdo", "web_manager", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec"];
 const QUOTATION_ROLES = ["asm", "ops_manager", "ops_exec"];
 const SHIPMENT_ROLES = ["asm", "bdo", "ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "transport_manager", "transport_exec", "accounts"];
+// Same set minus BDO: a BDO sees a shipment's progress but does not work its task board.
+const TASK_ROLES = SHIPMENT_ROLES.filter((r) => r !== "bdo");
 const FINANCE_ROLES = ["accounts"]; // + Management via RoleGuard (ADR-044)
 const LC_ROLES = ["ops_manager", "ops_exec"]; // bank-LC inbox (§5.21)
-const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm", "bdo"]; // vendor.read (freight-forwarding OTC)
-const RFQ_ROLES = ["ops_manager", "ops_exec"]; // rfq.read — the buy side stays with Ops
+const VENDOR_ROLES = ["ops_manager", "ops_exec", "transport_manager", "compliance_manager", "accounts", "asm"]; // vendor.read (freight-forwarding OTC)
 const FLEET_ROLES = ["ops_manager", "ops_exec", "transport_manager"]; // fleet.read — own drivers & vehicles
-// trade.read — the export document cycle. Contracts and instruments are registered
-// before a shipment exists, so this is its own section rather than a shipment tab.
-const TRADE_ROLES = ["ops_manager", "ops_exec", "compliance_manager", "compliance_exec", "accounts", "asm"];
 
 const App = () => {
   return (
@@ -140,20 +136,22 @@ const App = () => {
                 <Route path="lc-inbox" element={<LcInboxPage />} />
               </Route>
 
-              {/* Rate requests — the buy side: ask vendors, compare, award, then quote */}
-              <Route element={<RoleGuard allowedRoles={RFQ_ROLES} />}>
-                <Route path="rfqs" element={<RfqsListPage />} />
-              </Route>
-
               {/* Quotations — Ops drafts/sends; ASM approves */}
               <Route element={<RoleGuard allowedRoles={QUOTATION_ROLES} />}>
                 <Route path="quotations" element={<QuotationsListPage />} />
               </Route>
 
-              {/* Shipments & Tasks — Ops/Compliance/Transport/Finance + Sales */}
+              {/* Shipments — Ops/Compliance/Transport/Finance + Sales. ShipmentRoute
+                  picks the screen by capability: the management page for anyone who can
+                  change a shipment, the read-only status page for everyone else. */}
               <Route element={<RoleGuard allowedRoles={SHIPMENT_ROLES} />}>
                 <Route path="shipments" element={<ShipmentsListPage />} />
-                <Route path="shipments/:id" element={<ShipmentDetailPage />} />
+                <Route path="shipments/:id" element={<ShipmentRoute />} />
+              </Route>
+
+              {/* Tasks — the same set minus BDO, so the board is unreachable by URL too
+                  and not merely missing from their sidebar. */}
+              <Route element={<RoleGuard allowedRoles={TASK_ROLES} />}>
                 <Route path="tasks" element={<TasksListPage />} />
               </Route>
 
@@ -169,19 +167,16 @@ const App = () => {
                   component, so the list never carries over. */}
               <Route element={<RoleGuard allowedRoles={VENDOR_ROLES} />}>
                 <Route path="vendors" element={<VendorsListPage />} />
-                <Route path="vendors/shipping-lines" element={<VendorsListPage key="shipping_line" lockedType="shipping_line" />} />
-                <Route path="vendors/transporters" element={<VendorsListPage key="transporter" lockedType="transporter" />} />
                 <Route path="vendors/:id" element={<VendorDetailPage />} />
               </Route>
 
-              {/* Trade — contracts + bank instruments (roadmap Step 1) */}
-              <Route element={<RoleGuard allowedRoles={TRADE_ROLES} />}>
-                <Route path="trade" element={<TradeRegistersPage />} />
-              </Route>
-
-              {/* Own fleet — drivers, trucks, dumpers (fleet.read/fleet.manage) */}
+              {/* Own fleet — drivers, trucks, dumpers (fleet.read/fleet.manage).
+                  Drivers is `/admin/drivers` because that is where the sidebar and
+                  catalog.js both point it. It was still nested under `vendors/`, so the
+                  link missed every route and the catch-all bounced it to the landing
+                  page. Trucks and Dumpers keep their paths but are off the menu. */}
               <Route element={<RoleGuard allowedRoles={FLEET_ROLES} />}>
-                <Route path="vendors/drivers" element={<DriversListPage />} />
+                <Route path="drivers" element={<DriversListPage />} />
                 <Route path="vendors/trucks" element={<VehiclesListPage key="truck" kind="truck" />} />
                 <Route path="vendors/dumpers" element={<VehiclesListPage key="dumper" kind="dumper" />} />
               </Route>

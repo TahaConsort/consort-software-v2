@@ -141,7 +141,9 @@ enum ApprovalChannel {
   signed_copy
 }
 
-/** What a one-time approval link authorises. `rate_confirmation` is the next subject. */
+/**
+ * What a one-time approval link authorises. `rate_confirmation` is the next subject.
+ */
 enum ApprovalSubject {
   quotation
 
@@ -168,6 +170,15 @@ enum ServiceCode {
   local_transport
   customs_clearance
   sea_freight
+  // Rail carriage. Added alongside sea_freight rather than folded into it: it buys from
+  // a different counterparty, prices per wagon rather than per TEU, and carries its own
+  // transport document.
+  rail_freight
+  // PARKED, not retired. Air is not on sale, so utils/movement.js OFFERED_MODES refuses
+  // it and the query form does not offer it. The value stays because it already exists
+  // in the database and dropping a Postgres enum value means recreating the type across
+  // every column that uses it — a destructive migration to undo a list entry.
+  air_freight
   port_handling
   lc_finance
   destination_services // destination agent: DO + gate pass, destination pickup, delivery, empty return
@@ -515,6 +526,20 @@ enum TransportMode {
   rail
 }
 
+/**
+ * How far the goods go, which is a SEPARATE question from how they travel: a rail move
+ * can be domestic or an export, and cross-border trucking is road but not domestic.
+ * ShipmentDirection (export|import) is deliberately not reused — it has no domestic
+ * value and is a trade-shipment fact, whereas this is asked at enquiry time.
+ */
+enum MovementScope {
+  domestic
+  export
+  import
+
+  @@map("movement_scope")
+}
+
 // ── Vendors & job-charge ledger (freight-forwarding OTC upgrade) ──
 
 enum VendorType {
@@ -525,6 +550,13 @@ enum VendorType {
   destination_agent
   port_terminal
   rail_operator
+  // Rail haulage is rail_operator; this is the inland terminal at each end of it.
+  rail_terminal
+  // PARKED with air_freight above, and kept for the same reason. Never offered by the
+  // vendor picker (ROADMAP_VENDOR_TYPES in the frontend catalog decides that).
+  airline
+  air_cargo_agent
+  airport_terminal
   freight_forwarder
   ocean_carrier
   exporter
@@ -618,23 +650,23 @@ model Employee {
 }
 
 model User {
-  id                 String       @id @default(uuid())
-  email              String       @unique // + raw unique index on lower(email) — DATABASE.md §5
-  passwordHash       String?      @map("password_hash") // null until activation completes
-  role               UserRole // PRIMARY role — display + customer detection; always present in `roles`
-  roles              UserRole[]   @default([]) // an employee may hold several internal roles; permissions are the union
-  employeeId         String?      @unique @map("employee_id") // internal users
-  employee           Employee?    @relation(fields: [employeeId], references: [id])
-  customerId         String?      @map("customer_id") // portal users (role = customer)
-  customer           Customer?    @relation(fields: [customerId], references: [id])
-  tokenVersion       Int          @default(0) @map("token_version") // global invalidation (ADR-009)
-  isActive           Boolean      @default(true) @map("is_active")
-  failedLoginCount   Int          @default(0) @map("failed_login_count")
-  lockedUntil        DateTime?    @map("locked_until") // account lockout (ADR-033)
-  lastLoginAt        DateTime?    @map("last_login_at")
-  departmentsHeaded  Department[] @relation("DepartmentHead") // back-relation for departments.head_user_id
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
+  id                String       @id @default(uuid())
+  email             String       @unique // + raw unique index on lower(email) — DATABASE.md §5
+  passwordHash      String?      @map("password_hash") // null until activation completes
+  role              UserRole // PRIMARY role — display + customer detection; always present in `roles`
+  roles             UserRole[]   @default([]) // an employee may hold several internal roles; permissions are the union
+  employeeId        String?      @unique @map("employee_id") // internal users
+  employee          Employee?    @relation(fields: [employeeId], references: [id])
+  customerId        String?      @map("customer_id") // portal users (role = customer)
+  customer          Customer?    @relation(fields: [customerId], references: [id])
+  tokenVersion      Int          @default(0) @map("token_version") // global invalidation (ADR-009)
+  isActive          Boolean      @default(true) @map("is_active")
+  failedLoginCount  Int          @default(0) @map("failed_login_count")
+  lockedUntil       DateTime?    @map("locked_until") // account lockout (ADR-033)
+  lastLoginAt       DateTime?    @map("last_login_at")
+  departmentsHeaded Department[] @relation("DepartmentHead") // back-relation for departments.head_user_id
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   @@index([customerId])
   @@map("users")
@@ -823,25 +855,35 @@ model VisitPlan {
 // which services they want. Everything operational (ports, packages, CRO/LC handling,
 // cargo details) was removed — the quotation and shipment carry that now.
 model Query {
-  id                 String      @id @default(uuid())
-  referenceNo        String      @unique @map("reference_no") // QRY-YYYY-NNNNN
-  customerId         String      @map("customer_id")
-  raisedById         String      @map("raised_by_id") // BDO or portal user — drives BDO/ASM scoping
-  raisedVia          RaisedVia   @map("raised_via")
-  status             QueryStatus @default(open)
+  id                 String          @id @default(uuid())
+  referenceNo        String          @unique @map("reference_no") // QRY-YYYY-NNNNN
+  customerId         String          @map("customer_id")
+  raisedById         String          @map("raised_by_id") // BDO or portal user — drives BDO/ASM scoping
+  raisedVia          RaisedVia       @map("raised_via")
+  status             QueryStatus     @default(open)
   // Contact snapshot. Prefilled from the linked Customer but editable, so a BDO can
   // record the person who actually called without mutating the customer record.
-  customerName       String      @map("customer_name")
-  customerEmail      String      @map("customer_email")
-  customerPhone      String      @map("customer_phone")
-  pickupAddress      String      @map("pickup_address")
-  destinationAddress String      @map("destination_address")
+  customerName       String          @map("customer_name")
+  customerEmail      String          @map("customer_email")
+  customerPhone      String          @map("customer_phone")
+  pickupAddress      String          @map("pickup_address")
+  destinationAddress String          @map("destination_address")
+  /**
+   * How the goods travel and how far. Both nullable/empty rather than defaulted: a query
+   * raised before these existed genuinely did not say, and defaulting it to `domestic`
+   * or `[road]` would invent an answer the customer never gave. New queries must supply
+   * both — enforced in the Zod schema, where the actor is known, not in the column.
+   * `modes` is an array because a real job is often multimodal: rail terminal-to-terminal
+   * with a truck at each end, or an air move that still needs the run to the airport.
+   */
+  scope              MovementScope?
+  modes              TransportMode[] @default([])
   services           String[] // free text since the package catalog was removed
-  cancelReason       String?     @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
+  cancelReason       String?         @map("cancel_reason") // unserved-demand report (RULE-QRY-03)
   quotations         Quotation[]
   vendorRfqs         VendorRfq[]
-  createdAt          DateTime    @default(now())
-  updatedAt          DateTime    @updatedAt
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
 
   @@index([customerId, status])
   @@index([status, createdAt]) // staleness sweep (RULE-QRY-04)
@@ -851,19 +893,17 @@ model Query {
 /**
  * A one-time secure link that lets the CUSTOMER approve or reject for themselves,
  * without a portal account (CRM_MASTER §5.7).
- *
  * Why it exists: the alternative is an internal user clicking "Approve by customer"
  * on their behalf, which leaves no evidence the customer ever agreed. A link carries
  * its own provenance — who opened it, from where, and exactly what they were shown.
- *
  * Security shape:
- *  - only the SHA-256 `tokenHash` is stored. The plaintext token is returned once, at
- *    creation, and never again — a dump of this table cannot be replayed into an
- *    approval;
- *  - single use: `decidedAt` closes the link, so a forwarded mail cannot re-decide;
- *  - always expires, and can be revoked early;
- *  - minting a new link revokes the previous active one, so exactly one link is live
- *    per subject and a leaked older link is dead on arrival.
+ * - only the SHA-256 `tokenHash` is stored. The plaintext token is returned once, at
+ * creation, and never again — a dump of this table cannot be replayed into an
+ * approval;
+ * - single use: `decidedAt` closes the link, so a forwarded mail cannot re-decide;
+ * - always expires, and can be revoked early;
+ * - minting a new link revokes the previous active one, so exactly one link is live
+ * per subject and a leaked older link is dead on arrival.
  */
 model ApprovalLink {
   id            String            @id @default(uuid())
@@ -884,7 +924,7 @@ model ApprovalLink {
   approverEmail String?           @map("approver_email")
   approverIp    String?           @map("approver_ip")
   approverAgent String?           @map("approver_agent")
-  reason        String?           // the customer's words when they reject
+  reason        String? // the customer's words when they reject
   createdAt     DateTime          @default(now()) @map("created_at")
 
   @@index([quotationId])
@@ -893,46 +933,46 @@ model ApprovalLink {
 }
 
 model Quotation {
-  id                String                @id @default(uuid())
-  referenceNo       String                @unique @map("reference_no") // QT-YYYY-NNNNN
-  queryId           String                @map("query_id")
-  query             Query                 @relation(fields: [queryId], references: [id])
-  version           Int                   @default(1) // revision = new row (ADR-019)
-  parentQuotationId String?               @map("parent_quotation_id")
-  status            QuotationStatus       @default(draft) // partial uniques INV-07/08, DATABASE.md §5
-  services          String[] // snapshot from the query
-  currency          String                @default("PKR") @db.Char(3)
-  fxRate            Decimal?              @map("fx_rate") @db.Decimal(12, 6)
-  totalAmount       Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
-  validityDate      DateTime?             @map("validity_date") // auto-expiry (RULE-QT-06)
-  createdById       String                @map("created_by_id") // ops_exec / ops_manager
-  sentById          String?               @map("sent_by_id") // ops_manager only (RULE-QT-01)
-  sentAt            DateTime?             @map("sent_at")
-  decidedById       String?               @map("decided_by_id") // never the owning BDO (RULE-QT-03)
-  decidedAt         DateTime?             @map("decided_at")
-  approvalChannel   ApprovalChannel?      @map("approval_channel")
+  id                    String                @id @default(uuid())
+  referenceNo           String                @unique @map("reference_no") // QT-YYYY-NNNNN
+  queryId               String                @map("query_id")
+  query                 Query                 @relation(fields: [queryId], references: [id])
+  version               Int                   @default(1) // revision = new row (ADR-019)
+  parentQuotationId     String?               @map("parent_quotation_id")
+  status                QuotationStatus       @default(draft) // partial uniques INV-07/08, DATABASE.md §5
+  services              String[] // snapshot from the query
+  currency              String                @default("PKR") @db.Char(3)
+  fxRate                Decimal?              @map("fx_rate") @db.Decimal(12, 6)
+  totalAmount           Decimal               @default(0) @map("total_amount") @db.Decimal(14, 2) // server-computed (RULE-QT-02)
+  validityDate          DateTime?             @map("validity_date") // auto-expiry (RULE-QT-06)
+  createdById           String                @map("created_by_id") // ops_exec / ops_manager
+  sentById              String?               @map("sent_by_id") // ops_manager only (RULE-QT-01)
+  sentAt                DateTime?             @map("sent_at")
+  decidedById           String?               @map("decided_by_id") // never the owning BDO (RULE-QT-03)
+  decidedAt             DateTime?             @map("decided_at")
+  approvalChannel       ApprovalChannel?      @map("approval_channel")
   // BDO → customer relay: after Ops sends, the BDO gives the quote to the customer
   // over mail/phone/WhatsApp and records how. Informational, never a gate.
-  sharedVia         QuoteShareChannel?    @map("shared_via")
-  sharedById        String?               @map("shared_by_id")
-  sharedAt          DateTime?             @map("shared_at")
-  shareNote         String?               @map("share_note")
+  sharedVia             QuoteShareChannel?    @map("shared_via")
+  sharedById            String?               @map("shared_by_id")
+  sharedAt              DateTime?             @map("shared_at")
+  shareNote             String?               @map("share_note")
   // Sales' claim that the customer accepted (on a call, over WhatsApp, in a meeting).
   // Informational, never a gate: the pivot waits for the customer's OWN act — a link
   // decision, the portal click, or a signed copy Operations verified (ADR-056).
-  acceptanceClaimedById String?            @map("acceptance_claimed_by_id")
-  acceptanceClaimedAt   DateTime?          @map("acceptance_claimed_at")
-  acceptanceClaimedVia  QuoteShareChannel? @map("acceptance_claimed_via")
-  acceptanceClaimNote   String?            @map("acceptance_claim_note")
+  acceptanceClaimedById String?               @map("acceptance_claimed_by_id")
+  acceptanceClaimedAt   DateTime?             @map("acceptance_claimed_at")
+  acceptanceClaimedVia  QuoteShareChannel?    @map("acceptance_claimed_via")
+  acceptanceClaimNote   String?               @map("acceptance_claim_note")
   // The evidence behind a `signed_copy` approval — the verified `quotation_acceptance`
   // document on this quotation.
-  acceptanceDocumentId  String?            @map("acceptance_document_id")
-  rejectionReason   String?               @map("rejection_reason") // required on reject (RULE-QT-04)
-  rowVersion        Int                   @default(1) @map("row_version") // If-Match (RULE-QT-08)
-  chargeLines       QuotationChargeLine[]
-  approvalLinks     ApprovalLink[]
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
+  acceptanceDocumentId  String?               @map("acceptance_document_id")
+  rejectionReason       String?               @map("rejection_reason") // required on reject (RULE-QT-04)
+  rowVersion            Int                   @default(1) @map("row_version") // If-Match (RULE-QT-08)
+  chargeLines           QuotationChargeLine[]
+  approvalLinks         ApprovalLink[]
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
 
   @@index([queryId, status])
   @@index([status, validityDate]) // nightly expiry job
@@ -961,11 +1001,11 @@ model QuotationChargeLine {
 
 // DB form of WORKFLOW §4a.1 — seeded, read by the composition logic at approval time
 model OtdStepTemplate {
-  id               String         @id @default(uuid())
-  canonicalNo      Int            @unique @map("canonical_no")
-  stepCode         String         @unique @map("step_code")
+  id               String                  @id @default(uuid())
+  canonicalNo      Int                     @unique @map("canonical_no")
+  stepCode         String                  @unique @map("step_code")
   title            String
-  ownerDepartment  DepartmentCode @map("owner_department") // ADR-003/039 ownership
+  ownerDepartment  DepartmentCode          @map("owner_department") // ADR-003/039 ownership
   // The ONE composition gate: which shipment kinds compose this step. Since ADR-057 the
   // roadmap's eight steps apply to BOTH kinds — `kind` says where a shipment was born,
   // not which path it walks. The only kind-specific step left is Order Lock: a
@@ -974,18 +1014,18 @@ model OtdStepTemplate {
   // Within a kind there are no further gates: every ACTIVE template composes onto every
   // shipment of that kind, in canonical order. A step that should no longer appear is
   // deactivated, never deleted, so historical shipments still resolve it by step code.
-  appliesToKinds   ShipmentKind[] @default([forwarding, trade]) @map("applies_to_kinds")
+  appliesToKinds   ShipmentKind[]          @default([forwarding, trade]) @map("applies_to_kinds")
   // One plain-language line on what completing this step actually means — shown on the
   // step panel. Lives here (ADR-051) so admin-created steps carry their own guidance;
   // previously a hardcoded STEP_HINTS map in the frontend.
   hint             String?
-  requiredDocTypes String[]       @map("required_doc_types") // RULE-SH-06
-  dueOffsetHours   Int            @default(48) @map("due_offset_hours") // seeds the step's TaskTemplate SLA
-  derivedStatus    ShipmentStatus @map("derived_status") // what completing this step derives
+  requiredDocTypes String[]                @map("required_doc_types") // RULE-SH-06
+  dueOffsetHours   Int                     @default(48) @map("due_offset_hours") // seeds the step's TaskTemplate SLA
+  derivedStatus    ShipmentStatus          @map("derived_status") // what completing this step derives
   // Superseded steps are kept, not deleted: composition skips them, but
   // missingRequiredDocs/recomputeStatus still resolve them BY STEP CODE for shipments
   // composed while they were live (ADR-048).
-  active           Boolean        @default(true)
+  active           Boolean                 @default(true)
   actions          OtdStepActionTemplate[]
 
   @@map("otd_step_templates")
@@ -993,23 +1033,22 @@ model OtdStepTemplate {
 
 /**
  * The sub-action catalog (ADR-048) — the checklist that hangs under one main step.
- *
  * Gated exactly like the step catalog (package → CRO mode → service, each
  * empty-means-don't-gate), so one `order_confirmed` step can carry the seven-document
  * international pack and the shorter loading-point-to-port pack without becoming two
  * steps. This table is the SINGLE source of the step→sub-action mapping (ADR-001).
  */
 model OtdStepActionTemplate {
-  id         String           @id @default(uuid())
-  stepCode   String           @map("step_code")
-  step       OtdStepTemplate  @relation(fields: [stepCode], references: [stepCode], onDelete: Cascade)
-  actionCode String           @map("action_code") // unique within the step
+  id         String          @id @default(uuid())
+  stepCode   String          @map("step_code")
+  step       OtdStepTemplate @relation(fields: [stepCode], references: [stepCode], onDelete: Cascade)
+  actionCode String          @map("action_code") // unique within the step
   title      String
-  kind       StepActionKind   @default(manual)
-  docType    String?          @map("doc_type") // required when kind = document
-  recordType String?          @map("record_type") // required when kind = record: contract | financial_instrument
-  sortOrder  Int              @map("sort_order")
-  required   Boolean          @default(true) // false = advisory; does not gate completion
+  kind       StepActionKind  @default(manual)
+  docType    String?         @map("doc_type") // required when kind = document
+  recordType String?         @map("record_type") // required when kind = record: contract | financial_instrument
+  sortOrder  Int             @map("sort_order")
+  required   Boolean         @default(true) // false = advisory; does not gate completion
 
   @@unique([stepCode, actionCode])
   @@index([stepCode])
@@ -1019,7 +1058,6 @@ model OtdStepActionTemplate {
 /**
  * A sub-action instance on one shipment's step. Rows exist ONLY for the sub-actions
  * the composition selected, mirroring INV-04 for steps.
- *
  * `status` is meaningful for `manual` actions only. A `document` action's satisfaction
  * is derived from the shipment's documents at read time and folded into the RULE-SH-06
  * gate — it is never written here, so it can never drift from the files on record.
@@ -1046,84 +1084,84 @@ model OtdStepAction {
 }
 
 model Shipment {
-  id               String                  @id @default(uuid())
-  referenceNo      String                  @unique @map("reference_no") // SHIP-YYYY-NNNNN
+  id                      String                      @id @default(uuid())
+  referenceNo             String                      @unique @map("reference_no") // SHIP-YYYY-NNNNN
   // NULLABLE since trade shipments (roadmap Step 1): a `forwarding` shipment still
   // carries exactly one approved quote (INV-03), a `trade` shipment originates from a
   // Trade Contract instead. `@unique` still holds — Postgres allows repeated NULLs.
   // The kind ↔ origin pairing is enforced by shipments_origin_valid in sql/constraints.sql.
-  quotationId      String?                 @unique @map("quotation_id") // INV-03 — exactly one approved quote (forwarding only)
-  queryId          String?                 @unique @map("query_id")
-  customerId       String                  @map("customer_id")
-  kind             ShipmentKind            @default(forwarding)
-  direction        ShipmentDirection?      // export | import — set on trade shipments
+  quotationId             String?                     @unique @map("quotation_id") // INV-03 — exactly one approved quote (forwarding only)
+  queryId                 String?                     @unique @map("query_id")
+  customerId              String                      @map("customer_id")
+  kind                    ShipmentKind                @default(forwarding)
+  direction               ShipmentDirection? // export | import — set on trade shipments
   // A trade shipment originates HERE instead of from a quotation (roadmap Step 1).
-  contractId       String?                 @map("contract_id")
-  contract         TradeContract?          @relation(fields: [contractId], references: [id])
-  financialInstrumentId String?            @map("financial_instrument_id")
-  financialInstrument FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
+  contractId              String?                     @map("contract_id")
+  contract                TradeContract?              @relation(fields: [contractId], references: [id])
+  financialInstrumentId   String?                     @map("financial_instrument_id")
+  financialInstrument     FinancialInstrument?        @relation(fields: [financialInstrumentId], references: [id])
   // Roadmap §7.1 — DERIVED from which trade documents exist, exactly as `status` is
   // derived from completed steps (ADR-014). Never written by an endpoint.
-  tradeStage       TradeStage              @default(none) @map("trade_stage")
-  services         String[] // FROZEN at approval (INV-14)
-  status           ShipmentStatus          @default(booking) // DERIVED (ADR-014, INV-02)
-  exceptionState   ExceptionState          @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
-  totalHoldMinutes Int                     @default(0) @map("total_hold_minutes")
-  etd              DateTime?
-  eta              DateTime? // ETA-breach sweep
-  originPort       String?                 @map("origin_port")
-  destinationPort  String?                 @map("destination_port")
+  tradeStage              TradeStage                  @default(none) @map("trade_stage")
+  services                String[] // FROZEN at approval (INV-14)
+  status                  ShipmentStatus              @default(booking) // DERIVED (ADR-014, INV-02)
+  exceptionState          ExceptionState              @default(none) @map("exception_state") // orthogonal (RULE-SH-08)
+  totalHoldMinutes        Int                         @default(0) @map("total_hold_minutes")
+  etd                     DateTime?
+  eta                     DateTime? // ETA-breach sweep
+  originPort              String?                     @map("origin_port")
+  destinationPort         String?                     @map("destination_port")
   // Free-text door addresses, snapshotted from the Query at approval so transport knows
   // where to drive. `deliveryAddress` is fed by the query's `destinationAddress`.
-  pickupAddress    String?                 @map("pickup_address")
-  deliveryAddress  String?                 @map("delivery_address")
+  pickupAddress           String?                     @map("pickup_address")
+  deliveryAddress         String?                     @map("delivery_address")
   // Shipper/consignee contacts + inland mode. The Query no longer carries these, so they
   // start null and are filled in by the shipment/trade module once the parties are known.
-  senderName       String?                 @map("sender_name")
-  senderPhone      String?                 @map("sender_phone")
-  senderAddress    String?                 @map("sender_address")
-  receiverName     String?                 @map("receiver_name")
-  receiverPhone    String?                 @map("receiver_phone")
-  receiverAddress  String?                 @map("receiver_address")
-  inlandMode       InlandMode              @default(truck) @map("inland_mode")
-  originRailTerminal      String?          @map("origin_rail_terminal")
-  destinationRailTerminal String?          @map("destination_rail_terminal")
+  senderName              String?                     @map("sender_name")
+  senderPhone             String?                     @map("sender_phone")
+  senderAddress           String?                     @map("sender_address")
+  receiverName            String?                     @map("receiver_name")
+  receiverPhone           String?                     @map("receiver_phone")
+  receiverAddress         String?                     @map("receiver_address")
+  inlandMode              InlandMode                  @default(truck) @map("inland_mode")
+  originRailTerminal      String?                     @map("origin_rail_terminal")
+  destinationRailTerminal String?                     @map("destination_rail_terminal")
   // Import detention terms — the detention-free window the line grants the consignee, and
   // where the empty goes back. Set by the shipment/trade module, not inherited any more.
-  freeDays         Int?                    @map("free_days")
-  emptyReturnLocation String?              @map("empty_return_location")
-  incoterm         String?
-  cancelReason     String?                 @map("cancel_reason") // RULE-SH-11
-  closedById       String?                 @map("closed_by_id") // ops_manager / Management (RULE-SH-12)
-  closedAt         DateTime?               @map("closed_at")
-  rowVersion       Int                     @default(1) @map("row_version")
+  freeDays                Int?                        @map("free_days")
+  emptyReturnLocation     String?                     @map("empty_return_location")
+  incoterm                String?
+  cancelReason            String?                     @map("cancel_reason") // RULE-SH-11
+  closedById              String?                     @map("closed_by_id") // ops_manager / Management (RULE-SH-12)
+  closedAt                DateTime?                   @map("closed_at")
+  rowVersion              Int                         @default(1) @map("row_version")
   // ── Phase 2/3 — present now, null until then (CRM_MASTER §2/§10) ──
-  vehicleId        String?                 @map("vehicle_id") // TMS
-  gpsDeviceId      String?                 @map("gps_device_id") // telematics
-  loadBoardRef     String?                 @map("load_board_ref") // load board
-  lcNumber         String?                 @map("lc_number") // bank/LC handshake
-  bankRef          String?                 @map("bank_ref")
-  escrowRef        String?                 @map("escrow_ref")
+  vehicleId               String?                     @map("vehicle_id") // TMS
+  gpsDeviceId             String?                     @map("gps_device_id") // telematics
+  loadBoardRef            String?                     @map("load_board_ref") // load board
+  lcNumber                String?                     @map("lc_number") // bank/LC handshake
+  bankRef                 String?                     @map("bank_ref")
+  escrowRef               String?                     @map("escrow_ref")
   // ── Ops ownership (2026-09-08) — the ops user who CLAIMED this shipment. From
   // then on only they work its operations steps and flow (assertOpsOwner); null
   // means unclaimed, and the Action Engine queues operations tasks instead of
   // assigning them. Management may reassign or release (shipment.assign).
-  opsOwnerId       String?                 @map("ops_owner_id")
-  opsClaimedAt     DateTime?               @map("ops_claimed_at")
-  otdSteps         OtdStep[]
-  otcMilestones    OtcMilestone[]
-  exceptions       ShipmentException[]
-  statusHistory    ShipmentStatusHistory[]
-  parties          ShipmentParty[]
-  containers       ShipmentContainer[]
-  packingList      PackingList?
-  tradeInvoices    TradeInvoice[]
-  billOfLading     BillOfLading?
-  goodsDeclaration GoodsDeclaration?
-  tradeStageHistory ShipmentTradeStageHistory[]
-  invoices         Invoice[]
-  createdAt        DateTime                @default(now())
-  updatedAt        DateTime                @updatedAt
+  opsOwnerId              String?                     @map("ops_owner_id")
+  opsClaimedAt            DateTime?                   @map("ops_claimed_at")
+  otdSteps                OtdStep[]
+  otcMilestones           OtcMilestone[]
+  exceptions              ShipmentException[]
+  statusHistory           ShipmentStatusHistory[]
+  parties                 ShipmentParty[]
+  containers              ShipmentContainer[]
+  packingList             PackingList?
+  tradeInvoices           TradeInvoice[]
+  billOfLading            BillOfLading?
+  goodsDeclaration        GoodsDeclaration?
+  tradeStageHistory       ShipmentTradeStageHistory[]
+  invoices                Invoice[]
+  createdAt               DateTime                    @default(now())
+  updatedAt               DateTime                    @updatedAt
 
   @@index([customerId, status])
   @@index([status, exceptionState])
@@ -1133,21 +1171,21 @@ model Shipment {
 }
 
 model OtdStep {
-  id              String         @id @default(uuid())
-  shipmentId      String         @map("shipment_id")
-  shipment        Shipment       @relation(fields: [shipmentId], references: [id])
-  canonicalNo     Int            @map("canonical_no") // 1..14 — reporting key (RULE-SVC-05)
-  displayNo       Int            @map("display_no") // 1..N of the composed path
-  stepCode        String         @map("step_code")
-  ownerDepartment DepartmentCode @map("owner_department") // completion guard (RULE-SH-04)
-  status          OtdStepStatus  @default(pending)
-  completedById   String?        @map("completed_by_id")
-  completedAt     DateTime?      @map("completed_at")
-  forced          Boolean        @default(false) // out-of-order override (RULE-SH-03)
-  forceReason     String?        @map("force_reason")
-  reopenCount     Int            @default(0) @map("reopen_count") // RULE-SH-05
-  notes           String?        // free-text handover notes for the step owner
-  formData        Json?          @map("form_data") // structured per-step capture (route/party/etc.)
+  id              String          @id @default(uuid())
+  shipmentId      String          @map("shipment_id")
+  shipment        Shipment        @relation(fields: [shipmentId], references: [id])
+  canonicalNo     Int             @map("canonical_no") // 1..14 — reporting key (RULE-SVC-05)
+  displayNo       Int             @map("display_no") // 1..N of the composed path
+  stepCode        String          @map("step_code")
+  ownerDepartment DepartmentCode  @map("owner_department") // completion guard (RULE-SH-04)
+  status          OtdStepStatus   @default(pending)
+  completedById   String?         @map("completed_by_id")
+  completedAt     DateTime?       @map("completed_at")
+  forced          Boolean         @default(false) // out-of-order override (RULE-SH-03)
+  forceReason     String?         @map("force_reason")
+  reopenCount     Int             @default(0) @map("reopen_count") // RULE-SH-05
+  notes           String? // free-text handover notes for the step owner
+  formData        Json?           @map("form_data") // structured per-step capture (route/party/etc.)
   actions         OtdStepAction[] // the step's sub-action checklist (ADR-048)
 
   @@unique([shipmentId, canonicalNo]) // rows exist ONLY for the composed path (INV-04)
@@ -1241,42 +1279,42 @@ enum InvoiceKind {
 }
 
 model Invoice {
-  id          String        @id @default(uuid())
-  referenceNo String        @unique @map("reference_no") // INV-YYYY-NNNNN
-  shipmentId  String        @map("shipment_id")
-  shipment    Shipment      @relation(fields: [shipmentId], references: [id])
-  kind        InvoiceKind   @default(receivable) // receivable ledger drives OTC/settlement; payable is separate
-  quotationId String?       @map("quotation_id") // set for the auto-drafted receivable (RULE-FI-01); null for manual invoices
-  otdStepId   String?       @map("otd_step_id") // the step this invoice was raised from (optional)
-  vendorId    String?       @map("vendor_id") // payables — the vendor being billed; null for the customer receivable
-  vendor      Vendor?       @relation(fields: [vendorId], references: [id])
-  counterparty String?      @map("counterparty") // legacy/display fallback vendor name (payables)
+  id                    String               @id @default(uuid())
+  referenceNo           String               @unique @map("reference_no") // INV-YYYY-NNNNN
+  shipmentId            String               @map("shipment_id")
+  shipment              Shipment             @relation(fields: [shipmentId], references: [id])
+  kind                  InvoiceKind          @default(receivable) // receivable ledger drives OTC/settlement; payable is separate
+  quotationId           String?              @map("quotation_id") // set for the auto-drafted receivable (RULE-FI-01); null for manual invoices
+  otdStepId             String?              @map("otd_step_id") // the step this invoice was raised from (optional)
+  vendorId              String?              @map("vendor_id") // payables — the vendor being billed; null for the customer receivable
+  vendor                Vendor?              @relation(fields: [vendorId], references: [id])
+  counterparty          String?              @map("counterparty") // legacy/display fallback vendor name (payables)
   // Roadmap §6 — a terminal or forwarder bill quotes the B/L, the container and the
   // FI. Foreign keys rather than numbers re-typed into the description.
-  billOfLadingId String?    @map("bill_of_lading_id")
-  billOfLading BillOfLading? @relation(fields: [billOfLadingId], references: [id])
-  goodsDeclarationId String? @map("goods_declaration_id")
-  goodsDeclaration GoodsDeclaration? @relation(fields: [goodsDeclarationId], references: [id])
-  financialInstrumentId String? @map("financial_instrument_id")
-  financialInstrument FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
-  containerId String?      @map("container_id")
-  container   ShipmentContainer? @relation(fields: [containerId], references: [id])
-  status      InvoiceStatus @default(draft)
-  currency    String        @db.Char(3)
-  fxRate      Decimal?      @map("fx_rate") @db.Decimal(12, 6) // captured at commit (ADR-006)
-  totalAmount Decimal       @map("total_amount") @db.Decimal(14, 2)
+  billOfLadingId        String?              @map("bill_of_lading_id")
+  billOfLading          BillOfLading?        @relation(fields: [billOfLadingId], references: [id])
+  goodsDeclarationId    String?              @map("goods_declaration_id")
+  goodsDeclaration      GoodsDeclaration?    @relation(fields: [goodsDeclarationId], references: [id])
+  financialInstrumentId String?              @map("financial_instrument_id")
+  financialInstrument   FinancialInstrument? @relation(fields: [financialInstrumentId], references: [id])
+  containerId           String?              @map("container_id")
+  container             ShipmentContainer?   @relation(fields: [containerId], references: [id])
+  status                InvoiceStatus        @default(draft)
+  currency              String               @db.Char(3)
+  fxRate                Decimal?             @map("fx_rate") @db.Decimal(12, 6) // captured at commit (ADR-006)
+  totalAmount           Decimal              @map("total_amount") @db.Decimal(14, 2)
   // Sum of the lines' tax (§4.7 — every QICT charge carries 15% Sindh Sales Tax).
-  taxTotal    Decimal?      @map("tax_total") @db.Decimal(14, 2)
-  issuedById  String?       @map("issued_by_id") // accounts
-  issuedAt    DateTime?     @map("issued_at")
-  dueDate     DateTime?     @map("due_date") // overdue sweep
-  voidedById  String?       @map("voided_by_id") // only while unpaid (RULE-FI-05)
-  voidedAt    DateTime?     @map("voided_at")
-  voidReason  String?       @map("void_reason")
-  lines       InvoiceLine[]
-  payments    Payment[]
-  createdAt   DateTime      @default(now())
-  updatedAt   DateTime      @updatedAt
+  taxTotal              Decimal?             @map("tax_total") @db.Decimal(14, 2)
+  issuedById            String?              @map("issued_by_id") // accounts
+  issuedAt              DateTime?            @map("issued_at")
+  dueDate               DateTime?            @map("due_date") // overdue sweep
+  voidedById            String?              @map("voided_by_id") // only while unpaid (RULE-FI-05)
+  voidedAt              DateTime?            @map("voided_at")
+  voidReason            String?              @map("void_reason")
+  lines                 InvoiceLine[]
+  payments              Payment[]
+  createdAt             DateTime             @default(now())
+  updatedAt             DateTime             @updatedAt
 
   @@index([shipmentId])
   @@index([status, dueDate])
@@ -1285,18 +1323,18 @@ model Invoice {
 }
 
 model InvoiceLine {
-  id          String  @id @default(uuid())
-  invoiceId   String  @map("invoice_id")
-  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  id          String   @id @default(uuid())
+  invoiceId   String   @map("invoice_id")
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id])
   description String
-  quantity    Decimal @default(1) @db.Decimal(12, 2)
-  unitPrice   Decimal @map("unit_price") @db.Decimal(14, 2)
-  amount      Decimal @db.Decimal(14, 2)
+  quantity    Decimal  @default(1) @db.Decimal(12, 2)
+  unitPrice   Decimal  @map("unit_price") @db.Decimal(14, 2)
+  amount      Decimal  @db.Decimal(14, 2)
   // §4.7 — the terminal bill is an itemised list of named charges, each taxed.
-  chargeCode  String? @map("charge_code") // charge_types.code
+  chargeCode  String?  @map("charge_code") // charge_types.code
   taxPercent  Decimal? @map("tax_percent") @db.Decimal(5, 2)
   taxAmount   Decimal? @map("tax_amount") @db.Decimal(14, 2)
-  sortOrder   Int     @default(0) @map("sort_order")
+  sortOrder   Int      @default(0) @map("sort_order")
 
   @@index([invoiceId])
   @@map("invoice_lines")
@@ -1321,51 +1359,51 @@ model Payment {
 // ================= VENDORS & JOB-CHARGE LEDGER =================
 
 model Vendor {
-  id               String           @id @default(uuid())
-  referenceNo      String           @unique @map("reference_no") // VEN-YYYY-NNNNN
-  name             String
-  normalizedName   String           @map("normalized_name") // duplicate detection
-  type             VendorType
-  contactName      String?          @map("contact_name")
-  email            String?
-  phone            String?
-  address          String?
-  country          String?
-  city             String?
-  taxId            String?          @map("tax_id") // NTN / STRN
-  paymentTermsDays Int?             @map("payment_terms_days")
-  currency         String?          @db.Char(3)
-  strn             String?          @map("strn") // Sindh Sales Tax Registration No.
-  rexNo            String?          @map("rex_no") // REX Registration No. (exporters)
-  vatNo            String?          @map("vat_no") // VAT/TVA No. (foreign buyers)
-  bankName         String?          @map("bank_name")
-  bankBranch       String?          @map("bank_branch")
-  iban             String?          @map("iban")
-  swiftCode        String?          @map("swift_code") @db.VarChar(11)
-  accountTitle     String?          @map("account_title")
-  website          String?          @map("website")
-  notes            String?
-  isActive         Boolean          @default(true) @map("is_active")
-  invoices         Invoice[]
-  vendorQuotes     VendorQuote[]
-  shipmentParties  ShipmentParty[]
+  id                  String                @id @default(uuid())
+  referenceNo         String                @unique @map("reference_no") // VEN-YYYY-NNNNN
+  name                String
+  normalizedName      String                @map("normalized_name") // duplicate detection
+  type                VendorType
+  contactName         String?               @map("contact_name")
+  email               String?
+  phone               String?
+  address             String?
+  country             String?
+  city                String?
+  taxId               String?               @map("tax_id") // NTN / STRN
+  paymentTermsDays    Int?                  @map("payment_terms_days")
+  currency            String?               @db.Char(3)
+  strn                String?               @map("strn") // Sindh Sales Tax Registration No.
+  rexNo               String?               @map("rex_no") // REX Registration No. (exporters)
+  vatNo               String?               @map("vat_no") // VAT/TVA No. (foreign buyers)
+  bankName            String?               @map("bank_name")
+  bankBranch          String?               @map("bank_branch")
+  iban                String?               @map("iban")
+  swiftCode           String?               @map("swift_code") @db.VarChar(11)
+  accountTitle        String?               @map("account_title")
+  website             String?               @map("website")
+  notes               String?
+  isActive            Boolean               @default(true) @map("is_active")
+  invoices            Invoice[]
+  vendorQuotes        VendorQuote[]
+  shipmentParties     ShipmentParty[]
   // Trade-document back-relations. Each is a NAMED relation because several trade
   // documents point at `vendors` more than once (an FI names the vendor, its bank and
   // the buyer). Real FKs, not loose ids — they are also what stops a vendor being hard
   // deleted out from under a Bill of Lading.
-  tradeContracts       TradeContract[]       @relation("TradeContractVendor")
-  fiAsVendor           FinancialInstrument[] @relation("FiVendor")
-  fiAsBank             FinancialInstrument[] @relation("FiBank")
-  fiAsBuyer            FinancialInstrument[] @relation("FiBuyer")
-  packingListsIssued   PackingList[]         @relation("PackingListIssuer")
-  tradeInvoicesSold    TradeInvoice[]        @relation("TradeInvoiceSeller")
-  tradeInvoicesBought  TradeInvoice[]        @relation("TradeInvoiceBuyer")
-  tradeInvoicesBanked  TradeInvoice[]        @relation("TradeInvoiceBank")
-  bolAsCarrier         BillOfLading[]        @relation("BolCarrier")
-  bolAsCarrierAgent    BillOfLading[]        @relation("BolCarrierAgent")
-  gdAsClearingAgent    GoodsDeclaration[]    @relation("GdClearingAgent")
-  createdAt        DateTime         @default(now())
-  updatedAt        DateTime         @updatedAt
+  tradeContracts      TradeContract[]       @relation("TradeContractVendor")
+  fiAsVendor          FinancialInstrument[] @relation("FiVendor")
+  fiAsBank            FinancialInstrument[] @relation("FiBank")
+  fiAsBuyer           FinancialInstrument[] @relation("FiBuyer")
+  packingListsIssued  PackingList[]         @relation("PackingListIssuer")
+  tradeInvoicesSold   TradeInvoice[]        @relation("TradeInvoiceSeller")
+  tradeInvoicesBought TradeInvoice[]        @relation("TradeInvoiceBuyer")
+  tradeInvoicesBanked TradeInvoice[]        @relation("TradeInvoiceBank")
+  bolAsCarrier        BillOfLading[]        @relation("BolCarrier")
+  bolAsCarrierAgent   BillOfLading[]        @relation("BolCarrierAgent")
+  gdAsClearingAgent   GoodsDeclaration[]    @relation("GdClearingAgent")
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
 
   @@index([normalizedName])
   @@index([type, isActive])
@@ -1569,43 +1607,43 @@ model OutboxEvent {
 // CUSTOMER_UPLOADABLE_DOC_TYPES allowlist. Rows referenced by documents or templates are
 // deactivated, never deleted, so historical docTypes always resolve to a label.
 model DocumentType {
-  code               String  @id // ^[a-z][a-z0-9_]{1,49}$ — same format guard as step codes
-  label              String
-  customerUploadable Boolean @default(false) @map("customer_uploadable")
+  code                 String  @id // ^[a-z][a-z0-9_]{1,49}$ — same format guard as step codes
+  label                String
+  customerUploadable   Boolean @default(false) @map("customer_uploadable")
   // A doc of this type counts towards a step gate only once ops has VERIFIED it
   // (the signed Rate Confirmation before Order Lock). Lives on the type, not the
   // step action: every gate reader keys on docType, the cache already serves the
   // table, and no per-shipment row has to change when the rule does.
   requiresVerification Boolean @default(false) @map("requires_verification")
-  active             Boolean @default(true)
-  sortOrder          Int     @default(0) @map("sort_order")
+  active               Boolean @default(true)
+  sortOrder            Int     @default(0) @map("sort_order")
 
   @@map("document_types")
 }
 
 model Document {
-  id            String            @id @default(uuid())
-  ownerType     DocumentOwnerType @map("owner_type") // polymorphic (RULE-DOC-03)
-  ownerId       String            @map("owner_id")
-  otdStepId     String?           @map("otd_step_id") // groups a doc/proof under a specific shipment step
-  fileName      String            @map("file_name")
-  mimeType      String            @map("mime_type")
-  sizeBytes     Int               @map("size_bytes")
-  checksum      String // dedup (RULE-DOC-02)
-  storageKey    String            @unique @map("storage_key")
-  docType       String?           @map("doc_type") // 'gd' | 'bol' | 'pod' | … (RULE-SH-06)
-  isPublished   Boolean           @default(false) @map("is_published") // INV-10 — internal by default
-  publishedById String?           @map("published_by_id")
-  publishedAt   DateTime?         @map("published_at")
-  scanStatus    ScanStatus        @default(pending) @map("scan_status")
+  id                 String               @id @default(uuid())
+  ownerType          DocumentOwnerType    @map("owner_type") // polymorphic (RULE-DOC-03)
+  ownerId            String               @map("owner_id")
+  otdStepId          String?              @map("otd_step_id") // groups a doc/proof under a specific shipment step
+  fileName           String               @map("file_name")
+  mimeType           String               @map("mime_type")
+  sizeBytes          Int                  @map("size_bytes")
+  checksum           String // dedup (RULE-DOC-02)
+  storageKey         String               @unique @map("storage_key")
+  docType            String?              @map("doc_type") // 'gd' | 'bol' | 'pod' | … (RULE-SH-06)
+  isPublished        Boolean              @default(false) @map("is_published") // INV-10 — internal by default
+  publishedById      String?              @map("published_by_id")
+  publishedAt        DateTime?            @map("published_at")
+  scanStatus         ScanStatus           @default(pending) @map("scan_status")
   // Ops sign-off, meaningful only for types with requires_verification (see the enum).
   verificationStatus DocumentVerification @default(unverified) @map("verification_status")
-  verifiedById       String?           @map("verified_by_id")
-  verifiedAt         DateTime?         @map("verified_at")
-  verificationNote   String?           @map("verification_note") // why it was rejected, or a note on acceptance
-  uploadedById  String            @map("uploaded_by_id")
-  deletedAt     DateTime?         @map("deleted_at") // soft delete (RULE-DOC-04)
-  createdAt     DateTime          @default(now())
+  verifiedById       String?              @map("verified_by_id")
+  verifiedAt         DateTime?            @map("verified_at")
+  verificationNote   String?              @map("verification_note") // why it was rejected, or a note on acceptance
+  uploadedById       String               @map("uploaded_by_id")
+  deletedAt          DateTime?            @map("deleted_at") // soft delete (RULE-DOC-04)
+  createdAt          DateTime             @default(now())
 
   @@index([ownerType, ownerId])
   @@index([checksum])
@@ -1804,34 +1842,34 @@ model LoadBoardPosting {
 // Inbound bank LC posted to the intake webhook (§5.21, WORKFLOW §2c).
 // Idempotent on the bank's own reference so replays never duplicate.
 model BankLcReferral {
-  id               String       @id @default(uuid())
-  referenceNo      String       @unique @map("reference_no") // LC-YYYY-NNNNN (intake ref)
-  idempotencyKey   String       @unique @map("idempotency_key") // dedupe bank replays
-  lcNumber         String       @map("lc_number") // the bank's LC number
-  bankName         String?      @map("bank_name")
-  bankRef          String?      @map("bank_ref")
-  applicantName    String?      @map("applicant_name") // buyer/importer
-  applicantEmail   String?      @map("applicant_email")
-  applicantPhone   String?      @map("applicant_phone")
-  companyName      String?      @map("company_name")
-  beneficiaryName  String?      @map("beneficiary_name")
-  amount           Decimal?     @db.Decimal(14, 2)
-  currency         String?      @db.Char(3)
-  originPort       String?      @map("origin_port")
-  destinationPort  String?      @map("destination_port")
-  commodity        String?
-  incoterm         String?
-  issueDate        DateTime?    @map("issue_date")
-  expiryDate       DateTime?    @map("expiry_date")
-  rawPayload       Json         @map("raw_payload") // full webhook body, for audit
-  status           BankLcStatus @default(received)
-  reviewedById     String?      @map("reviewed_by_id")
-  convertedCustomerId String?   @map("converted_customer_id")
-  convertedLeadId  String?      @map("converted_lead_id")
-  convertedQueryId String?      @map("converted_query_id")
-  rejectReason     String?      @map("reject_reason")
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id                  String       @id @default(uuid())
+  referenceNo         String       @unique @map("reference_no") // LC-YYYY-NNNNN (intake ref)
+  idempotencyKey      String       @unique @map("idempotency_key") // dedupe bank replays
+  lcNumber            String       @map("lc_number") // the bank's LC number
+  bankName            String?      @map("bank_name")
+  bankRef             String?      @map("bank_ref")
+  applicantName       String?      @map("applicant_name") // buyer/importer
+  applicantEmail      String?      @map("applicant_email")
+  applicantPhone      String?      @map("applicant_phone")
+  companyName         String?      @map("company_name")
+  beneficiaryName     String?      @map("beneficiary_name")
+  amount              Decimal?     @db.Decimal(14, 2)
+  currency            String?      @db.Char(3)
+  originPort          String?      @map("origin_port")
+  destinationPort     String?      @map("destination_port")
+  commodity           String?
+  incoterm            String?
+  issueDate           DateTime?    @map("issue_date")
+  expiryDate          DateTime?    @map("expiry_date")
+  rawPayload          Json         @map("raw_payload") // full webhook body, for audit
+  status              BankLcStatus @default(received)
+  reviewedById        String?      @map("reviewed_by_id")
+  convertedCustomerId String?      @map("converted_customer_id")
+  convertedLeadId     String?      @map("converted_lead_id")
+  convertedQueryId    String?      @map("converted_query_id")
+  rejectReason        String?      @map("reject_reason")
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
 
   @@index([status, createdAt])
   @@map("bank_lc_referrals")
@@ -1876,46 +1914,46 @@ model TradeContract {
 // LC / documentary collection carrying the same shape. One vendor holds many of these
 // against potentially different customers, and each shipment draws on exactly one.
 model FinancialInstrument {
-  id                    String                        @id @default(uuid())
-  referenceNo           String                        @unique @map("reference_no") // FI-YYYY-NNNNN
-  fiNumber              String                        @unique @map("fi_number") // the number the bank issued
-  type                  FinancialInstrumentType       @default(exp_form)
-  contractId            String?                       @map("contract_id")
-  contract              TradeContract?                @relation(fields: [contractId], references: [id])
-  vendorId              String                        @map("vendor_id")
-  vendor                Vendor                        @relation("FiVendor", fields: [vendorId], references: [id])
-  bankVendorId          String                        @map("bank_vendor_id")
-  bank                  Vendor                        @relation("FiBank", fields: [bankVendorId], references: [id])
-  customerId            String?                       @map("customer_id")
-  buyerVendorId         String?                       @map("buyer_vendor_id")
-  buyer                 Vendor?                       @relation("FiBuyer", fields: [buyerVendorId], references: [id])
-  incoterm              String?
-  currency              String                        @db.Char(3)
-  value                 Decimal                       @db.Decimal(14, 2)
+  id                String                        @id @default(uuid())
+  referenceNo       String                        @unique @map("reference_no") // FI-YYYY-NNNNN
+  fiNumber          String                        @unique @map("fi_number") // the number the bank issued
+  type              FinancialInstrumentType       @default(exp_form)
+  contractId        String?                       @map("contract_id")
+  contract          TradeContract?                @relation(fields: [contractId], references: [id])
+  vendorId          String                        @map("vendor_id")
+  vendor            Vendor                        @relation("FiVendor", fields: [vendorId], references: [id])
+  bankVendorId      String                        @map("bank_vendor_id")
+  bank              Vendor                        @relation("FiBank", fields: [bankVendorId], references: [id])
+  customerId        String?                       @map("customer_id")
+  buyerVendorId     String?                       @map("buyer_vendor_id")
+  buyer             Vendor?                       @relation("FiBuyer", fields: [buyerVendorId], references: [id])
+  incoterm          String?
+  currency          String                        @db.Char(3)
+  value             Decimal                       @db.Decimal(14, 2)
   // "60% CAD / 40% DA 75 days from B/L date" decomposed, so the DA maturity can be
   // computed off the Bill of Lading rather than read out of a sentence.
-  cadPercent            Decimal?                      @map("cad_percent") @db.Decimal(5, 2)
-  daPercent             Decimal?                      @map("da_percent") @db.Decimal(5, 2)
-  daDays                Int?                          @map("da_days")
-  paymentTermsText      String?                       @map("payment_terms_text")
-  portOfDischarge       String?                       @map("port_of_discharge")
-  issueDate             DateTime?                     @map("issue_date")
-  expiryDate            DateTime                      @map("expiry_date")
-  status                FinancialInstrumentStatus     @default(active)
+  cadPercent        Decimal?                      @map("cad_percent") @db.Decimal(5, 2)
+  daPercent         Decimal?                      @map("da_percent") @db.Decimal(5, 2)
+  daDays            Int?                          @map("da_days")
+  paymentTermsText  String?                       @map("payment_terms_text")
+  portOfDischarge   String?                       @map("port_of_discharge")
+  issueDate         DateTime?                     @map("issue_date")
+  expiryDate        DateTime                      @map("expiry_date")
+  status            FinancialInstrumentStatus     @default(active)
   // Maintained ONLY by drawdown rows (ADR-001) — never hand-edited.
-  drawnAmount           Decimal                       @default(0) @map("drawn_amount") @db.Decimal(14, 2)
-  expiryNotifiedAt      DateTime?                     @map("expiry_notified_at") // de-dupes the nightly sweep
-  closedById            String?                       @map("closed_by_id")
-  closedAt              DateTime?                     @map("closed_at")
-  notes                 String?
-  drawdowns             FinancialInstrumentDrawdown[]
-  shipments             Shipment[]
-  tradeInvoices         TradeInvoice[]
-  goodsDeclarations     GoodsDeclaration[]
-  logisticsInvoices     Invoice[]
-  createdById           String?                       @map("created_by_id")
-  createdAt             DateTime                      @default(now())
-  updatedAt             DateTime                      @updatedAt
+  drawnAmount       Decimal                       @default(0) @map("drawn_amount") @db.Decimal(14, 2)
+  expiryNotifiedAt  DateTime?                     @map("expiry_notified_at") // de-dupes the nightly sweep
+  closedById        String?                       @map("closed_by_id")
+  closedAt          DateTime?                     @map("closed_at")
+  notes             String?
+  drawdowns         FinancialInstrumentDrawdown[]
+  shipments         Shipment[]
+  tradeInvoices     TradeInvoice[]
+  goodsDeclarations GoodsDeclaration[]
+  logisticsInvoices Invoice[]
+  createdById       String?                       @map("created_by_id")
+  createdAt         DateTime                      @default(now())
+  updatedAt         DateTime                      @updatedAt
 
   @@index([status, expiryDate])
   @@index([vendorId])

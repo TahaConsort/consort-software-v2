@@ -97,12 +97,13 @@ export const TRADE_STEP_HINTS = {
  * ticked by the step's owning department.
  */
 export const TRADE_STEP_ACTION_TEMPLATES = [
-  // Step 1 — the two root records every downstream document quotes by number (§4.1/§4.2).
-  // The REGISTERS gate the step; the scans are optional evidence beside them.
-  { stepCode: "trade_contract_registered", actionCode: "contract_linked", title: "Trade Contract registered & linked to this shipment", kind: "record",   docType: null,                   recordType: "contract",             sortOrder: 10, required: true },
-  { stepCode: "trade_contract_registered", actionCode: "fi_linked",       title: "Financial Instrument (EXP form) linked & active",     kind: "record",   docType: null,                   recordType: "financial_instrument", sortOrder: 20, required: true },
-  { stepCode: "trade_contract_registered", actionCode: "contract_doc",    title: "Signed contract / proforma scan attached",           kind: "document", docType: "trade_contract",       recordType: null,                   sortOrder: 30, required: false },
-  { stepCode: "trade_contract_registered", actionCode: "fi_doc",          title: "Bank's EXP registration scan attached",              kind: "document", docType: "financial_instrument", recordType: null,                   sortOrder: 40, required: false },
+  // Step 1 — the contract and the bank registration behind the job.
+  // The two `record` items that used to gate this step were satisfied only by linking a
+  // Trade Contract / Financial Instrument from the trade registers. Those registers are
+  // removed, and otd.controllers refuses to tick a `record` item by hand (409), so they
+  // would have frozen Step 1 — and every shipment behind it — with no way through.
+  { stepCode: "trade_contract_registered", actionCode: "contract_doc",    title: "Signed contract / proforma scan attached",           kind: "document", docType: "trade_contract",       recordType: null,                   sortOrder: 30, required: true },
+  { stepCode: "trade_contract_registered", actionCode: "fi_doc",          title: "Bank's EXP registration scan attached",              kind: "document", docType: "financial_instrument", recordType: null,                   sortOrder: 40, required: true },
   { stepCode: "trade_contract_registered", actionCode: "terms_confirmed", title: "Incoterm & payment terms (CAD/DA split) confirmed",  kind: "manual",   docType: null,                   recordType: null,                   sortOrder: 50, required: true },
 
   // Step 2 — the packing list totals are what §7.2's mismatch checks compare against.
@@ -159,6 +160,10 @@ export const CHARGE_TYPE_STEP_REMAP = {
   fuel_surcharge: "trade_production_packing",
   loading_labour: "trade_production_packing",
   documentation_fee: "trade_bol_issued",
+  // Rail carriage buys its space at the same stage ocean freight does.
+  rail_freight: "trade_booking_customs",
+  rail_terminal_handling: "trade_booking_customs",
+  wagon_detention: "trade_logistics_settlement",
   do_fee: "trade_logistics_settlement",
   agency_fee: "trade_logistics_settlement",
   lc_charges: "trade_collection",

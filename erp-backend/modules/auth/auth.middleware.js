@@ -29,7 +29,7 @@ const MANAGEMENT_PERMS = [
   // secure link like the sales floor does.
   "quotation.read", "quotation.share", "quotation.reject",
   "shipment.read", "shipment.step.reopen", "shipment.hold", "shipment.resume",
-  "shipment.cancel", "shipment.close", "shipment.force_override", "shipment.schedule",
+  "shipment.cancel", "shipment.close", "shipment.schedule",
   "invoice.create",
   "task.read", "task.reassign",
   "document.upload", "document.read", "document.publish", "document.delete",
@@ -39,16 +39,16 @@ const MANAGEMENT_PERMS = [
   "lc.read", "lc.convert",
   // Vendors — the counterparties on payable invoices
   "vendor.read", "vendor.manage",
-  // Vendor rate requests — the buy side of a query
-  "rfq.read", "rfq.manage", "rfq.award",
+  // Emailing a vendor for rates (modules/vendor). The RFQ board this used to sit
+  // alongside is removed for now, so rfq.read / rfq.award are gone with it.
+  "rfq.manage",
   // Own fleet — drivers, trucks, dumpers
   "fleet.read", "fleet.manage",
   // Workflow catalog admin (ADR-051) — steps, checklists, document types
   "workflow.manage",
-  // Export trade documents (roadmap §4) — Management sees and does everything
-  "trade.read", "trade.party.manage", "trade.contract.manage",
-  "trade.cargo.manage", "trade.transport.manage", "trade.customs.manage",
-  "trade.invoice.manage", "trade.invoice.issue",
+  // Per-shipment party roles (roadmap §2/§7). The trade registers and document pack
+  // they used to sit beside are removed, so only these two remain.
+  "trade.read", "trade.party.manage",
   "fi.manage", "fi.close",
   // Ops shipment ownership — Management reassigns or releases a claimed shipment.
   "shipment.assign",
@@ -61,7 +61,7 @@ const MANAGEMENT_PERMS = [
 // as enum values so existing users and the ~30 hardcoded role lists keep working,
 // but they can do exactly the same things. This deliberately collapses the former
 // manager-only gates — quotation.send (RULE-QT-01 four-eyes on outbound pricing),
-// shipment.force_override, shipment.close (RULE-SH-12), hold/resume/cancel,
+// shipment.close (RULE-SH-12), hold/resume/cancel,
 // document.publish/delete, vendor.manage — onto every ops user. Four-eyes on
 // money now sits at quotation APPROVAL (a different role decides) and at invoice
 // ISSUE (Accounts). Re-split here if the desk grows a real manager tier again.
@@ -69,7 +69,7 @@ const OPS_PERMS = [
   "query.read",
   "quotation.create", "quotation.read", "quotation.send", "quotation.revise",
   "shipment.read", "shipment.step.complete", "shipment.step.reopen",
-  "shipment.hold", "shipment.resume", "shipment.cancel", "shipment.close", "shipment.force_override", "shipment.schedule",
+  "shipment.hold", "shipment.resume", "shipment.cancel", "shipment.close", "shipment.schedule",
   // Take ownership of a shipment — from then on only the owner works its steps and flow.
   "shipment.claim",
   "invoice.create",
@@ -80,16 +80,14 @@ const OPS_PERMS = [
   "chat.read", "chat.send", "report.read", "dashboard.read",
   "lc.read", "lc.convert",
   "vendor.read", "vendor.manage",
-  // Ops runs the rate requests end to end — they are the ones on the phone to the
-  // transporter, so they also pick the winning vendor.
-  "rfq.read", "rfq.manage", "rfq.award",
+  // Ops are the ones on the phone to the transporter, so they email for rates.
+  "rfq.manage",
   // Ops keeps the fleet masters current — they meet the driver and the truck.
   "fleet.read", "fleet.manage",
   // Operations owns the cargo-side paperwork: parties, containers, packing list,
   // B/L, and the PURCHASE commercial invoice (the vendor billing Consort).
   // Issuing the SALE invoice is deliberately withheld — that is Accounts (four-eyes).
-  "trade.read", "trade.party.manage", "trade.contract.manage",
-  "trade.cargo.manage", "trade.transport.manage", "trade.invoice.manage",
+  "trade.read", "trade.party.manage",
 ];
 
 export const PERMISSIONS_BY_ROLE = {
@@ -117,7 +115,7 @@ export const PERMISSIONS_BY_ROLE = {
     "chat.read", "chat.send", "report.read", "dashboard.read",
     "vendor.read",
     // Sales owns the customer relationship behind a trade contract, not the cargo
-    "trade.read", "trade.contract.manage",
+    "trade.read",
   ],
 
   bdo: [
@@ -165,7 +163,7 @@ export const PERMISSIONS_BY_ROLE = {
     "vendor.read",
     // Compliance files the Goods Declaration — mirrors step 95 customs_clearance
     // being compliance-owned (RULE-SH-04).
-    "trade.read", "trade.party.manage", "trade.customs.manage",
+    "trade.read", "trade.party.manage",
   ],
 
   compliance_exec: [
@@ -174,7 +172,7 @@ export const PERMISSIONS_BY_ROLE = {
     "task.read", "task.update", "task.complete",
     "document.upload", "document.read",
     "chat.read", "chat.send", "dashboard.read",
-    "trade.read", "trade.customs.manage",
+    "trade.read",
   ],
 
   transport_manager: [
@@ -210,7 +208,7 @@ export const PERMISSIONS_BY_ROLE = {
     // balance — the same department that owns invoices and payments owns it. Accounts
     // also ISSUES the sale commercial invoice, which drafts the receivable and
     // completes OTC milestone 1 (RULE-FI-02).
-    "trade.read", "trade.invoice.manage", "trade.invoice.issue",
+    "trade.read",
     "fi.manage", "fi.close",
   ],
 

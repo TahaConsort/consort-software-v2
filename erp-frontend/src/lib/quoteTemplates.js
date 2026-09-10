@@ -21,6 +21,11 @@ const LINE = {
   documentation_fee: "Documentation / BL Fee",
   freight_forwarding_fee: "Freight Forwarding Service Fee",
   detention_demurrage: "Detention / Demurrage",
+  // Rail. These codes are seeded by scripts/seedModeChargeTypes.js — a code with no
+  // charge_types row still prices fine but lands on the job instead of on a step.
+  rail_freight: "Rail Freight / Haulage",
+  rail_terminal_handling: "Rail Terminal Handling",
+  wagon_detention: "Wagon Detention",
 };
 
 // The charge lines each SERVICE brings to the sheet. Keyed on service code now that the
@@ -31,6 +36,9 @@ const TEMPLATES = {
   port_handling: ["lolo", "cro_charges", "port_handling"],
   customs_clearance: ["customs_clearance"],
   sea_freight: ["ocean_freight", "documentation_fee"],
+  // Rail is terminal to terminal. The trucking at each end is priced through
+  // local_transport, which is why a rail query normally carries both services.
+  rail_freight: ["rail_freight", "rail_terminal_handling", "wagon_detention"],
   lc_finance: ["freight_forwarding_fee"],
   // Destination delivery: the run to the consignee and the run back with the empty.
   // Detention is priced at zero by default and only bites when the free days run out —
@@ -50,6 +58,11 @@ const SERVICE_OF = {
   customs_clearance: "customs_clearance",
   ocean_freight: "sea_freight",
   documentation_fee: "sea_freight",
+  rail_freight: "rail_freight",
+  rail_terminal_handling: "rail_freight",
+  // Wagon detention is a consequence of the wagon standing, not of the haulage sold —
+  // same reasoning as detention_demurrage below.
+  wagon_detention: undefined,
   freight_forwarding_fee: undefined,
   // Detention is a consequence of the whole job, not of one service — left unassigned
   // so it never lands on a step's P&L that didn't cause it.

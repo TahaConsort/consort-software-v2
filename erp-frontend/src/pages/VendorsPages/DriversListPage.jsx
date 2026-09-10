@@ -1,24 +1,87 @@
 import { useEffect, useState } from "react";
-import { IdCard, Loader2, Plus, Pencil, Ban, Paperclip } from "lucide-react";
+import { IdCard, RefreshCw, Plus, Pencil, Ban, Paperclip, Save } from "lucide-react";
 import toast from "react-hot-toast";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import {
-  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription,
-} from "@/components/ui/dialog";
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  EmptyState,
+  IconButton,
+  Input,
+  Modal,
+  ModalBody,
+  ModalContent,
+  ModalFooter,
+  ModalHeader,
+  Skeleton,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+  Tooltip,
+} from "@neuctra/ui";
 import DocumentsDialog from "@/components/DocumentsDialog";
 import { useAuthStore } from "@/store/authStore";
-import { listDrivers, createDriver, updateDriver, deactivateDriver } from "@/services/fleetService";
+import {
+  listDrivers,
+  createDriver,
+  updateDriver,
+  deactivateDriver,
+} from "@/services/fleetService";
 
 const EMPTY = { name: "", phone: "", cnic: "", licenseNo: "" };
+
+/** One 36px baseline across the toolbar and the row actions. */
+const ACTION_BTN = "h-9 px-3";
+const ACTION_ICON_BTN = "h-9 w-9 shrink-0 p-0";
+
+const CHIP = "whitespace-nowrap border text-xs";
+const NEUTRAL_CHIP = "border-border bg-muted text-muted-foreground";
+const SUCCESS_CHIP = "border-success/30 bg-success/10 text-success";
+
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order — `style` is the only
+ * deterministic route.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
 
 // Stored digits-only; shown the way it is printed on the card.
 const prettyCnic = (v) => {
   const d = String(v ?? "").replace(/\D/g, "");
-  return d.length === 13 ? `${d.slice(0, 5)}-${d.slice(5, 12)}-${d.slice(12)}` : v || "—";
+  return d.length === 13
+    ? `${d.slice(0, 5)}-${d.slice(5, 12)}-${d.slice(12)}`
+    : v || "—";
 };
+
+/** Icon-only row action, so three controls fit one column without wrapping. */
+const RowAction = ({ title, onClick, disabled, danger, children }) => (
+  <Tooltip content={title}>
+    <span className="inline-flex shrink-0">
+      <IconButton
+        variant="ghost"
+        className={`${ACTION_ICON_BTN} text-muted-foreground ${
+          danger
+            ? "hover:bg-destructive/10 hover:text-destructive"
+            : "hover:text-foreground"
+        }`}
+        aria-label={title}
+        disabled={disabled}
+        onClick={onClick}
+        icon={children}
+      />
+    </span>
+  </Tooltip>
+);
 
 /**
  * Drivers — own-fleet master. Four identifying fields and the paperwork that
@@ -29,36 +92,80 @@ export default function DriversListPage() {
   const hasPermission = useAuthStore((s) => s.hasPermission);
   const canManage = hasPermission("fleet.manage");
 
-  const [drivers, setDrivers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // `null` means "not answered yet", which is what drives the skeleton. Deriving it
+  // beats a loading flag that `load` would have to set synchronously — the thing that
+  // made the mount effect trip react-hooks/set-state-in-effect before.
+  const [drivers, setDrivers] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
   const [docsFor, setDocsFor] = useState(null); // driver whose documents are open
 
+  const loading = drivers === null;
+
   const load = async () => {
-    setLoading(true);
     try {
       const res = await listDrivers();
       setDrivers(res.data || []);
     } catch (err) {
+      // Settle the list either way, or a failed first load leaves the skeleton up forever.
+      setDrivers((prev) => prev ?? []);
       toast.error(err?.message || "Could not load drivers");
-    } finally {
-      setLoading(false);
     }
   };
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  // Only the button shows a spinner: the first load already has the skeleton.
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
-  const openCreate = () => { setEditing(null); setForm(EMPTY); setOpen(true); };
+  /**
+   * The first read is inlined rather than calling `load()`: the lint rule treats any
+   * call into a function that touches setState as a synchronous effect write, whatever
+   * the await ordering. Settling inside the promise callbacks — behind an `alive` guard
+   * so a fast unmount cannot write to a dead component — is the shape it accepts.
+   */
+  useEffect(() => {
+    let alive = true;
+    listDrivers()
+      .then((res) => {
+        if (alive) setDrivers(res.data || []);
+      })
+      .catch((err) => {
+        if (!alive) return;
+        setDrivers([]);
+        toast.error(err?.message || "Could not load drivers");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const openCreate = () => {
+    setEditing(null);
+    setForm(EMPTY);
+    setOpen(true);
+  };
+
   const openEdit = (d) => {
     setEditing(d);
     setForm({
-      name: d.name ?? "", phone: d.phone ?? "", cnic: d.cnic ?? "", licenseNo: d.licenseNo ?? "",
+      name: d.name ?? "",
+      phone: d.phone ?? "",
+      cnic: d.cnic ?? "",
+      licenseNo: d.licenseNo ?? "",
     });
     setOpen(true);
   };
+
+  const set = (patch) => setForm((p) => ({ ...p, ...patch }));
 
   const submit = async (e) => {
     e.preventDefault();
@@ -73,7 +180,9 @@ export default function DriversListPage() {
         cnic: form.cnic || undefined,
         licenseNo: form.licenseNo || undefined,
       };
-      const res = editing ? await updateDriver(editing.id, payload) : await createDriver(payload);
+      const res = editing
+        ? await updateDriver(editing.id, payload)
+        : await createDriver(payload);
       toast.success(res?.message || "Saved");
       setOpen(false);
       await load();
@@ -83,7 +192,6 @@ export default function DriversListPage() {
       setBusy(false);
     }
   };
-
 
   const remove = async (d) => {
     setBusy(true);
@@ -98,108 +206,300 @@ export default function DriversListPage() {
     }
   };
 
+  const rows = drivers ?? [];
+
   return (
-    <div className="p-4 sm:p-6 space-y-5">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <IdCard className="w-6 h-6 text-primary" />
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <IdCard className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl font-semibold">Drivers</h1>
-            <p className="text-sm text-muted-foreground">Own-fleet drivers — identity, licence and their scanned paperwork</p>
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Drivers
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Own-fleet drivers: identity, licence and their scanned paperwork
+            </p>
           </div>
         </div>
-        {canManage && <Button className="gap-2" onClick={openCreate}><Plus className="w-4 h-4" /> New driver</Button>}
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={refresh}
+            disabled={loading || refreshing}
+            iconBefore={
+              <RefreshCw
+                className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
+              />
+            }
+          >
+            Refresh
+          </Button>
+          {canManage && (
+            <Button
+              size="sm"
+              className={ACTION_BTN}
+              onClick={openCreate}
+              iconBefore={<Plus className="h-4 w-4" />}
+            >
+              New driver
+            </Button>
+          )}
+        </div>
       </div>
 
-      {loading ? (
-        <div className="flex justify-center py-16 text-muted-foreground"><Loader2 className="w-6 h-6 animate-spin" /></div>
-      ) : drivers.length === 0 ? (
-        <div className="rounded-xl border border-dashed p-12 text-center text-muted-foreground">No drivers yet.</div>
+      {!loading && rows.length === 0 ? (
+        <Card>
+          <CardBody>
+            <EmptyState
+              icon={<IdCard />}
+              title="No drivers yet"
+              description={
+                canManage
+                  ? "Add the drivers who run your own vehicles, then attach their CNIC and licence."
+                  : "Nobody has been added to the fleet register yet."
+              }
+              action={
+                canManage && (
+                  <Button
+                    size="sm"
+                    className={ACTION_BTN}
+                    onClick={openCreate}
+                    iconBefore={<Plus className="h-4 w-4" />}
+                  >
+                    New driver
+                  </Button>
+                )
+              }
+              className="py-10"
+            />
+          </CardBody>
+        </Card>
       ) : (
-        <div className="overflow-x-auto rounded-xl border">
-          <table className="w-full text-sm">
-            <thead className="bg-muted/50 text-left text-xs uppercase text-muted-foreground">
-              <tr>
-                <th className="px-4 py-2.5">Ref</th>
-                <th className="px-4 py-2.5">Name</th>
-                <th className="px-4 py-2.5">Phone</th>
-                <th className="px-4 py-2.5">CNIC</th>
-                <th className="px-4 py-2.5">Licence</th>
-                <th className="px-4 py-2.5">Status</th>
-                <th className="px-4 py-2.5 text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y">
-              {drivers.map((d) => (
-                <tr key={d.id} className={`hover:bg-muted/30 ${!d.isActive ? "opacity-50" : ""}`}>
-                  <td className="px-4 py-2.5 font-mono text-xs">{d.referenceNo}</td>
-                  <td className="px-4 py-2.5 font-medium">{d.name}</td>
-                  <td className="px-4 py-2.5 text-xs">{d.phone || "—"}</td>
-                  <td className="px-4 py-2.5 font-mono text-xs">{prettyCnic(d.cnic)}</td>
-                  <td className="px-4 py-2.5 text-xs">{d.licenseNo || "—"}</td>
-                  <td className="px-4 py-2.5"><Badge variant="outline" className="text-[10px]">{d.isActive ? "Active" : "Inactive"}</Badge></td>
-                  <td className="px-4 py-2.5 text-right whitespace-nowrap">
-                    <Button size="sm" variant="ghost" className="h-8 text-xs gap-1" onClick={() => setDocsFor(d)}>
-                      <Paperclip className="w-3.5 h-3.5" /> Docs
-                    </Button>
-                    {canManage && (
-                      <>
-                        <Button size="sm" variant="ghost" className="h-8" onClick={() => openEdit(d)}><Pencil className="w-3.5 h-3.5" /></Button>
-                        {d.isActive && (
-                          <Button size="sm" variant="ghost" className="h-8 text-destructive" disabled={busy} onClick={() => remove(d)}><Ban className="w-3.5 h-3.5" /></Button>
-                        )}
-                      </>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "26%" }}>Driver</TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "14%" }}
+                  >
+                    Phone
+                  </TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "20%" }}
+                  >
+                    CNIC
+                  </TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "15%" }}
+                  >
+                    Licence
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "11%" }}>Status</TH>
+                  <TH style={{ ...HEAD_CELL, width: "14%", textAlign: "right" }}>
+                    Actions
+                  </TH>
+                </TRow>
+              </THead>
+
+              <TBody>
+                {loading &&
+                  [...Array(5)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(6)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
+
+                {!loading &&
+                  rows.map((d) => (
+                    <TRow
+                      key={d.id}
+                      className={`bg-card! ${d.isActive ? "" : "opacity-60"}`}
+                    >
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <div className="truncate font-medium">{d.name}</div>
+                        <div className="truncate font-mono text-xs text-muted-foreground">
+                          {d.referenceNo}
+                        </div>
+                      </TD>
+
+                      <TD
+                        className="hidden sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <span className="truncate text-xs">{d.phone || "—"}</span>
+                      </TD>
+
+                      <TD
+                        className="hidden md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <span className="truncate font-mono text-xs">
+                          {prettyCnic(d.cnic)}
+                        </span>
+                      </TD>
+
+                      <TD
+                        className="hidden lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <span className="truncate text-xs">
+                          {d.licenseNo || "—"}
+                        </span>
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <Badge
+                          variant="soft"
+                          size="sm"
+                          text={d.isActive ? "Active" : "Inactive"}
+                          className={`${CHIP} ${d.isActive ? SUCCESS_CHIP : NEUTRAL_CHIP}`}
+                        />
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP, textAlign: "right" }}>
+                        <div className="flex items-center justify-end gap-1">
+                          <RowAction
+                            title="Documents (CNIC, licence)"
+                            onClick={() => setDocsFor(d)}
+                          >
+                            <Paperclip className="h-4 w-4" />
+                          </RowAction>
+                          {canManage && (
+                            <RowAction title="Edit" onClick={() => openEdit(d)}>
+                              <Pencil className="h-4 w-4" />
+                            </RowAction>
+                          )}
+                          {canManage && d.isActive && (
+                            <RowAction
+                              title="Deactivate"
+                              danger
+                              disabled={busy}
+                              onClick={() => remove(d)}
+                            >
+                              <Ban className="h-4 w-4" />
+                            </RowAction>
+                          )}
+                        </div>
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
         </div>
       )}
 
-      {/* Create / edit dialog */}
-      <Dialog open={open} onOpenChange={setOpen}>
-        {/* Body scrolls, footer stays out of it — a dialog-level scroll puts the last
-            field under the sticky footer and past the end of the scroll range. */}
-        <DialogContent size="md" className="overflow-hidden">
-          <DialogHeader>
-            <DialogTitle>{editing ? "Edit driver" : "New driver"}</DialogTitle>
-            <DialogDescription>Attach the CNIC and licence scans from the Docs button once saved.</DialogDescription>
-          </DialogHeader>
-          <form onSubmit={submit} className="flex flex-1 min-h-0 flex-col gap-3">
-            <div className="flex-1 min-h-0 overflow-y-auto space-y-3 px-1 -mx-1 pb-1 scrollbar-thin">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5 min-w-0">
-                  <Label htmlFor="d-name">Name</Label>
-                  <Input id="d-name" value={form.name} onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))} placeholder="e.g. Muhammad Aslam" />
-                </div>
-                <div className="space-y-1.5 min-w-0">
-                  <Label htmlFor="d-phone">Phone</Label>
-                  <Input id="d-phone" value={form.phone} onChange={(e) => setForm((p) => ({ ...p, phone: e.target.value }))} placeholder="03xx-xxxxxxx" />
-                </div>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5 min-w-0">
-                  <Label htmlFor="d-cnic">CNIC</Label>
-                  <Input id="d-cnic" value={form.cnic} onChange={(e) => setForm((p) => ({ ...p, cnic: e.target.value }))} placeholder="42101-1234567-1" />
-                </div>
-                <div className="space-y-1.5 min-w-0">
-                  <Label htmlFor="d-license">Licence number</Label>
-                  <Input id="d-license" value={form.licenseNo} onChange={(e) => setForm((p) => ({ ...p, licenseNo: e.target.value }))} />
-                </div>
-              </div>
-            </div>
+      {/* Create / edit. Body scrolls, footer stays out of it — a dialog-level scroll
+          puts the last field under the sticky footer and past the end of the range. */}
+      {open && (
+        <Modal
+          isOpen
+          onClose={() => !busy && setOpen(false)}
+          disableOverlayClose={busy}
+        >
+          <ModalContent
+            maxWidth="max-w-lg"
+            className="flex max-h-[90vh] flex-col"
+          >
+            <form onSubmit={submit} className="flex min-h-0 flex-col">
+              <ModalHeader
+                title={editing ? "Edit driver" : "New driver"}
+                icon={<IdCard className="h-4 w-4 text-primary" />}
+                onClose={() => !busy && setOpen(false)}
+              />
 
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setOpen(false)}>Cancel</Button>
-              <Button type="submit" disabled={busy} className="gap-2">
-                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />} {editing ? "Save" : "Create"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+              <ModalBody className="min-h-0 flex-1 space-y-4 overflow-y-auto">
+                <p className="text-sm text-muted-foreground">
+                  Attach the CNIC and licence scans from the Docs button once
+                  saved.
+                </p>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Input
+                    id="d-name"
+                    label="Name"
+                    value={form.name}
+                    onChange={(e) => set({ name: e.target.value })}
+                    placeholder="e.g. Muhammad Aslam"
+                    disabled={busy}
+                    required
+                  />
+                  <Input
+                    id="d-phone"
+                    type="tel"
+                    label="Phone"
+                    value={form.phone}
+                    onChange={(e) => set({ phone: e.target.value })}
+                    placeholder="03xx-xxxxxxx"
+                    disabled={busy}
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <Input
+                    id="d-cnic"
+                    label="CNIC"
+                    value={form.cnic}
+                    onChange={(e) => set({ cnic: e.target.value })}
+                    placeholder="42101-1234567-1"
+                    disabled={busy}
+                    helperText="Separators are optional, the server stores digits only."
+                  />
+                  <Input
+                    id="d-license"
+                    label="Licence number"
+                    value={form.licenseNo}
+                    onChange={(e) => set({ licenseNo: e.target.value })}
+                    disabled={busy}
+                  />
+                </div>
+              </ModalBody>
+
+              <ModalFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setOpen(false)}
+                  disabled={busy}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={busy}
+                  loading={busy}
+                  loadingText="Saving…"
+                  iconBefore={
+                    editing ? (
+                      <Save className="h-4 w-4" />
+                    ) : (
+                      <Plus className="h-4 w-4" />
+                    )
+                  }
+                >
+                  {editing ? "Save" : "Create"}
+                </Button>
+              </ModalFooter>
+            </form>
+          </ModalContent>
+        </Modal>
+      )}
 
       <DocumentsDialog
         open={!!docsFor}

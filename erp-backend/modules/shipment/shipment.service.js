@@ -10,7 +10,7 @@ import {
   OTC_MILESTONES,
   RECORD_TYPE_LABELS,
 } from "../../utils/composition.js";
-import { buildDocumentFileName, documentGateFor, requiredDocTypesForStep } from "../document/document.service.js";
+import { buildDocumentFileName, documentGateFor } from "../document/document.service.js";
 import { verificationRequiredCodes } from "../document/docTypes.cache.js";
 import { docTypeLabel } from "../document/document.validation.js";
 import { renderQuotationPdf } from "../../utils/quotationPdf.js";
@@ -410,14 +410,18 @@ export const recomputeStatus = async (tx, shipmentId, actorId) => {
  * path — inherits identical protection. Callers only supply the actor context:
  *
  *   actorDeptCode  the actor's department code (RULE-SH-04)
- *   canForce       actor holds `shipment.force_override` (RULE-SH-03)
- *   forceReason    justification, required whenever a force is needed
+ *
+ * The manager override that used to let a step complete ahead of its predecessors is
+ * REMOVED. Sequence is now absolute: the only way past an earlier step is to complete
+ * it, or the designed allowance in OUT_OF_ORDER_PAIRS. The `forced` / `force_reason`
+ * columns stay on OtdStep because rows written while the override existed still carry
+ * them, and erasing that would erase the record of overrides actually performed.
  *
  * On success it marks the step done, recomputes the derived status, closes the
- * step's open task (RULE-TK-02 both directions), audits (incl. forceReason) and
- * emits `shipment.step.completed:<code>`.
+ * step's open task (RULE-TK-02 both directions), audits and emits
+ * `shipment.step.completed:<code>`.
  */
-export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCode, canForce = false, forceReason }) => {
+export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCode }) => {
   const correlationId = crypto.randomUUID();
 
   // RULE-SH-07 — per-shipment advisory lock: simultaneous completions on the
@@ -457,42 +461,22 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
     if (isPermittedOutOfOrder(priorPending[0].stepCode, freshStep.stepCode)) inOrder = true;
   }
 
-  // RULE-QT-09 — a HARD gate cannot be skipped by anyone. A pending earlier step whose
-  // required documents include a type that needs Operations' verification (the signed
-  // Rate Confirmation on Order Lock) is a contract gate, not a paperwork gate: it is
-  // the customer's countersignature on the order, and `shipment.force_override` —
-  // which every ops user holds — must not walk past it. Data-driven off
-  // `document_types.requires_verification`, so it needs no template flag and covers a
-  // future verified type for free.
+  // Out of order is simply refused now that the override is gone. Naming the steps in
+  // the way is what makes the refusal actionable — "earlier steps are pending" sends
+  // somebody back to the stepper to work out which.
   if (!inOrder) {
-    const needsVerification = await verificationRequiredCodes();
-    const hardGates = [];
-    for (const s of priorPending) {
-      const required = await requiredDocTypesForStep(s);
-      if (required.some((t) => needsVerification.has(t))) hardGates.push(s);
-    }
-    if (hardGates.length) {
-      const titles = await tx.otdStepTemplate.findMany({
-        where: { stepCode: { in: hardGates.map((s) => s.stepCode) } },
-        select: { stepCode: true, title: true },
-      });
-      const titleOf = (code) => titles.find((t) => t.stepCode === code)?.title ?? code;
-      throw new AppError(
-        `${hardGates.map((s) => titleOf(s.stepCode)).join(", ")} must be completed first — this gate cannot be overridden (RULE-QT-09)`,
-        403,
-      );
-    }
+    const titles = await tx.otdStepTemplate.findMany({
+      where: { stepCode: { in: priorPending.map((s) => s.stepCode) } },
+      select: { stepCode: true, title: true },
+    });
+    const titleOf = (code) => titles.find((t) => t.stepCode === code)?.title ?? code;
+    throw new AppError(
+      `${priorPending.map((s) => titleOf(s.stepCode)).join(", ")} must be completed first`,
+      409,
+    );
   }
 
-  const forced = !inOrder;
-  if (forced) {
-    if (!canForce) {
-      throw new AppError("Earlier steps are still pending — completing this one out of order needs a manager override", 403);
-    }
-    if (!forceReason || String(forceReason).trim().length < 3) {
-      throw new AppError("A justification is required to complete this step out of order", 422);
-    }
-  }
+
 
   // The three "is the work actually done" gates, reported TOGETHER. They are evaluated
   // as one because a step can fail all of them, and telling someone about the missing
@@ -548,8 +532,6 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
       status: "done",
       completedById: actorId,
       completedAt: new Date(),
-      forced,
-      forceReason: forced ? String(forceReason).trim() : null,
     },
   });
 
@@ -573,7 +555,7 @@ export const completeStepTx = async (tx, { shipment, step, actorId, actorDeptCod
     action: "shipment.step.complete",
     resourceType: "shipment",
     resourceId: live.id,
-    diff: { stepCode: freshStep.stepCode, displayNo: freshStep.displayNo, forced, forceReason: forced ? forceReason : undefined },
+    diff: { stepCode: freshStep.stepCode, displayNo: freshStep.displayNo },
     correlationId,
   });
   await emitEvent(tx, `shipment.step.completed:${freshStep.stepCode}`, {

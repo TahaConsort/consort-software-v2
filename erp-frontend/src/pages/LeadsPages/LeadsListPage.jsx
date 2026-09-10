@@ -1,176 +1,311 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Target, Search, RefreshCw, AlertCircle, TrendingUp, UserCheck } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
+  Target,
+  Search,
+  RefreshCw,
+  TrendingUp,
+  UserCheck,
+} from "lucide-react";
+import {
+  Button,
+  Callout,
+  Card,
+  EmptyState,
+  Input,
   Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  Skeleton,
+  Stat,
+  TBody,
+  TD,
+  TH,
+  THead,
+  TRow,
+  Table,
+} from "@neuctra/ui";
 import { useLeadStore } from "@/store/leadStore";
 import AddLeadModal from "./LeadComponents/AddLeadModal";
 import {
   LeadStatusBadge,
   LeadSourceBadge,
+} from "./LeadComponents/leadBadges";
+import {
   LEAD_STATUS_LABELS,
   LEAD_SOURCE_LABELS,
-} from "./LeadComponents/leadBadges";
+} from "./LeadComponents/leadLabels";
 
-const SkeletonRow = () => (
-  <tr className="border-t animate-pulse">
-    {[...Array(6)].map((_, i) => (
-      <td key={i} className="p-3"><div className="h-4 bg-muted rounded w-3/4" /></td>
-    ))}
-  </tr>
-);
+/** One 36px baseline across the toolbar, as on the queries screen. */
+const ACTION_BTN = "h-9 px-3";
 
-const StatCard = ({ label, value, icon: Icon, loading }) => (
-  <div className="p-4 rounded-xl border shadow-sm">
-    <div className="flex items-center justify-between mb-3">
-      <span className="text-sm text-muted-foreground font-medium">{label}</span>
-      <div className="p-2 rounded-lg bg-primary/10"><Icon className="w-4 h-4 text-primary" /></div>
-    </div>
-    {loading ? <div className="h-8 w-16 bg-muted rounded animate-pulse" /> : <h2 className="text-3xl font-bold">{value}</h2>}
-  </div>
-);
+/**
+ * TH/TD merge their className with plain clsx and hardcode their own padding, so a
+ * padding utility from here is a coin-flip on stylesheet order — `style` is the only
+ * deterministic route.
+ */
+const HEAD_CELL = { padding: "1rem 1.5rem" };
+const CELL = { padding: "1rem 1.5rem" };
+/**
+ * `maxWidth: 0` hands a table-fixed cell its width from the column percentage rather
+ * than from its content, and only clips once overflow is hidden as well.
+ */
+const CLIP = { minWidth: 0, maxWidth: 0, overflow: "hidden" };
+
+const STATUS_OPTIONS = [
+  { value: "all", label: "All statuses" },
+  ...Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => ({
+    value,
+    label,
+  })),
+];
+
+const SOURCE_OPTIONS = [
+  { value: "all", label: "All sources" },
+  ...Object.entries(LEAD_SOURCE_LABELS).map(([value, label]) => ({
+    value,
+    label,
+  })),
+];
 
 /**
  * LeadsListPage — the sales pipeline (CRM_MASTER §5.4).
  * Scope is server-side: a BDO sees own leads, an ASM their team, Management all.
  */
 const LeadsListPage = () => {
-  const { leads, loading, error, filters, setFilter, fetchLeads } = useLeadStore();
+  const { leads, loading, error, filters, setFilter, fetchLeads } =
+    useLeadStore();
   const [search, setSearch] = useState("");
 
-  useEffect(() => { fetchLeads(); }, [fetchLeads]);
+  useEffect(() => {
+    fetchLeads();
+  }, [fetchLeads]);
 
-  const filtered = leads.filter(
-    (l) =>
-      l.referenceNo?.toLowerCase().includes(search.toLowerCase()) ||
-      l.company?.name?.toLowerCase().includes(search.toLowerCase()) ||
-      l.contact?.name?.toLowerCase().includes(search.toLowerCase()),
-  );
+  const q = search.trim().toLowerCase();
+  const filtered = q
+    ? leads.filter((l) =>
+        [l.referenceNo, l.company?.name, l.contact?.name]
+          .filter(Boolean)
+          .some((f) => String(f).toLowerCase().includes(q)),
+      )
+    : leads;
 
-  const openCount = leads.filter((l) => ["new", "contacted", "qualified"].includes(l.status)).length;
+  const openCount = leads.filter((l) =>
+    ["new", "contacted", "qualified"].includes(l.status),
+  ).length;
   const convertedCount = leads.filter((l) => l.status === "converted").length;
+
+  const filtersActive = !!(search || filters.status || filters.source);
 
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2.5 rounded-xl bg-primary/10 text-primary"><Target className="w-5 h-5" /></div>
+          <div className="rounded-xl bg-primary/10 p-2.5 text-primary">
+            <Target className="h-5 w-5" />
+          </div>
           <div>
-            <h1 className="text-xl leading-none font-semibold">Leads</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">Pipeline from first outreach to customer</p>
+            <h1 className="text-xl font-semibold leading-none text-foreground">
+              Leads
+            </h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Pipeline from first outreach to customer
+            </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={fetchLeads} disabled={loading} className="gap-2">
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+          <Button
+            variant="ghost"
+            size="sm"
+            className={ACTION_BTN}
+            onClick={fetchLeads}
+            disabled={loading}
+            iconBefore={
+              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            }
+          >
             Refresh
           </Button>
           <AddLeadModal onSuccess={fetchLeads} />
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <StatCard label="Total Leads" value={leads.length} icon={Target} loading={loading} />
-        <StatCard label="Open Pipeline" value={openCount} icon={TrendingUp} loading={loading} />
-        <StatCard label="Converted" value={convertedCount} icon={UserCheck} loading={loading} />
+      {/* Pipeline at a glance */}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Stat
+          label="Total Leads"
+          value={loading ? <Skeleton width={48} height={28} /> : leads.length}
+          icon={<Target />}
+        />
+        <Stat
+          label="Open Pipeline"
+          value={loading ? <Skeleton width={48} height={28} /> : openCount}
+          icon={<TrendingUp />}
+          description="New, contacted or qualified"
+        />
+        <Stat
+          label="Converted"
+          value={loading ? <Skeleton width={48} height={28} /> : convertedCount}
+          icon={<UserCheck />}
+        />
       </div>
 
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-2 border rounded-xl px-3 h-10 flex-1 min-w-[220px] bg-white dark:bg-zinc-900 shadow-sm focus-within:ring-2 focus-within:ring-primary/30 transition-all">
-          <Search className="w-4 h-4 text-muted-foreground flex-shrink-0" />
-          <Input
-            placeholder="Search ref, company or contact…"
-            className="border-0 shadow-none focus-visible:ring-0 h-full bg-transparent px-0"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
-        </div>
-
-        <Select value={filters.status || "all"} onValueChange={(v) => setFilter("status", v === "all" ? "" : v)} items={[{ value: "all", label: "All statuses" }, ...Object.entries(LEAD_STATUS_LABELS).map(([value, label]) => ({ value, label }))]}>
-          <SelectTrigger className="w-36 h-10"><SelectValue placeholder="Status" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All statuses</SelectItem>
-            {Object.entries(LEAD_STATUS_LABELS).map(([v, l]) => (
-              <SelectItem key={v} value={v}>{l}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <Select value={filters.source || "all"} onValueChange={(v) => setFilter("source", v === "all" ? "" : v)} items={[{ value: "all", label: "All sources" }, ...Object.entries(LEAD_SOURCE_LABELS).map(([value, label]) => ({ value, label }))]}>
-          <SelectTrigger className="w-36 h-10"><SelectValue placeholder="Source" /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All sources</SelectItem>
-            {Object.entries(LEAD_SOURCE_LABELS).map(([v, l]) => (
-              <SelectItem key={v} value={v}>{l}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <Input
+          placeholder="Search ref, company or contact…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          prefixIcon={Search}
+          wrapperClassName="min-w-56 flex-1"
+        />
+        <Select
+          size="md"
+          value={filters.status || "all"}
+          onValueChange={(v) => setFilter("status", v === "all" ? "" : v)}
+          options={STATUS_OPTIONS}
+          placeholder="Status"
+          showCheckIcon={false}
+          className="w-40!"
+          containerClassName="w-40"
+          triggerClassName="h-9"
+        />
+        <Select
+          size="md"
+          value={filters.source || "all"}
+          onValueChange={(v) => setFilter("source", v === "all" ? "" : v)}
+          options={SOURCE_OPTIONS}
+          placeholder="Source"
+          showCheckIcon={false}
+          className="w-40!"
+          containerClassName="w-40"
+          triggerClassName="h-9"
+        />
       </div>
 
-      {/* Error */}
       {error && (
-        <div className="flex items-center gap-3 p-4 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive">
-          <AlertCircle className="w-5 h-5 flex-shrink-0" />
-          <p className="text-sm font-medium flex-1">{error}</p>
-          <Button variant="outline" size="sm" onClick={fetchLeads} className="border-destructive/50 text-destructive hover:bg-destructive/10">Retry</Button>
-        </div>
+        <Callout type="error" title="Couldn't load the leads">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>{error}</span>
+            <Button variant="outline" size="sm" onClick={fetchLeads}>
+              Retry
+            </Button>
+          </div>
+        </Callout>
       )}
 
-      {/* Table */}
-      <div className="border rounded-xl overflow-x-auto bg-white dark:bg-zinc-900 shadow-sm">
-        <table className="w-full text-sm">
-          <thead className="bg-muted/40 text-left border-b">
-            <tr>
-              <th className="p-3 font-semibold text-muted-foreground">Ref</th>
-              <th className="p-3 font-semibold text-muted-foreground">Company</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden md:table-cell">Contact</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden sm:table-cell">Source</th>
-              <th className="p-3 font-semibold text-muted-foreground">Status</th>
-              <th className="p-3 font-semibold text-muted-foreground hidden lg:table-cell">Owner</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && <><SkeletonRow /><SkeletonRow /><SkeletonRow /><SkeletonRow /></>}
+      {/* EmptyState brings its own padding and icon sizing, so the Card only supplies
+          the surface. The empty case replaces the table rather than living inside it:
+          TD carries no `colSpan`, so a spanning "nothing here" row is not expressible. */}
+      {!loading && filtered.length === 0 && !error ? (
+        <Card padding="none">
+          <EmptyState
+            size="lg"
+            icon={<Target />}
+            title={filtersActive ? "No leads match" : "No leads yet"}
+            description={
+              filtersActive
+                ? "Try a different search, or widen the status and source filters."
+                : "Add your first lead to start the pipeline."
+            }
+          />
+        </Card>
+      ) : (
+        /* Table renders its own surface, plus overflow-x-auto from `responsive`.
+           Wrapping it in a Card would nest a second border at a smaller radius. */
+        <div className="w-full min-w-0">
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full min-w-0 table-fixed" bordered dense>
+              <THead>
+                <TRow>
+                  <TH style={{ ...HEAD_CELL, width: "16%" }}>Ref</TH>
+                  <TH style={{ ...HEAD_CELL, width: "26%" }}>Company</TH>
+                  <TH
+                    className="hidden md:table-cell"
+                    style={{ ...HEAD_CELL, width: "20%" }}
+                  >
+                    Contact
+                  </TH>
+                  <TH
+                    className="hidden sm:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    Source
+                  </TH>
+                  <TH style={{ ...HEAD_CELL, width: "14%" }}>Status</TH>
+                  <TH
+                    className="hidden lg:table-cell"
+                    style={{ ...HEAD_CELL, width: "12%" }}
+                  >
+                    Owner
+                  </TH>
+                </TRow>
+              </THead>
 
-            {!loading && filtered.map((lead) => (
-              <tr key={lead.id} className="border-t hover:bg-muted/30 transition-colors">
-                <td className="p-3">
-                  <Link to={`/admin/leads/${lead.id}`} className="font-medium text-primary hover:underline">
-                    {lead.referenceNo}
-                  </Link>
-                </td>
-                <td className="p-3 font-medium">{lead.company?.name ?? "—"}</td>
-                <td className="p-3 text-muted-foreground hidden md:table-cell">{lead.contact?.name ?? "—"}</td>
-                <td className="p-3 hidden sm:table-cell"><LeadSourceBadge source={lead.source} /></td>
-                <td className="p-3"><LeadStatusBadge status={lead.status} /></td>
-                <td className="p-3 text-muted-foreground hidden lg:table-cell">{lead.ownerName}</td>
-              </tr>
-            ))}
+              <TBody>
+                {/* LOADING */}
+                {loading &&
+                  [...Array(4)].map((_, i) => (
+                    <TRow key={i}>
+                      {[...Array(6)].map((_, j) => (
+                        <TD key={j} style={{ ...CELL, ...CLIP }}>
+                          <Skeleton width="70%" height={16} />
+                        </TD>
+                      ))}
+                    </TRow>
+                  ))}
 
-            {!loading && filtered.length === 0 && !error && (
-              <tr>
-                <td colSpan="6" className="p-10 text-center">
-                  <div className="flex flex-col items-center gap-2 text-muted-foreground">
-                    <Target className="w-8 h-8 opacity-30" />
-                    <p className="font-medium">{search || filters.status || filters.source ? "No leads match" : "No leads yet — add your first"}</p>
-                  </div>
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
+                {/* DATA */}
+                {!loading &&
+                  filtered.map((lead) => (
+                    <TRow key={lead.id} className="bg-card!">
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <Link
+                          to={`/admin/leads/${lead.id}`}
+                          className="block truncate font-medium text-primary hover:underline"
+                        >
+                          {lead.referenceNo}
+                        </Link>
+                      </TD>
+
+                      <TD
+                        className="truncate font-medium"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {lead.company?.name ?? "Not set"}
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground md:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {lead.contact?.name ?? "Not set"}
+                      </TD>
+
+                      <TD
+                        className="hidden sm:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        <LeadSourceBadge source={lead.source} />
+                      </TD>
+
+                      <TD style={{ ...CELL, ...CLIP }}>
+                        <LeadStatusBadge status={lead.status} />
+                      </TD>
+
+                      <TD
+                        className="hidden truncate text-muted-foreground lg:table-cell"
+                        style={{ ...CELL, ...CLIP }}
+                      >
+                        {lead.ownerName}
+                      </TD>
+                    </TRow>
+                  ))}
+              </TBody>
+            </Table>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
